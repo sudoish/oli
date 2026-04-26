@@ -2,7 +2,7 @@ use async_openai::{Client, config::OpenAIConfig};
 use clap::Parser;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::{env, fs, process};
+use std::{env, fs, path::Path, process};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -51,22 +51,44 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::with_config(config);
 
-    let tools = vec![Tool::Function {
-        function: FunctionDef {
-            name: "Read".to_string(),
-            description: "Read and return the contents of a file".to_string(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "The path to the file to read"
-                    }
-                },
-                "required": ["file_path"]
-            }),
+    let tools = vec![
+        Tool::Function {
+            function: FunctionDef {
+                name: "Read".to_string(),
+                description: "Read and return the contents of a file".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "The path to the file to read"
+                        }
+                    },
+                    "required": ["file_path"]
+                }),
+            },
         },
-    }];
+        Tool::Function {
+            function: FunctionDef {
+                name: "Write".to_string(),
+                description: "Write content to a file. Creates the file if it does not exist, overwrites it if it does.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "The path of the file to write to"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "The content to write to the file"
+                        }
+                    },
+                    "required": ["file_path", "content"]
+                }),
+            },
+        },
+    ];
 
     let mut messages: Vec<Value> = vec![json!({
         "role": "user",
@@ -123,6 +145,23 @@ fn execute_tool(name: &str, arguments: &str) -> String {
                 Err(e) => format!("Error reading {}: {}", file_path, e),
             }
         }
+        "Write" => {
+            let file_path = args["file_path"].as_str().unwrap_or("");
+            let content = args["content"].as_str().unwrap_or("");
+            match write_file(file_path, content) {
+                Ok(()) => format!("Successfully wrote to {}", file_path),
+                Err(e) => format!("Error writing {}: {}", file_path, e),
+            }
+        }
         other => format!("Error: unsupported tool '{}'", other),
     }
+}
+
+fn write_file(file_path: &str, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = Path::new(file_path).parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    fs::write(file_path, content)
 }
