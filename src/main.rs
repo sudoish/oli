@@ -12,16 +12,10 @@ struct Args {
 }
 
 #[derive(Serialize)]
-struct ChatRequest {
-    model: String,
-    messages: Vec<Message>,
-    tools: Vec<Tool>,
-}
-
-#[derive(Serialize)]
-struct Message {
-    role: String,
-    content: String,
+struct ChatRequest<'a> {
+    model: &'a str,
+    messages: &'a [Value],
+    tools: &'a [Tool],
 }
 
 #[derive(Serialize)]
@@ -36,6 +30,8 @@ struct FunctionDef {
     description: String,
     parameters: Value,
 }
+
+const MODEL: &str = "anthropic/claude-haiku-4.5";
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -55,53 +51,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let client = Client::with_config(config);
 
-    let request = ChatRequest {
-        model: "anthropic/claude-haiku-4.5".to_string(),
-        messages: vec![Message {
-            role: "user".to_string(),
-            content: args.prompt,
-        }],
-        tools: vec![Tool::Function {
-            function: FunctionDef {
-                name: "Read".to_string(),
-                description: "Read and return the contents of a file".to_string(),
-                parameters: json!({
-                    "type": "object",
-                    "properties": {
-                        "file_path": {
-                            "type": "string",
-                            "description": "The path to the file to read"
-                        }
-                    },
-                    "required": ["file_path"]
-                }),
-            },
-        }],
+    let tools = vec![Tool::Function {
+        function: FunctionDef {
+            name: "Read".to_string(),
+            description: "Read and return the contents of a file".to_string(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": "The path to the file to read"
+                    }
+                },
+                "required": ["file_path"]
+            }),
+        },
+    }];
+
+    let mut messages: Vec<Value> = vec![json!({
+        "role": "user",
+        "content": args.prompt,
+    })];
+
+    loop {
+        let request = ChatRequest {
+            model: MODEL,
+            messages: &messages,
+            tools: &tools,
+        };
+
+        let response: Value = client.chat().create_byot(&request).await?;
+        let message = response["choices"][0]["message"].clone();
+        messages.push(message.clone());
+
+        let tool_calls = message["tool_calls"].as_array();
+        let has_tool_calls = tool_calls.is_some_and(|c| !c.is_empty());
+
+        if !has_tool_calls {
+            if let Some(content) = message["content"].as_str() {
+                println!("{}", content);
+            }
+            return Ok(());
+        }
+
+        for tool_call in tool_calls.unwrap() {
+            let id = tool_call["id"].as_str().unwrap_or("");
+            let name = tool_call["function"]["name"].as_str().unwrap_or("");
+            let arguments = tool_call["function"]["arguments"].as_str().unwrap_or("{}");
+            let result = execute_tool(name, arguments);
+
+            messages.push(json!({
+                "role": "tool",
+                "tool_call_id": id,
+                "content": result,
+            }));
+        }
+    }
+}
+
+fn execute_tool(name: &str, arguments: &str) -> String {
+    let args: Value = match serde_json::from_str(arguments) {
+        Ok(v) => v,
+        Err(e) => return format!("Error: invalid arguments JSON: {}", e),
     };
 
-    let response: Value = client.chat().create_byot(&request).await?;
-
-    let message = &response["choices"][0]["message"];
-
-    if let Some(tool_call) = message["tool_calls"].as_array().and_then(|c| c.first()) {
-        let name = tool_call["function"]["name"].as_str().unwrap_or("");
-        let arguments = tool_call["function"]["arguments"].as_str().unwrap_or("{}");
-        let args: Value = serde_json::from_str(arguments)?;
-
-        match name {
-            "Read" => {
-                let file_path = args["file_path"].as_str().unwrap_or("");
-                let contents = fs::read_to_string(file_path)?;
-                print!("{}", contents);
-            }
-            other => {
-                eprintln!("Unsupported tool call: {}", other);
-                process::exit(1);
+    match name {
+        "Read" => {
+            let file_path = args["file_path"].as_str().unwrap_or("");
+            match fs::read_to_string(file_path) {
+                Ok(contents) => contents,
+                Err(e) => format!("Error reading {}: {}", file_path, e),
             }
         }
-    } else if let Some(content) = message["content"].as_str() {
-        println!("{}", content);
+        other => format!("Error: unsupported tool '{}'", other),
     }
-
-    Ok(())
 }
