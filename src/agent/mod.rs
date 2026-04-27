@@ -1,7 +1,7 @@
 use serde_json::{Value, json};
 
 use crate::error::Result;
-use crate::providers::{ChatRequest, Provider};
+use crate::providers::{ChatRequest, ContentSink, Provider};
 use crate::tools::{Registry, ToolContext};
 
 pub mod context;
@@ -11,6 +11,9 @@ pub struct Agent {
     pub tools: Registry,
     pub model: String,
     pub system_prompt: Option<String>,
+    /// Conversation history accumulated across turns. Cleared by `clear()`.
+    pub messages: Vec<Value>,
+    ctx: ToolContext,
 }
 
 impl Agent {
@@ -20,6 +23,8 @@ impl Agent {
             tools,
             model,
             system_prompt: None,
+            messages: Vec::new(),
+            ctx: ToolContext::new(),
         }
     }
 
@@ -29,25 +34,48 @@ impl Agent {
         self
     }
 
-    /// Run the agent loop with a single user prompt. Returns the assistant's
-    /// final text content once it stops requesting tool calls.
-    pub async fn run(&self, prompt: &str) -> Result<String> {
-        let ctx = ToolContext::new();
-        let mut messages: Vec<Value> = Vec::new();
-        if let Some(sys) = &self.system_prompt {
-            messages.push(json!({ "role": "system", "content": sys }));
+    /// Reset session state — drops conversation history and the per-tool
+    /// context (so `Edit`'s read-first invariant resets too). System prompt
+    /// is preserved and re-injected on the next turn.
+    pub fn clear(&mut self) {
+        self.messages.clear();
+        self.ctx = ToolContext::new();
+    }
+
+    /// Append `prompt` as a user turn, run the loop until the assistant
+    /// produces a response without tool calls, and return that final content.
+    /// Non-streaming path; uses a no-op sink under the hood.
+    pub async fn run(&mut self, prompt: &str) -> Result<String> {
+        let mut nop = |_: &str| {};
+        self.run_streaming(prompt, &mut nop).await
+    }
+
+    /// Same as `run`, but emits assistant content tokens through `sink` as
+    /// the provider streams them. Tool-call rounds are silent — only model
+    /// content is forwarded.
+    pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<String>
+    where
+        F: FnMut(&str) + Send,
+    {
+        if self.messages.is_empty() {
+            if let Some(sys) = &self.system_prompt {
+                self.messages
+                    .push(json!({ "role": "system", "content": sys }));
+            }
         }
-        messages.push(json!({ "role": "user", "content": prompt }));
+        self.messages
+            .push(json!({ "role": "user", "content": prompt }));
 
         loop {
             let req = ChatRequest {
                 model: self.model.clone(),
-                messages: messages.clone(),
+                messages: self.messages.clone(),
                 tools: self.tools.openai_schemas(),
             };
 
-            let resp = self.provider.chat(req).await?;
-            messages.push(resp.message.clone());
+            let sink_dyn: ContentSink<'_> = sink;
+            let resp = self.provider.chat_stream(req, sink_dyn).await?;
+            self.messages.push(resp.message.clone());
 
             let tool_calls = resp
                 .message
@@ -80,12 +108,12 @@ impl Agent {
                     .unwrap_or("{}");
                 let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
 
-                let result = match self.tools.dispatch(name, args, &ctx).await {
+                let result = match self.tools.dispatch(name, args, &self.ctx).await {
                     Ok(s) => s,
                     Err(e) => format!("Error: {}", e),
                 };
 
-                messages.push(json!({
+                self.messages.push(json!({
                     "role": "tool",
                     "tool_call_id": id,
                     "content": result,
@@ -98,6 +126,7 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::ChatResponse;
     use crate::providers::fake::FakeProvider;
     use crate::tools::Tool;
     use async_trait::async_trait;
@@ -150,7 +179,7 @@ mod tests {
     #[tokio::test]
     async fn returns_assistant_content_when_no_tool_calls() {
         let provider = FakeProvider::new(vec![assistant_text("done")]);
-        let agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
         let out = agent.run("hi").await.unwrap();
         assert_eq!(out, "done");
     }
@@ -167,7 +196,7 @@ mod tests {
             out: "tool-output",
         });
 
-        let agent = Agent::new(Box::new(provider), tools, "m".into());
+        let mut agent = Agent::new(Box::new(provider), tools, "m".into());
         let out = agent.run("hi").await.unwrap();
         assert_eq!(out, "after-tool");
     }
@@ -187,12 +216,11 @@ mod tests {
             out: "tool-output",
         });
 
-        let agent = Agent {
-            provider: Box::new(ScriptedProviderHandle(provider_ref.clone())),
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(provider_ref.clone())),
             tools,
-            model: "m".into(),
-            system_prompt: None,
-        };
+            "m".into(),
+        );
         agent.run("hi").await.unwrap();
 
         let seen = provider_ref.requests();
@@ -214,12 +242,11 @@ mod tests {
         let raw = std::sync::Arc::new(provider);
         let provider_ref = raw.clone();
 
-        let agent = Agent {
-            provider: Box::new(ScriptedProviderHandle(provider_ref.clone())),
-            tools: Registry::new(),
-            model: "m".into(),
-            system_prompt: None,
-        };
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(provider_ref.clone())),
+            Registry::new(),
+            "m".into(),
+        );
         let out = agent.run("hi").await.unwrap();
         assert_eq!(out, "recovered");
 
@@ -238,12 +265,11 @@ mod tests {
     async fn system_prompt_is_prepended_when_set() {
         let provider = FakeProvider::new(vec![assistant_text("ok")]);
         let raw = std::sync::Arc::new(provider);
-        let agent = Agent {
-            provider: Box::new(ScriptedProviderHandle(raw.clone())),
-            tools: Registry::new(),
-            model: "m".into(),
-            system_prompt: None,
-        }
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(raw.clone())),
+            Registry::new(),
+            "m".into(),
+        )
         .with_system_prompt("you are a coding agent");
 
         agent.run("hi").await.unwrap();
@@ -258,17 +284,79 @@ mod tests {
     async fn no_system_message_when_unset() {
         let provider = FakeProvider::new(vec![assistant_text("ok")]);
         let raw = std::sync::Arc::new(provider);
-        let agent = Agent {
-            provider: Box::new(ScriptedProviderHandle(raw.clone())),
-            tools: Registry::new(),
-            model: "m".into(),
-            system_prompt: None,
-        };
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(raw.clone())),
+            Registry::new(),
+            "m".into(),
+        );
 
         agent.run("hi").await.unwrap();
         let seen = raw.requests();
         let msgs = &seen[0].messages;
         assert_eq!(msgs[0]["role"], "user");
+    }
+
+    #[tokio::test]
+    async fn run_streaming_emits_content_via_sink() {
+        let provider = FakeProvider::new(vec![assistant_text("hello world")]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
+        let mut chunks: Vec<String> = Vec::new();
+        let mut sink = |s: &str| chunks.push(s.to_string());
+        let out = agent.run_streaming("hi", &mut sink).await.unwrap();
+        assert_eq!(out, "hello world");
+        // FakeProvider splits at the midpoint char boundary into two chunks.
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks.concat(), "hello world");
+    }
+
+    #[tokio::test]
+    async fn second_turn_keeps_history_from_first_turn() {
+        let provider = FakeProvider::new(vec![assistant_text("first"), assistant_text("second")]);
+        let raw = std::sync::Arc::new(provider);
+
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(raw.clone())),
+            Registry::new(),
+            "m".into(),
+        )
+        .with_system_prompt("sys");
+
+        agent.run("a").await.unwrap();
+        agent.run("b").await.unwrap();
+
+        let seen = raw.requests();
+        // Second turn's request must contain: system, user(a), assistant(first), user(b)
+        let msgs = &seen[1].messages;
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[1]["content"], "a");
+        assert_eq!(msgs[2]["role"], "assistant");
+        assert_eq!(msgs[2]["content"], "first");
+        assert_eq!(msgs[3]["content"], "b");
+    }
+
+    #[tokio::test]
+    async fn clear_drops_history_but_keeps_system_prompt() {
+        let provider = FakeProvider::new(vec![assistant_text("first"), assistant_text("second")]);
+        let raw = std::sync::Arc::new(provider);
+
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(raw.clone())),
+            Registry::new(),
+            "m".into(),
+        )
+        .with_system_prompt("sys");
+
+        agent.run("a").await.unwrap();
+        agent.clear();
+        agent.run("b").await.unwrap();
+
+        let seen = raw.requests();
+        // After clear, second turn looks like a fresh session: system + user(b).
+        let msgs = &seen[1].messages;
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[1]["content"], "b");
     }
 
     /// Newtype around `Arc<FakeProvider>` so we can both feed the agent and
@@ -277,8 +365,16 @@ mod tests {
 
     #[async_trait]
     impl Provider for ScriptedProviderHandle {
-        async fn chat(&self, req: ChatRequest) -> Result<crate::providers::ChatResponse> {
+        async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
             self.0.chat(req).await
+        }
+
+        async fn chat_stream(
+            &self,
+            req: ChatRequest,
+            sink: ContentSink<'_>,
+        ) -> Result<ChatResponse> {
+            self.0.chat_stream(req, sink).await
         }
     }
 }

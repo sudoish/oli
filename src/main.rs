@@ -2,6 +2,7 @@ mod agent;
 mod config;
 mod error;
 mod providers;
+mod repl;
 mod tools;
 
 use clap::Parser;
@@ -19,8 +20,9 @@ use crate::tools::{
 #[derive(Parser)]
 #[command(author, version, about)]
 struct Args {
+    /// Single-shot prompt. If omitted, the binary enters an interactive REPL.
     #[arg(short = 'p', long)]
-    prompt: String,
+    prompt: Option<String>,
 }
 
 #[tokio::main]
@@ -38,7 +40,7 @@ async fn run(args: Args) -> Result<()> {
     let pcfg = cfg.provider(&provider_name)?;
     if pcfg.kind != "openai-compat" {
         return Err(AgentError::Config(format!(
-            "unsupported provider kind '{}' for '{}' (Phase 0 supports 'openai-compat' only)",
+            "unsupported provider kind '{}' for '{}' (Phase 1 supports 'openai-compat' only)",
             pcfg.kind, provider_name
         )));
     }
@@ -56,10 +58,18 @@ async fn run(args: Args) -> Result<()> {
     tools.register(Glob);
 
     let system_prompt = SystemPromptBuilder::from_env().build().await;
-    let agent = Agent::new(provider, tools, model).with_system_prompt(system_prompt);
-    let output = agent.run(&args.prompt).await?;
-    if !output.is_empty() {
-        println!("{}", output);
+    let mut agent = Agent::new(provider, tools, model).with_system_prompt(system_prompt);
+
+    match args.prompt {
+        Some(p) => {
+            // One-shot: keep the existing scripted-friendly behavior — print
+            // the final assistant content once, no streaming.
+            let output = agent.run(&p).await?;
+            if !output.is_empty() {
+                println!("{}", output);
+            }
+            Ok(())
+        }
+        None => repl::run(agent).await,
     }
-    Ok(())
 }
