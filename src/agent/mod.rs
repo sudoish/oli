@@ -4,10 +4,13 @@ use crate::error::Result;
 use crate::providers::{ChatRequest, Provider};
 use crate::tools::{Registry, ToolContext};
 
+pub mod context;
+
 pub struct Agent {
     pub provider: Box<dyn Provider>,
     pub tools: Registry,
     pub model: String,
+    pub system_prompt: Option<String>,
 }
 
 impl Agent {
@@ -16,17 +19,25 @@ impl Agent {
             provider,
             tools,
             model,
+            system_prompt: None,
         }
+    }
+
+    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let s = prompt.into();
+        self.system_prompt = if s.is_empty() { None } else { Some(s) };
+        self
     }
 
     /// Run the agent loop with a single user prompt. Returns the assistant's
     /// final text content once it stops requesting tool calls.
     pub async fn run(&self, prompt: &str) -> Result<String> {
         let ctx = ToolContext::new();
-        let mut messages: Vec<Value> = vec![json!({
-            "role": "user",
-            "content": prompt,
-        })];
+        let mut messages: Vec<Value> = Vec::new();
+        if let Some(sys) = &self.system_prompt {
+            messages.push(json!({ "role": "system", "content": sys }));
+        }
+        messages.push(json!({ "role": "user", "content": prompt }));
 
         loop {
             let req = ChatRequest {
@@ -180,6 +191,7 @@ mod tests {
             provider: Box::new(ScriptedProviderHandle(provider_ref.clone())),
             tools,
             model: "m".into(),
+            system_prompt: None,
         };
         agent.run("hi").await.unwrap();
 
@@ -206,6 +218,7 @@ mod tests {
             provider: Box::new(ScriptedProviderHandle(provider_ref.clone())),
             tools: Registry::new(),
             model: "m".into(),
+            system_prompt: None,
         };
         let out = agent.run("hi").await.unwrap();
         assert_eq!(out, "recovered");
@@ -219,6 +232,43 @@ mod tests {
                 .unwrap()
                 .contains("unknown tool: DoesNotExist")
         );
+    }
+
+    #[tokio::test]
+    async fn system_prompt_is_prepended_when_set() {
+        let provider = FakeProvider::new(vec![assistant_text("ok")]);
+        let raw = std::sync::Arc::new(provider);
+        let agent = Agent {
+            provider: Box::new(ScriptedProviderHandle(raw.clone())),
+            tools: Registry::new(),
+            model: "m".into(),
+            system_prompt: None,
+        }
+        .with_system_prompt("you are a coding agent");
+
+        agent.run("hi").await.unwrap();
+        let seen = raw.requests();
+        let msgs = &seen[0].messages;
+        assert_eq!(msgs[0]["role"], "system");
+        assert_eq!(msgs[0]["content"], "you are a coding agent");
+        assert_eq!(msgs[1]["role"], "user");
+    }
+
+    #[tokio::test]
+    async fn no_system_message_when_unset() {
+        let provider = FakeProvider::new(vec![assistant_text("ok")]);
+        let raw = std::sync::Arc::new(provider);
+        let agent = Agent {
+            provider: Box::new(ScriptedProviderHandle(raw.clone())),
+            tools: Registry::new(),
+            model: "m".into(),
+            system_prompt: None,
+        };
+
+        agent.run("hi").await.unwrap();
+        let seen = raw.requests();
+        let msgs = &seen[0].messages;
+        assert_eq!(msgs[0]["role"], "user");
     }
 
     /// Newtype around `Arc<FakeProvider>` so we can both feed the agent and

@@ -8,6 +8,7 @@ use clap::Parser;
 use std::process;
 
 use crate::agent::Agent;
+use crate::agent::context::SystemPromptBuilder;
 use crate::config::Config;
 use crate::error::{AgentError, Result};
 use crate::providers::openai_compat::OpenAICompatProvider;
@@ -54,7 +55,8 @@ async fn run(args: Args) -> Result<()> {
     tools.register(Grep);
     tools.register(Glob);
 
-    let agent = Agent::new(provider, tools, model);
+    let system_prompt = SystemPromptBuilder::from_env().build().await;
+    let agent = Agent::new(provider, tools, model).with_system_prompt(system_prompt);
     let output = agent.run(&args.prompt).await?;
     if !output.is_empty() {
         println!("{}", output);
