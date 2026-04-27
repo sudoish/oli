@@ -2,7 +2,7 @@ use async_openai::{Client, config::OpenAIConfig};
 use clap::Parser;
 use serde::Serialize;
 use serde_json::{Value, json};
-use std::{env, fs, path::Path, process};
+use std::{env, fs, path::Path, process, process::Command};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -88,6 +88,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }),
             },
         },
+        Tool::Function {
+            function: FunctionDef {
+                name: "Bash".to_string(),
+                description: "Execute a shell command and return its combined stdout and stderr.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "The shell command to execute"
+                        }
+                    },
+                    "required": ["command"]
+                }),
+            },
+        },
     ];
 
     let mut messages: Vec<Value> = vec![json!({
@@ -153,8 +169,41 @@ fn execute_tool(name: &str, arguments: &str) -> String {
                 Err(e) => format!("Error writing {}: {}", file_path, e),
             }
         }
+        "Bash" => {
+            let command = args["command"].as_str().unwrap_or("");
+            run_bash(command)
+        }
         other => format!("Error: unsupported tool '{}'", other),
     }
+}
+
+fn run_bash(command: &str) -> String {
+    let output = match Command::new("sh").arg("-c").arg(command).output() {
+        Ok(o) => o,
+        Err(e) => return format!("Error executing command: {}", e),
+    };
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let mut result = String::new();
+    result.push_str(&stdout);
+    if !stderr.is_empty() {
+        if !result.is_empty() && !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(&stderr);
+    }
+    if !output.status.success() {
+        if !result.is_empty() && !result.ends_with('\n') {
+            result.push('\n');
+        }
+        result.push_str(&format!(
+            "Command exited with status: {}",
+            output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "unknown".to_string())
+        ));
+    }
+    result
 }
 
 fn write_file(file_path: &str, content: &str) -> std::io::Result<()> {
