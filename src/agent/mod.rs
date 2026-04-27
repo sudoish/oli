@@ -2,7 +2,7 @@ use serde_json::{Value, json};
 
 use crate::error::Result;
 use crate::providers::{ChatRequest, Provider};
-use crate::tools::Registry;
+use crate::tools::{Registry, ToolContext};
 
 pub struct Agent {
     pub provider: Box<dyn Provider>,
@@ -22,6 +22,7 @@ impl Agent {
     /// Run the agent loop with a single user prompt. Returns the assistant's
     /// final text content once it stops requesting tool calls.
     pub async fn run(&self, prompt: &str) -> Result<String> {
+        let ctx = ToolContext::new();
         let mut messages: Vec<Value> = vec![json!({
             "role": "user",
             "content": prompt,
@@ -68,7 +69,7 @@ impl Agent {
                     .unwrap_or("{}");
                 let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
 
-                let result = match self.tools.dispatch(name, args).await {
+                let result = match self.tools.dispatch(name, args, &ctx).await {
                     Ok(s) => s,
                     Err(e) => format!("Error: {}", e),
                 };
@@ -130,7 +131,7 @@ mod tests {
         fn parameters(&self) -> Value {
             json!({"type": "object", "properties": {}})
         }
-        async fn run(&self, _args: Value) -> Result<String> {
+        async fn run(&self, _args: Value, _ctx: &ToolContext) -> Result<String> {
             Ok(self.out.to_string())
         }
     }

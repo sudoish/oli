@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::path::Path;
 
 use crate::error::{Result, ToolError};
-use crate::tools::Tool;
+use crate::tools::{Tool, ToolContext};
 
 pub struct Write;
 
@@ -34,7 +34,7 @@ impl Tool for Write {
         })
     }
 
-    async fn run(&self, args: Value) -> Result<String> {
+    async fn run(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
         let file_path = args["file_path"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments {
@@ -75,8 +75,9 @@ mod tests {
         let path = dir.path().join("hello.txt");
         let path_str = path.to_str().unwrap().to_string();
 
+        let ctx = ToolContext::new();
         let out = Write
-            .run(json!({ "file_path": path_str, "content": "yo" }))
+            .run(json!({ "file_path": path_str, "content": "yo" }), &ctx)
             .await
             .unwrap();
         assert!(out.starts_with("Successfully wrote to"));
@@ -89,8 +90,12 @@ mod tests {
         let nested = dir.path().join("a/b/c.txt");
         let nested_str = nested.to_str().unwrap().to_string();
 
+        let ctx = ToolContext::new();
         Write
-            .run(json!({ "file_path": nested_str, "content": "nested" }))
+            .run(
+                json!({ "file_path": nested_str, "content": "nested" }),
+                &ctx,
+            )
             .await
             .unwrap();
         assert_eq!(tokio::fs::read_to_string(&nested).await.unwrap(), "nested");
@@ -98,8 +103,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_arg_is_invalid_args_error() {
+        let ctx = ToolContext::new();
         let err = Write
-            .run(json!({ "file_path": "/tmp/x" }))
+            .run(json!({ "file_path": "/tmp/x" }), &ctx)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("invalid arguments for Write"));

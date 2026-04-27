@@ -5,15 +5,22 @@ use std::collections::HashMap;
 use crate::error::{Result, ToolError};
 
 pub mod bash;
+pub mod context;
+pub mod edit;
+pub mod glob;
+pub mod grep;
 pub mod read;
+pub mod util;
 pub mod write;
+
+pub use context::ToolContext;
 
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn name(&self) -> &str;
     fn description(&self) -> &str;
     fn parameters(&self) -> Value;
-    async fn run(&self, args: Value) -> Result<String>;
+    async fn run(&self, args: Value, ctx: &ToolContext) -> Result<String>;
 }
 
 #[derive(Default)]
@@ -39,11 +46,11 @@ impl Registry {
         self.tools.get(name).map(|b| b.as_ref())
     }
 
-    pub async fn dispatch(&self, name: &str, args: Value) -> Result<String> {
+    pub async fn dispatch(&self, name: &str, args: Value, ctx: &ToolContext) -> Result<String> {
         let tool = self
             .get(name)
             .ok_or_else(|| ToolError::Unknown(name.to_string()))?;
-        tool.run(args).await
+        tool.run(args, ctx).await
     }
 
     /// OpenAI-compatible tool schemas: `[{type:"function", function:{name,description,parameters}}, ...]`
@@ -86,7 +93,7 @@ mod tests {
                 "required": ["text"]
             })
         }
-        async fn run(&self, args: Value) -> Result<String> {
+        async fn run(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
             Ok(args["text"].as_str().unwrap_or("").to_string())
         }
     }
@@ -94,7 +101,8 @@ mod tests {
     #[tokio::test]
     async fn dispatch_unknown_returns_unknown_tool_error() {
         let reg = Registry::new();
-        let err = reg.dispatch("Nope", json!({})).await.unwrap_err();
+        let ctx = ToolContext::new();
+        let err = reg.dispatch("Nope", json!({}), &ctx).await.unwrap_err();
         assert!(err.to_string().contains("unknown tool: Nope"));
     }
 
@@ -102,8 +110,9 @@ mod tests {
     async fn dispatch_runs_registered_tool() {
         let mut reg = Registry::new();
         reg.register(Echo);
+        let ctx = ToolContext::new();
         let out = reg
-            .dispatch("Echo", json!({ "text": "hello" }))
+            .dispatch("Echo", json!({ "text": "hello" }), &ctx)
             .await
             .unwrap();
         assert_eq!(out, "hello");

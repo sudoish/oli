@@ -11,7 +11,9 @@ use crate::agent::Agent;
 use crate::config::Config;
 use crate::error::{AgentError, Result};
 use crate::providers::openai_compat::OpenAICompatProvider;
-use crate::tools::{Registry, bash::Bash, read::Read, write::Write};
+use crate::tools::{
+    Registry, bash::Bash, edit::Edit, glob::Glob, grep::Grep, read::Read, write::Write,
+};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -47,7 +49,10 @@ async fn run(args: Args) -> Result<()> {
     let mut tools = Registry::new();
     tools.register(Read);
     tools.register(Write);
+    tools.register(Edit);
     tools.register(Bash);
+    tools.register(Grep);
+    tools.register(Glob);
 
     let agent = Agent::new(provider, tools, model);
     let output = agent.run(&args.prompt).await?;
