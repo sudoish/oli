@@ -56,6 +56,7 @@
 //! and the runtime suspends the Lua coroutine until the underlying
 //! tool call resolves.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -67,6 +68,7 @@ use tokio::sync::Mutex;
 use crate::error::{AgentError, Result};
 use crate::hooks::{Hook, HookPayload};
 use crate::repl::slash::{SlashCommand, SlashOutcome};
+use crate::tools::task::SubagentSpawner;
 use crate::tools::{Tool, ToolContext};
 
 /// Result of loading the plugin discovery dirs. The harness pulls
@@ -91,8 +93,8 @@ pub struct PluginManifest {
 }
 
 /// Shared state passed into every plugin entry point as `ctx`. Wraps a
-/// handle to the harness's tool registry and a logging sink. New host
-/// methods land here as the surface grows.
+/// handle to the harness's tool registry, the per-plugin state bag, and
+/// (optionally) the SubagentSpawner that powers `ctx:prompt`.
 #[derive(Clone)]
 pub struct HostShared {
     /// Snapshot of the harness's tool set, taken at plugin-load time.
@@ -107,15 +109,26 @@ pub struct HostShared {
     pub plugin_ctx: ToolContext,
     /// Plugin id (file stem). Goes into `[plugin]` log prefixes.
     pub plugin_id: String,
+    /// Per-plugin per-session key/value store backing `ctx:get_state`
+    /// and `ctx:set_state`. Each plugin gets its own bag at load time
+    /// (HostShared is cloned per plugin); state survives across calls
+    /// within the same session and resets at process exit.
+    pub state: Arc<Mutex<HashMap<String, Value>>>,
+    /// Subagent spawner backing `ctx:prompt`. None when the loader is
+    /// invoked without a parent harness (tests).
+    pub spawner: Option<Arc<dyn SubagentSpawner>>,
 }
 
 /// Discover and load every plugin from the standard set of dirs.
 /// Failures are reported as `eprintln!` lines and the affected plugin
 /// is skipped — a misbehaving plugin never crashes the session.
-pub async fn load_all(tools_for_host: Arc<Mutex<crate::tools::Registry>>) -> LoadedPlugins {
+pub async fn load_all(
+    tools_for_host: Arc<Mutex<crate::tools::Registry>>,
+    spawner: Option<Arc<dyn SubagentSpawner>>,
+) -> LoadedPlugins {
     let mut out = LoadedPlugins::default();
     for dir in default_plugin_dirs() {
-        load_dir(&dir, tools_for_host.clone(), &mut out).await;
+        load_dir(&dir, tools_for_host.clone(), spawner.clone(), &mut out).await;
     }
     out
 }
@@ -124,6 +137,7 @@ pub async fn load_all(tools_for_host: Arc<Mutex<crate::tools::Registry>>) -> Loa
 pub async fn load_dir(
     dir: &Path,
     tools_for_host: Arc<Mutex<crate::tools::Registry>>,
+    spawner: Option<Arc<dyn SubagentSpawner>>,
     out: &mut LoadedPlugins,
 ) {
     let read = match std::fs::read_dir(dir) {
@@ -137,7 +151,7 @@ pub async fn load_dir(
         .collect();
     paths.sort();
     for path in paths {
-        match load_one(&path, tools_for_host.clone()).await {
+        match load_one(&path, tools_for_host.clone(), spawner.clone()).await {
             Ok(loaded) => {
                 out.manifest.push(loaded.manifest);
                 out.tools.extend(loaded.tools);
@@ -161,6 +175,7 @@ struct OnePlugin {
 async fn load_one(
     path: &Path,
     tools_for_host: Arc<Mutex<crate::tools::Registry>>,
+    spawner: Option<Arc<dyn SubagentSpawner>>,
 ) -> Result<OnePlugin> {
     let source = tokio::fs::read_to_string(path).await?;
     let plugin_id = path
@@ -182,6 +197,8 @@ async fn load_one(
         tools: tools_for_host,
         plugin_ctx: ToolContext::new(),
         plugin_id: plugin_id.clone(),
+        state: Arc::new(Mutex::new(HashMap::new())),
+        spawner,
     };
 
     let lua = Arc::new(lua);
@@ -331,11 +348,10 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
         ctx.set("log", log)?;
     }
 
-    // ctx:tool(name, args) — async dispatch through the harness's
+    // ctx:tool(name, args) — async dispatch through the harness's tool
     // registry. Goes through the registry but NOT through the agent's
-    // policy engine for now (plugins are user-trusted code; if the
-    // user's policy needs to gate plugin tool calls, that's a later
-    // refinement).
+    // policy engine for now (plugins are user-trusted code; if the user's
+    // policy needs to gate plugin tool calls, that's a later refinement).
     {
         let host_clone = host.clone();
         let tool_fn = lua.create_async_function(
@@ -346,25 +362,144 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
                         Some(v) => lua.from_value(v)?,
                         None => json!({}),
                     };
-                    let registry = host.tools.lock().await;
-                    let tool = registry.get(&name).ok_or_else(|| {
-                        mlua::Error::external(AgentError::Provider(format!(
-                            "ctx:tool: unknown tool {}",
-                            name
-                        )))
-                    })?;
-                    let result = tool
-                        .run(args_json, &host.plugin_ctx)
-                        .await
-                        .map_err(mlua::Error::external)?;
-                    Ok(result)
+                    dispatch_named(&host, &name, args_json).await
                 }
             },
         )?;
         ctx.set("tool", tool_fn)?;
     }
 
+    // ctx:read_file(path) — sugar for ctx:tool("Read", ...).
+    {
+        let host_clone = host.clone();
+        let f = lua.create_async_function(move |_lua, (_self, path): (Table, String)| {
+            let host = host_clone.clone();
+            async move { dispatch_named(&host, "Read", json!({"file_path": path})).await }
+        })?;
+        ctx.set("read_file", f)?;
+    }
+
+    // ctx:write_file(path, content)
+    {
+        let host_clone = host.clone();
+        let f = lua.create_async_function(
+            move |_lua, (_self, path, content): (Table, String, String)| {
+                let host = host_clone.clone();
+                async move {
+                    dispatch_named(
+                        &host,
+                        "Write",
+                        json!({"file_path": path, "content": content}),
+                    )
+                    .await
+                }
+            },
+        )?;
+        ctx.set("write_file", f)?;
+    }
+
+    // ctx:shell(cmd) — dispatches the Bash tool. Plugin authors get the
+    // same allowlist semantics as the model.
+    {
+        let host_clone = host.clone();
+        let f = lua.create_async_function(move |_lua, (_self, cmd): (Table, String)| {
+            let host = host_clone.clone();
+            async move { dispatch_named(&host, "Bash", json!({"command": cmd})).await }
+        })?;
+        ctx.set("shell", f)?;
+    }
+
+    // ctx:prompt(text) — runs a fresh agent loop and returns the final
+    // assistant message. Errors out if no spawner was bound (plugin
+    // tests load without a parent harness).
+    {
+        let host_clone = host.clone();
+        let f = lua.create_async_function(move |_lua, (_self, prompt): (Table, String)| {
+            let host = host_clone.clone();
+            async move {
+                let spawner = host.spawner.as_ref().ok_or_else(|| {
+                    mlua::Error::external(AgentError::Provider(
+                        "ctx:prompt: no SubagentSpawner bound to this plugin host".into(),
+                    ))
+                })?;
+                spawner
+                    .spawn(&prompt, 10)
+                    .await
+                    .map_err(mlua::Error::external)
+            }
+        })?;
+        ctx.set("prompt", f)?;
+    }
+
+    // ctx:get_state(key) — synchronous read from the plugin's state bag.
+    // Uses `blocking_lock` because the function is exposed sync to Lua.
+    {
+        let state = host.state.clone();
+        let f = lua.create_function(move |lua, (_self, key): (Table, String)| {
+            let bag = state.blocking_lock();
+            match bag.get(&key) {
+                Some(v) => lua.to_value(v),
+                None => Ok(LuaValue::Nil),
+            }
+        })?;
+        ctx.set("get_state", f)?;
+    }
+
+    // ctx:set_state(key, value) — synchronous write.
+    {
+        let state = host.state.clone();
+        let f =
+            lua.create_function(move |lua, (_self, key, value): (Table, String, LuaValue)| {
+                let v: Value = lua.from_value(value)?;
+                let mut bag = state.blocking_lock();
+                bag.insert(key, v);
+                Ok(())
+            })?;
+        ctx.set("set_state", f)?;
+    }
+
+    // ctx:ask_user(question) — blocking stdin read on a tokio blocking
+    // task. Plugins should use this sparingly; it freezes the loop.
+    {
+        let plugin_id = host.plugin_id.clone();
+        let f = lua.create_async_function(move |_lua, (_self, question): (Table, String)| {
+            let plugin_id = plugin_id.clone();
+            async move {
+                let prompt = format!("[plugin:{}] {} ", plugin_id, question);
+                let answer: mlua::Result<String> = tokio::task::spawn_blocking(move || {
+                    use std::io::{BufRead, Write};
+                    let mut stdout = std::io::stdout();
+                    stdout.write_all(prompt.as_bytes()).ok();
+                    stdout.flush().ok();
+                    let mut line = String::new();
+                    std::io::stdin()
+                        .lock()
+                        .read_line(&mut line)
+                        .map_err(mlua::Error::external)?;
+                    Ok(line.trim_end_matches('\n').to_string())
+                })
+                .await
+                .map_err(mlua::Error::external)?;
+                answer
+            }
+        })?;
+        ctx.set("ask_user", f)?;
+    }
+
     Ok(ctx)
+}
+
+async fn dispatch_named(host: &HostShared, name: &str, args: Value) -> mlua::Result<String> {
+    let registry = host.tools.lock().await;
+    let tool = registry.get(name).ok_or_else(|| {
+        mlua::Error::external(AgentError::Provider(format!(
+            "ctx: tool {} not registered in host",
+            name
+        )))
+    })?;
+    tool.run(args, &host.plugin_ctx)
+        .await
+        .map_err(mlua::Error::external)
 }
 
 /// Re-fetch a stashed function out of the Lua registry by its index.
@@ -575,7 +710,7 @@ return p
         )
         .unwrap();
         let mut out = LoadedPlugins::default();
-        load_dir(dir.path(), empty_registry(), &mut out).await;
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
         assert_eq!(out.manifest.len(), 1);
         assert_eq!(out.manifest[0].name, "hello");
         assert_eq!(out.tools.len(), 1);
@@ -606,7 +741,7 @@ return p
         )
         .unwrap();
         let mut out = LoadedPlugins::default();
-        load_dir(dir.path(), empty_registry(), &mut out).await;
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
         assert_eq!(out.tools.len(), 1);
         let ctx = ToolContext::new();
         let r = out.tools[0].run(json!({}), &ctx).await.unwrap();
@@ -655,7 +790,7 @@ return p
         )
         .unwrap();
         let mut out = LoadedPlugins::default();
-        load_dir(dir.path(), host, &mut out).await;
+        load_dir(dir.path(), host, None, &mut out).await;
         let ctx = ToolContext::new();
         let r = out.tools[0].run(json!({}), &ctx).await.unwrap();
         assert_eq!(r, "got:from-lua");
@@ -677,7 +812,7 @@ return p
         )
         .unwrap();
         let mut out = LoadedPlugins::default();
-        load_dir(dir.path(), empty_registry(), &mut out).await;
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
         // The broken plugin doesn't crash the loader; the good one
         // still loads.
         assert_eq!(out.tools.len(), 1);
@@ -700,7 +835,7 @@ return p
         )
         .unwrap();
         let mut out = LoadedPlugins::default();
-        load_dir(dir.path(), empty_registry(), &mut out).await;
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
         assert_eq!(out.slash_commands.len(), 1);
         assert_eq!(out.slash_commands[0].name(), "demo");
     }
@@ -722,7 +857,7 @@ return p
         )
         .unwrap();
         let mut out = LoadedPlugins::default();
-        load_dir(dir.path(), empty_registry(), &mut out).await;
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
         assert_eq!(out.hooks.len(), 3);
         assert_eq!(out.manifest[0].hook_events.len(), 3);
     }

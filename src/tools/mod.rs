@@ -9,6 +9,7 @@ pub mod context;
 pub mod edit;
 pub mod glob;
 pub mod grep;
+pub mod notes;
 pub mod read;
 pub mod subprocess;
 pub mod task;

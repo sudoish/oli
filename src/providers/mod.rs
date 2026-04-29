@@ -4,6 +4,7 @@ use serde_json::Value;
 
 use crate::error::Result;
 
+pub mod anthropic;
 pub mod openai_compat;
 
 #[cfg(test)]

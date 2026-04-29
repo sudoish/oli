@@ -193,20 +193,20 @@ impl Approver for AlwaysDeny {
 }
 
 /// Interactive approver that prompts the user via stdin/stdout. Reads
-/// y/N on a blocking task so the runtime stays responsive.
+/// y/N on a blocking task so the runtime stays responsive. Renders a
+/// tool-specific preview so the user sees what's about to land before
+/// answering — for `Edit` and `Write` that means a diff/content view,
+/// not just the raw JSON args.
 pub struct ReadlineApprover;
 
 #[async_trait]
 impl Approver for ReadlineApprover {
     async fn approve(&self, tool: &str, args: &Value, reason: &str) -> bool {
-        let preview = preview_args(args);
+        let preview = preview_for(tool, args);
         let prompt = if preview.is_empty() {
             format!("[approve] {} — {} [y/N] ", tool, reason)
         } else {
-            format!(
-                "[approve] {} — {}\n  args: {}\n  [y/N] ",
-                tool, reason, preview
-            )
+            format!("[approve] {} — {}\n{}\n[y/N] ", tool, reason, preview)
         };
         tokio::task::spawn_blocking(move || {
             use std::io::{BufRead, Write};
@@ -224,6 +224,82 @@ impl Approver for ReadlineApprover {
         .await
         .unwrap_or(false)
     }
+}
+
+/// Tool-aware preview. Edit and Write get diff/content views so the
+/// user sees what's about to land; everything else falls through to a
+/// compact JSON dump truncated at 200 chars.
+fn preview_for(tool: &str, args: &Value) -> String {
+    match tool {
+        "Edit" => render_edit_preview(args),
+        "Write" => render_write_preview(args),
+        _ => preview_args(args),
+    }
+}
+
+fn render_edit_preview(args: &Value) -> String {
+    let path = args
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unknown)");
+    let old = args
+        .get("old_string")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let new = args
+        .get("new_string")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let replace_all = args
+        .get("replace_all")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mut out = format!("  file: {}", path);
+    if replace_all {
+        out.push_str("  (replace_all)");
+    }
+    out.push_str("\n  -- old:\n");
+    out.push_str(&indent_with("    | ", &truncate_lines(old, 30)));
+    out.push_str("\n  ++ new:\n");
+    out.push_str(&indent_with("    | ", &truncate_lines(new, 30)));
+    out
+}
+
+fn render_write_preview(args: &Value) -> String {
+    let path = args
+        .get("file_path")
+        .and_then(|v| v.as_str())
+        .unwrap_or("(unknown)");
+    let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+    let bytes = content.len();
+    let lines = content.lines().count();
+    format!(
+        "  file: {}\n  ({} bytes, {} lines)\n  ++ content:\n{}",
+        path,
+        bytes,
+        lines,
+        indent_with("    | ", &truncate_lines(content, 30))
+    )
+}
+
+fn indent_with(prefix: &str, body: &str) -> String {
+    body.lines()
+        .map(|l| format!("{}{}", prefix, l))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn truncate_lines(s: &str, max_lines: usize) -> String {
+    let total = s.lines().count();
+    if total <= max_lines {
+        return s.to_string();
+    }
+    let head: Vec<&str> = s.lines().take(max_lines).collect();
+    format!(
+        "{}\n... ({} more lines)",
+        head.join("\n"),
+        total - max_lines
+    )
 }
 
 /// Compact rendering of tool arguments for an approval prompt. Truncates
@@ -348,5 +424,54 @@ mod tests {
     #[test]
     fn preview_returns_empty_for_empty_object() {
         assert!(preview_args(&json!({})).is_empty());
+    }
+
+    #[test]
+    fn edit_preview_shows_old_and_new_with_path() {
+        let args = json!({
+            "file_path": "src/x.rs",
+            "old_string": "let a = 1;",
+            "new_string": "let a = 2;",
+        });
+        let s = render_edit_preview(&args);
+        assert!(s.contains("file: src/x.rs"));
+        assert!(s.contains("-- old:"));
+        assert!(s.contains("let a = 1;"));
+        assert!(s.contains("++ new:"));
+        assert!(s.contains("let a = 2;"));
+    }
+
+    #[test]
+    fn edit_preview_marks_replace_all() {
+        let args = json!({
+            "file_path": "x",
+            "old_string": "a",
+            "new_string": "b",
+            "replace_all": true,
+        });
+        let s = render_edit_preview(&args);
+        assert!(s.contains("(replace_all)"));
+    }
+
+    #[test]
+    fn write_preview_reports_size_and_truncates_long_content() {
+        let big = "line\n".repeat(100);
+        let args = json!({"file_path":"big.txt","content": big});
+        let s = render_write_preview(&args);
+        assert!(s.contains("file: big.txt"));
+        assert!(s.contains("500 bytes"));
+        assert!(s.contains("100 lines"));
+        assert!(s.contains("more lines"));
+    }
+
+    #[test]
+    fn preview_for_routes_to_tool_specific_renderers() {
+        let edit_args = json!({"file_path":"x","old_string":"a","new_string":"b"});
+        assert!(preview_for("Edit", &edit_args).contains("-- old:"));
+        let write_args = json!({"file_path":"x","content":"c"});
+        assert!(preview_for("Write", &write_args).contains("++ content:"));
+        // Unknown tools fall through to JSON dump.
+        let other = json!({"command":"ls"});
+        assert_eq!(preview_for("Bash", &other), other.to_string());
     }
 }

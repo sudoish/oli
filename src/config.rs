@@ -37,6 +37,34 @@ pub struct Config {
     /// support differs from the family default.
     #[serde(default)]
     pub caps: Vec<crate::agent::caps::CapsOverride>,
+
+    /// Top-level agent runtime knobs.
+    #[serde(default)]
+    pub agent: AgentConfig,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct AgentConfig {
+    /// Maximum number of model turns per top-level `run` invocation.
+    /// Bounds the loop so a flaky model that re-issues the same tool
+    /// call on every turn (qwen with the fallback parser, observed
+    /// during Phase 3 smoke) can't spin forever. Default 40.
+    #[serde(default = "AgentConfig::default_max_turns")]
+    pub max_turns: usize,
+}
+
+impl AgentConfig {
+    fn default_max_turns() -> usize {
+        40
+    }
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            max_turns: Self::default_max_turns(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -87,17 +115,50 @@ impl Config {
         Self::from_str(&body)
     }
 
-    /// Load `~/.config/agent/config.toml` if present, else fall back to an
-    /// env-only default that preserves byte-identical behavior with the
-    /// pre-Phase-0 binary (OpenRouter via `OPENROUTER_API_KEY`, model
-    /// `anthropic/claude-haiku-4.5`).
+    /// Load `~/.config/agent/config.toml` if present, then layer any
+    /// project-scoped `.agent/config.toml` over the top. Falls back to
+    /// an env-only default if neither file exists.
+    ///
+    /// Merge semantics (overlay = project, base = global):
+    /// - Tables merge per key; overlay wins on scalar leaves.
+    /// - Arrays concatenate **with overlay items first** so e.g.
+    ///   project-scoped `[[caps]]` shadow global ones in the lookup
+    ///   order used by `caps_for_with_overrides`.
+    /// - Missing keys in overlay leave base unchanged (api keys stay
+    ///   in global, repos stay credential-free).
     pub fn load_or_default() -> Result<Self> {
-        if let Some(p) = default_config_path()
-            && p.exists()
-        {
-            return Self::from_file(&p);
+        let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::load_layered(&cwd)
+    }
+
+    /// Test seam — same as `load_or_default` but accepts an explicit
+    /// cwd so tests can run inside a tempdir without polluting the real
+    /// `~/.config/agent/config.toml`.
+    pub fn load_layered(cwd: &Path) -> Result<Self> {
+        let global_str = match default_config_path() {
+            Some(p) if p.exists() => Some(std::fs::read_to_string(&p)?),
+            _ => None,
+        };
+        let project_str = match find_project_config(cwd) {
+            Some(p) => Some(std::fs::read_to_string(&p)?),
+            None => None,
+        };
+
+        match (global_str, project_str) {
+            (None, None) => Ok(Self::env_default()),
+            (Some(g), None) => Self::from_str(&g),
+            (None, Some(p)) => Self::from_str(&p),
+            (Some(g), Some(p)) => {
+                let global_val: toml::Value = toml::from_str(&g)
+                    .map_err(|e| AgentError::Config(format!("global config: {}", e)))?;
+                let project_val: toml::Value = toml::from_str(&p)
+                    .map_err(|e| AgentError::Config(format!("project config: {}", e)))?;
+                let merged = merge_toml(global_val, project_val);
+                merged
+                    .try_into::<Self>()
+                    .map_err(|e| AgentError::Config(format!("layered config: {}", e)))
+            }
         }
-        Ok(Self::env_default())
     }
 
     pub fn env_default() -> Self {
@@ -121,6 +182,7 @@ impl Config {
             policy: PolicyConfig::default(),
             tools: ToolsConfig::default(),
             caps: Vec::new(),
+            agent: AgentConfig::default(),
         }
     }
 
@@ -171,6 +233,49 @@ fn default_config_path() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(dir.join("agent").join("config.toml"))
+}
+
+/// Walk up from `cwd` looking for `.agent/config.toml`. Returns the
+/// nearest one (innermost wins). We do not merge multiple project
+/// configs along the walk — repos that nest config get the closest one.
+fn find_project_config(cwd: &Path) -> Option<PathBuf> {
+    let mut p: &Path = cwd;
+    loop {
+        let candidate = p.join(".agent").join("config.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        match p.parent() {
+            Some(parent) if parent != p => p = parent,
+            _ => return None,
+        }
+    }
+}
+
+/// Merge two TOML values. Tables merge per key (overlay wins on
+/// scalar leaves). Arrays concatenate with overlay items first, so a
+/// project-scoped `[[caps]]` entry takes precedence over a global one
+/// during prefix lookup. For other type mismatches, overlay wins.
+pub(crate) fn merge_toml(base: toml::Value, overlay: toml::Value) -> toml::Value {
+    use toml::Value::{Array, Table};
+    match (base, overlay) {
+        (Table(mut bt), Table(ot)) => {
+            for (k, v) in ot {
+                let merged = match bt.remove(&k) {
+                    Some(bv) => merge_toml(bv, v),
+                    None => v,
+                };
+                bt.insert(k, merged);
+            }
+            Table(bt)
+        }
+        (Array(ba), Array(oa)) => {
+            let mut combined = oa;
+            combined.extend(ba);
+            Array(combined)
+        }
+        (_, v) => v,
+    }
 }
 
 #[cfg(test)]
@@ -270,5 +375,133 @@ mod tests {
         let cfg = Config::env_default();
         let err = cfg.provider("nope").unwrap_err();
         assert!(err.to_string().contains("unknown provider: nope"));
+    }
+
+    #[test]
+    fn merge_toml_overlay_scalar_wins_on_leaf() {
+        let base: toml::Value = toml::from_str(r#"k = 1"#).unwrap();
+        let over: toml::Value = toml::from_str(r#"k = 2"#).unwrap();
+        let merged = merge_toml(base, over);
+        assert_eq!(merged.get("k").unwrap().as_integer().unwrap(), 2);
+    }
+
+    #[test]
+    fn merge_toml_tables_merge_per_key() {
+        let base: toml::Value = toml::from_str(
+            r#"
+            [providers.openrouter]
+            kind = "openai-compat"
+            base_url = "https://openrouter.ai/api/v1"
+            "#,
+        )
+        .unwrap();
+        let over: toml::Value = toml::from_str(
+            r#"
+            [providers.local]
+            kind = "openai-compat"
+            base_url = "http://localhost:11434/v1"
+            "#,
+        )
+        .unwrap();
+        let merged = merge_toml(base, over);
+        let providers = merged.get("providers").unwrap().as_table().unwrap();
+        assert!(providers.contains_key("openrouter"));
+        assert!(providers.contains_key("local"));
+    }
+
+    #[test]
+    fn merge_toml_arrays_concat_with_overlay_first() {
+        let base: toml::Value = toml::from_str(
+            r#"
+            [[caps]]
+            prefix = "global"
+            ctx_window = 8000
+            "#,
+        )
+        .unwrap();
+        let over: toml::Value = toml::from_str(
+            r#"
+            [[caps]]
+            prefix = "project"
+            ctx_window = 16000
+            "#,
+        )
+        .unwrap();
+        let merged = merge_toml(base, over);
+        let caps = merged.get("caps").unwrap().as_array().unwrap();
+        assert_eq!(caps.len(), 2);
+        // Project entry comes first so it wins prefix-lookup ties.
+        assert_eq!(caps[0].get("prefix").unwrap().as_str().unwrap(), "project");
+        assert_eq!(caps[1].get("prefix").unwrap().as_str().unwrap(), "global");
+    }
+
+    #[test]
+    fn load_layered_uses_project_config_when_only_project_present() {
+        // Test in a tempdir with no global config visible. We can't
+        // easily isolate the global config without env override, so
+        // the assertion is "project values are present" — the global
+        // either exists or doesn't, but project specifics still land.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".agent")).unwrap();
+        std::fs::write(
+            dir.path().join(".agent").join("config.toml"),
+            r#"
+default_provider = "ollama"
+[providers.ollama]
+kind = "openai-compat"
+base_url = "http://localhost:11434/v1"
+api_key = "ollama"
+default_model = "qwen2.5-coder:7b"
+
+[agent]
+max_turns = 7
+"#,
+        )
+        .unwrap();
+        let cfg = Config::load_layered(dir.path()).unwrap();
+        assert_eq!(cfg.default_provider, "ollama");
+        assert_eq!(cfg.agent.max_turns, 7);
+        assert!(cfg.providers.contains_key("ollama"));
+    }
+
+    #[test]
+    fn find_project_config_walks_up_parent_dirs() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join("a").join("b").join("c");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(root.path().join(".agent")).unwrap();
+        std::fs::write(
+            root.path().join(".agent").join("config.toml"),
+            "default_provider = \"x\"\n[providers.x]\nkind=\"openai-compat\"\nbase_url=\"u\"\n",
+        )
+        .unwrap();
+        let found = find_project_config(&nested).unwrap();
+        assert!(found.starts_with(root.path()));
+    }
+
+    #[test]
+    fn agent_config_section_parses_with_explicit_max_turns() {
+        let toml = r#"
+default_provider = "x"
+[providers.x]
+kind = "openai-compat"
+base_url = "u"
+[agent]
+max_turns = 99
+"#;
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.max_turns, 99);
+    }
+
+    #[test]
+    fn agent_config_default_max_turns_when_section_missing() {
+        let toml = r#"
+default_provider = "x"
+[providers.x]
+kind = "openai-compat"
+base_url = "u"
+"#;
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.max_turns, 40);
     }
 }

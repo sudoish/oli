@@ -18,14 +18,14 @@ Spec lives at `specs/README.md`. This doc covers state, not goals.
 | 254687e | docs  | `specs/memory.md` — pluggable active-context memory trait                       |
 | 21f7bc5 | 1d    | `Memory` trait + `LinearWithCompact` default, token tracking, `maybe_compact` summarization, model-capability registry, tool-call fallback parser |
 | 19f849f | 2     | Policy engine, slash command set (`/cost` `/tools` `/system` `/memory` `/compact` `/provider` `/model`), subprocess tool registration, per-config caps overrides |
-| _next_  | 3     | Session persistence (`--resume`/`--continue`/`/sessions`), hook dispatcher (`PreToolUse`/`PostToolUse`/`Stop`), subagent (`Task` tool) + `SubagentSpawner`, Lua plugin runtime via mlua + `/plugins` |
+| b3892dd | 3     | Session persistence (`--resume`/`--continue`/`/sessions`), hook dispatcher (`PreToolUse`/`PostToolUse`/`Stop`), subagent (`Task` tool) + `SubagentSpawner`, Lua plugin runtime via mlua + `/plugins` |
+| _next_  | 4     | Top-level `max_turns` (config + CLI), per-project `.agent/config.toml` overlay, diff preview for `Edit`/`Write`, expanded plugin host API (`ctx:prompt`/`shell`/`read_file`/`write_file`/`get_state`/`set_state`/`ask_user`), `NotesStore` trait + filesystem default + `WriteNote`/`SearchNotes`/`ListNotes` tools, native Anthropic provider with prompt caching |
 
-Tip-of-master at last update: **Phase 3 (this commit)**.
-Tests: **169 unit tests, all green** (was 146). Release build: clean, zero warnings.
-Smoke-tested against `qwen2.5-coder:7b` on Ollama — Lua plugin loads,
-sandbox blocks `io`, `Greet` tool callable through the agent loop.
-The runaway-tool-call behavior we saw is a model-side issue with
-fallback-parsed tools, not a plugin-runtime bug.
+Tip-of-master at last update: **Phase 4 (this commit)**.
+Tests: **202 unit tests, all green** (was 169). Release build: clean.
+Native Anthropic provider unit-tested via shape-conversion tests; live
+HTTP path not exercised in this sandbox (no Anthropic key). The
+OpenAI-compat path against Ollama still works the same.
 
 ## What works today
 
@@ -41,6 +41,41 @@ fallback-parsed tools, not a plugin-runtime bug.
 - TOML config at `~/.config/agent/config.toml` overrides defaults if
   present. Config supports multiple named providers, all of `kind =
   "openai-compat"` for now.
+
+**Phase 4 — native Anthropic + polish:**
+- Top-level agent `max_turns` (default 40) bounds the parent loop so a
+  flaky fallback-parsed model can't spin forever. Configurable via
+  `[agent].max_turns` and overridable per-run with `--max-turns`.
+- Per-project `.agent/config.toml` overlay. `Config::load_or_default`
+  walks up from cwd, finds the nearest project config, and merges it
+  over `~/.config/agent/config.toml`: tables merge per-key (overlay
+  scalar wins on leaves), arrays concatenate with project entries
+  first (so `[[caps]]` shadows globals in lookup order). API keys stay
+  in the global file; project configs stay credential-free.
+- Diff preview for `Edit` and `Write` in the approval prompt. The
+  `ReadlineApprover` renders tool-aware previews — old/new strings
+  for `Edit`, line-truncated content + size for `Write` — so the
+  user sees what's about to land before answering y/N.
+- Expanded plugin host API. `ctx:tool` plus six new methods:
+  `ctx:read_file`, `ctx:write_file`, `ctx:shell` (all dispatch through
+  the host's tool registry), `ctx:prompt` (uses the bound
+  `SubagentSpawner` to run a fresh agent loop), `ctx:get_state` /
+  `ctx:set_state` (per-plugin per-session HashMap), `ctx:ask_user`
+  (blocking stdin read on a tokio blocking task).
+- `NotesStore` trait + `FilesystemNotesStore` default. Markdown files
+  with TOML frontmatter under `~/.config/agent/notes/<id>.md`.
+  Distinct from active-context `Memory` because retrieval failures
+  here don't poison the live conversation. Three tools surface to the
+  model: `WriteNote`, `SearchNotes` (substring + tag filter), `ListNotes`.
+- Native Anthropic provider (`src/providers/anthropic.rs`). Direct
+  reqwest + SSE. Bidirectional shape conversion: OpenAI-shaped
+  `ChatRequest` → Anthropic `system` field + tool_use/tool_result
+  blocks → OpenAI-shaped `ChatResponse`. Streaming handles
+  `text_delta` and `input_json_delta` events with per-block
+  accumulation. Prompt caching is the reason this provider exists:
+  `cache_control: ephemeral` lands on the system prompt and on the
+  last tool definition (cache breakpoint), so long sessions hit cache
+  on everything before the new user message.
 
 **Phase 3 — power features:**
 - Session persistence in `src/agent/memory/persisted.rs`. `PersistedMemory`
@@ -193,21 +228,20 @@ Gaps a daily-driver user would hit today:
   `LinearWithCompact` is the only impl in tree; `EmbeddingRAG` /
   `GraphBacked` / `HierarchicalSummary` are sketched in `specs/memory.md`
   but not implemented.
-- **No `/plugins reload`.** Listing works; reloading would need a
-  registry-rebuild path that swaps out the previously loaded plugin
-  components without disturbing built-ins. Punted from Phase 3.
-- **Plugin host API is minimal.** `ctx:log` and `ctx:tool` ship; the
-  spec's `ctx:prompt` / `ctx:shell` / `ctx:read_file` / `ctx:write_file`
-  / `ctx:ask_user` / `ctx:get_state` / `ctx:set_state` are not yet
-  implemented.
+- **No `/plugins reload`.** Listing works; reload was deferred from
+  Phase 3 and Phase 4 — needs a registry-rebuild refactor (the slash
+  registry isn't on Agent yet, so reload from inside a slash dispatch
+  can't swap it out cleanly).
 - **Hooks are observe-only.** `PreToolUse` cannot veto a tool call;
-  policy is the only gating path. Mutation/short-circuit hooks are a
-  Phase 4-or-later concern.
-- **Top-level agent has no `max_turns` cap by default.** A flaky
-  fallback-parsed model can loop on a tool call. Subagents are bounded
-  via `Task`'s `max_turns`; the parent loop isn't.
-- **No native Anthropic provider** with prompt caching. (Phase 4.)
-- **No `NotesStore`** for cross-session memory. (Phase 4.)
+  policy is the only gating path.
+- **Native Anthropic provider live-call not exercised.** Shape
+  conversion is unit-tested. The HTTP / SSE path needs a real
+  ANTHROPIC_API_KEY to verify end-to-end; the user can flip
+  `kind = "anthropic"` in config and try.
+- **Diff preview is JSON-style, not unified diff.** It shows old/new
+  strings rather than a context-aware unified diff. Adequate for the
+  small Edit calls the model typically makes; would benefit from a
+  proper diff lib for large changes.
 
 ## Decisions made
 
@@ -275,36 +309,30 @@ Fresh-context boot sequence:
 2. Read `specs/memory.md` — the active-context memory architecture.
 3. Read this file — current state.
 4. `git log --oneline -10` — phase boundaries with commit SHAs.
-5. `cargo test` — confirm 169 tests green.
+5. `cargo test` — confirm 202 tests green.
 6. `cargo build --release` — confirm clean build.
 7. Pick the next phase below.
 
 ### Next up
 
-**Phase 4 — native Anthropic + polish.** The remaining roadmap items.
+**Beyond Phase 4 — open follow-ups.** The original roadmap is shipped.
+Anything below is opportunistic polish, not a roadmap commitment.
 
-- **`AnthropicNativeProvider` with prompt caching.** The one feature
-  OpenAI-compat genuinely can't deliver. Worth wiring native Anthropic
-  for prompt-cache hit rates that materially affect cost on long
-  agent sessions.
-- **Diff preview before `Edit` / `Write`.** Show the change that's
-  about to land, gate on user approval (REPL) or pass through (`-p`).
-  Fits inside the existing `Approver` surface.
-- **Per-project `.agent/config.toml` overrides.** Today config lives
-  only at `~/.config/agent/config.toml`; per-project overlays give
-  repos their own provider/model defaults.
-- **`NotesStore` trait + filesystem default.** Cross-session "long-term"
-  memory exposed to the model as `WriteNote` / `SearchNotes` /
-  `ListNotes` tools. Distinct from active-context `Memory`; see
-  `specs/memory.md`.
-- **Plugin host API expansion.** `ctx:prompt` (via the existing
-  `SubagentSpawner`), `ctx:shell`/`ctx:read_file`/`ctx:write_file`
-  (through the policy gate), `ctx:get_state`/`ctx:set_state`
-  (per-plugin per-session storage), `ctx:ask_user`.
-- **`/plugins reload`.** Rebuild registries on disk-change; pair with
-  a config flag to auto-watch the plugin dirs.
-- **Top-level `max_turns` config.** Cap unbounded loops on flaky
-  fallback-parsed models without forcing every prompt through `Task`.
+- **`/plugins reload`.** Will require the slash registry to live on
+  Agent (or a rebuild path that returns to the REPL boundary).
+- **Strict-mode flag for `-p`.** Switch to `AlwaysDeny` on `Ask`
+  decisions for fully-automated runs that shouldn't auto-approve.
+- **An alternative `Memory` strategy.** `EmbeddingRAG` is the most
+  obvious next impl — `nomic-embed-text` runs on the same Ollama
+  instance; would let us measure whether retrieval-mediated context
+  beats linear+compact on long sessions.
+- **Hook short-circuit.** Let `PreToolUse` return a synthetic result
+  to skip the actual tool, mirroring Claude Code's hook semantics.
+- **Diff preview via `similar` crate.** Replace the inline old/new
+  rendering with a unified diff for Edit calls that span many lines.
+- **Per-project `.agent/notes/`.** Today notes live globally; project-
+  scoped notes would let a repo carry its own knowledge alongside
+  `.agent/config.toml` and `.agent/plugins/`.
 
 ### Phase 1d smoke-test results (2026-04-28)
 
@@ -321,6 +349,31 @@ Fresh-context boot sequence:
   tests cover the algorithm; would be worth verifying the summary
   prompt produces coherent transcripts on a real model under live
   token pressure.
+
+### Phase 4 smoke-test results (2026-04-29)
+
+- **Compilation + unit tests**: 202 green, release build clean.
+- **NotesStore (filesystem)**: round-trip tested — write, list,
+  search by query+tag, delete, reload-on-startup all pass.
+- **Native Anthropic provider**: shape conversion verified end-to-end
+  via 9 unit tests (system extraction, tool_use/tool_result blocks,
+  cache_control on system + last tool, response → OpenAI-shape
+  conversion). The HTTP path against api.anthropic.com is untested
+  in this sandbox — the user can flip a config provider entry to
+  `kind = "anthropic"` and a real ANTHROPIC_API_KEY to verify.
+- **Per-project `.agent/config.toml` merge**: covered by 4 unit
+  tests (overlay scalar wins, table merge per-key, array concat with
+  overlay first, walk-up parent dirs).
+- **Diff preview**: unit-tested Edit/Write rendering paths;
+  end-to-end TTY behavior unverified (live REPL approval flow
+  requires a stdin-bound session).
+- **`max_turns`**: previously-observed qwen runaway should now stop
+  at 40 turns by default. Not yet exercised on a real long session
+  to confirm the cutoff behavior reads cleanly to the user.
+- **Plugin host API expansion**: ctx:prompt / ctx:shell / ctx:read_file
+  / ctx:write_file / ctx:get_state / ctx:set_state / ctx:ask_user
+  compile and the existing plugin tests still pass; no new live
+  smoke against a multi-method plugin.
 
 ### Phase 3 smoke-test results (2026-04-29)
 
