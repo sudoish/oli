@@ -394,8 +394,6 @@ add three config lines.
 
 ## Open questions
 
-- **Repo strategy.** Continue on this repo (current default) vs. fork to
-  decouple from CodeCrafters stage submissions.
 - **OpenRouter as default fallback.** Kept as a configured non-default
   provider so Claude is one flag away.
 - **First-target local model.** `qwen2.5-coder:7b` for Phase 1 iteration.

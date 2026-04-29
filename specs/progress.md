@@ -245,9 +245,6 @@ Gaps a daily-driver user would hit today:
 
 ## Decisions made
 
-- **Repo strategy:** continuing on `master` alongside CodeCrafters
-  submissions. CodeCrafters tests run remotely; if a future phase
-  breaks stage parity, revisit.
 - **Provider coverage:** OpenAI-compat covers Ollama, OpenRouter,
   OpenAI, LM Studio, vLLM, llama.cpp server. No separate adapters.
 - **Tool trait async:** `async-trait` crate (dyn-compat for `Box<dyn
@@ -341,9 +338,9 @@ Anything below is opportunistic polish, not a roadmap commitment.
   hasn't been driven from a TTY in this sandbox.
 - **Tool-call fallback parser**: verified end-to-end against
   `qwen2.5-coder:7b` on Ollama. `-p "Read Cargo.toml and tell me the
-  package name"` returns `codecrafters-claude-code` after the parser
-  splices the model's text-mode JSON into `tool_calls` and dispatches
-  the `Read` tool. Multi-tool prompt (`Glob` then summarize) also
+  package name"` returns the package name after the parser splices
+  the model's text-mode JSON into `tool_calls` and dispatches the
+  `Read` tool. Multi-tool prompt (`Glob` then summarize) also
   succeeds.
 - **Compaction**: not yet exercised on a real long session — the unit
   tests cover the algorithm; would be worth verifying the summary
@@ -395,10 +392,10 @@ Anything below is opportunistic polish, not a roadmap commitment.
 ### Phase 2 smoke-test results (2026-04-28)
 
 - **Policy through dispatch**: verified against `qwen2.5-coder:7b` on
-  Ollama. `-p "Use the Read tool ... package name"` returns
-  `codecrafters-claude-code` — Read is auto-allowed by the default
-  policy, dispatch flows through the policy gate, fallback parser still
-  bridges JSON-as-content. Plain chat without tools also works.
+  Ollama. `-p "Use the Read tool ... package name"` returns the
+  package name — Read is auto-allowed by the default policy, dispatch
+  flows through the policy gate, fallback parser still bridges
+  JSON-as-content. Plain chat without tools also works.
 - **Slash commands `/cost`, `/tools`, `/system`, `/memory`, `/compact`,
   `/provider`, `/model`**: unit-tested end-to-end (132+ tests covering
   the listing/swap/inspection paths). Live REPL behavior under user
@@ -421,8 +418,8 @@ Anything below is opportunistic polish, not a roadmap commitment.
 # Run the full test suite
 cargo test
 
-# Build the release binary (codecrafters target dir)
-bash your_program.sh -p "your prompt here"
+# Build and run the release binary
+cargo run --release -- -p "your prompt here"
 
 # Quick API surface check
 ./target/release/oli --help
