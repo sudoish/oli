@@ -38,7 +38,7 @@ struct Args {
     prompt: Option<String>,
 
     /// Resume a specific session by id (file stem in
-    /// `~/.config/agent/sessions/`). Conflicts with `--continue`.
+    /// `~/.config/oli/sessions/`). Conflicts with `--continue`.
     #[arg(long, conflicts_with = "continue_session")]
     resume: Option<String>,
 
@@ -87,7 +87,7 @@ async fn run(args: Args) -> Result<()> {
         notes::FilesystemNotesStore::default_dir().unwrap_or_else(|| {
             std::env::current_dir()
                 .unwrap_or_else(|_| std::path::PathBuf::from("."))
-                .join(".agent")
+                .join(".oli")
                 .join("notes")
         }),
     ));

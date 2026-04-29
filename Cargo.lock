@@ -241,27 +241,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "codecrafters-claude-code"
-version = "0.1.0"
-dependencies = [
- "async-openai",
- "async-trait",
- "clap",
- "eventsource-stream",
- "futures",
- "glob",
- "mlua",
- "reqwest",
- "rustyline",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "toml",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1043,6 +1022,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "071dfc062690e90b734c0b2273ce72ad0ffa95f0c74596bc250dcfd960262841"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "oli"
+version = "0.1.0"
+dependencies = [
+ "async-openai",
+ "async-trait",
+ "clap",
+ "eventsource-stream",
+ "futures",
+ "glob",
+ "mlua",
+ "reqwest",
+ "rustyline",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
 ]
 
 [[package]]

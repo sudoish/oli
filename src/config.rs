@@ -115,8 +115,8 @@ impl Config {
         Self::from_str(&body)
     }
 
-    /// Load `~/.config/agent/config.toml` if present, then layer any
-    /// project-scoped `.agent/config.toml` over the top. Falls back to
+    /// Load `~/.config/oli/config.toml` if present, then layer any
+    /// project-scoped `.oli/config.toml` over the top. Falls back to
     /// an env-only default if neither file exists.
     ///
     /// Merge semantics (overlay = project, base = global):
@@ -133,7 +133,7 @@ impl Config {
 
     /// Test seam — same as `load_or_default` but accepts an explicit
     /// cwd so tests can run inside a tempdir without polluting the real
-    /// `~/.config/agent/config.toml`.
+    /// `~/.config/oli/config.toml`.
     pub fn load_layered(cwd: &Path) -> Result<Self> {
         let global_str = match default_config_path() {
             Some(p) if p.exists() => Some(std::fs::read_to_string(&p)?),
@@ -232,16 +232,16 @@ fn default_config_path() -> Option<PathBuf> {
     let dir = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(dir.join("agent").join("config.toml"))
+    Some(dir.join("oli").join("config.toml"))
 }
 
-/// Walk up from `cwd` looking for `.agent/config.toml`. Returns the
+/// Walk up from `cwd` looking for `.oli/config.toml`. Returns the
 /// nearest one (innermost wins). We do not merge multiple project
 /// configs along the walk — repos that nest config get the closest one.
 fn find_project_config(cwd: &Path) -> Option<PathBuf> {
     let mut p: &Path = cwd;
     loop {
-        let candidate = p.join(".agent").join("config.toml");
+        let candidate = p.join(".oli").join("config.toml");
         if candidate.exists() {
             return Some(candidate);
         }
@@ -442,9 +442,9 @@ mod tests {
         // the assertion is "project values are present" — the global
         // either exists or doesn't, but project specifics still land.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join(".agent")).unwrap();
+        std::fs::create_dir_all(dir.path().join(".oli")).unwrap();
         std::fs::write(
-            dir.path().join(".agent").join("config.toml"),
+            dir.path().join(".oli").join("config.toml"),
             r#"
 default_provider = "ollama"
 [providers.ollama]
@@ -469,9 +469,9 @@ max_turns = 7
         let root = tempfile::tempdir().unwrap();
         let nested = root.path().join("a").join("b").join("c");
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::create_dir_all(root.path().join(".agent")).unwrap();
+        std::fs::create_dir_all(root.path().join(".oli")).unwrap();
         std::fs::write(
-            root.path().join(".agent").join("config.toml"),
+            root.path().join(".oli").join("config.toml"),
             "default_provider = \"x\"\n[providers.x]\nkind=\"openai-compat\"\nbase_url=\"u\"\n",
         )
         .unwrap();

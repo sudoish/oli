@@ -1,7 +1,7 @@
 //! `PersistedMemory` — durable JSONL transcript decorator.
 //!
 //! Wraps an inner `Memory` and mirrors every state-mutating call to a
-//! line-delimited file under `~/.config/agent/sessions/<id>.jsonl`. On
+//! line-delimited file under `~/.config/oli/sessions/<id>.jsonl`. On
 //! open, an existing file is replayed into the inner memory so the
 //! session resumes exactly where it left off (modulo compaction, which
 //! is internal restructuring and does not get logged).
@@ -178,7 +178,7 @@ pub fn sessions_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("agent").join("sessions"))
+    Some(base.join("oli").join("sessions"))
 }
 
 /// Mint a fresh session id. UNIX-millis-based so it's sortable and

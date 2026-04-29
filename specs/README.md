@@ -100,7 +100,7 @@ src/
 
 ## Configuration
 
-`~/.config/agent/config.toml`:
+`~/.config/oli/config.toml`:
 
 ```toml
 default_provider = "ollama"
@@ -129,8 +129,8 @@ description = "..."
 
 [plugins]
 # Lua plugins are auto-discovered from:
-#   ~/.config/agent/plugins/*.lua
-#   <project>/.agent/plugins/*.lua
+#   ~/.config/oli/plugins/*.lua
+#   <project>/.oli/plugins/*.lua
 disabled = []   # opt-out by plugin name
 ```
 
@@ -178,7 +178,7 @@ without breaking existing Lua plugins.
 ### Plugin contract (sketch)
 
 ```lua
--- ~/.config/agent/plugins/repo-summarize.lua
+-- ~/.config/oli/plugins/repo-summarize.lua
 local plugin = {
   name    = "repo-summarize",
   version = "0.1.0",
@@ -258,8 +258,8 @@ and isolated — it does not crash the session.
 ### Discovery & lifecycle
 
 - Auto-discovered on session start from
-  `~/.config/agent/plugins/*.lua` (global) and
-  `<project>/.agent/plugins/*.lua` (per-project).
+  `~/.config/oli/plugins/*.lua` (global) and
+  `<project>/.oli/plugins/*.lua` (per-project).
 - Project plugins shadow global plugins of the same name.
 - Plugins can be disabled by name in config.
 - `/plugins` slash command lists loaded plugins and their registered
@@ -358,7 +358,7 @@ add three config lines.
 - Hooks: `PreToolUse`, `PostToolUse`, `Stop`. Shared dispatcher with plugin
   hooks (one mechanism, two registration sources).
 - **Plugin runtime: Lua via `mlua`.** Auto-discover plugins from
-  `~/.config/agent/plugins/` and `<project>/.agent/plugins/`, expose host
+  `~/.config/oli/plugins/` and `<project>/.oli/plugins/`, expose host
   API (`ctx:prompt`, `ctx:tool`, `ctx:shell`, ...), wire plugin-registered
   tools / slash commands / hooks into the corresponding registries. Sandbox
   removes raw `os`/`io` access; everything flows through the policy engine.
@@ -370,7 +370,7 @@ add three config lines.
 - `AnthropicNativeProvider` with prompt caching (the only feature
   OpenAI-compat genuinely can't deliver).
 - Diff preview before `Edit`/`Write`.
-- Per-project `.agent/config.toml` overrides.
+- Per-project `.oli/config.toml` overrides.
 - `NotesStore` trait + filesystem default — cross-session "long-term"
   memory exposed to the model as `WriteNote` / `SearchNotes` /
   `ListNotes` tools. Distinct from active-context `Memory`; see

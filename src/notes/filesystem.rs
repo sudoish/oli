@@ -1,5 +1,5 @@
 //! Filesystem-backed `NotesStore`. Each note is a markdown file with
-//! TOML frontmatter under `~/.config/agent/notes/<id>.md`.
+//! TOML frontmatter under `~/.config/oli/notes/<id>.md`.
 //!
 //! ```text
 //! +++
@@ -41,12 +41,12 @@ impl FilesystemNotesStore {
         Self { dir }
     }
 
-    /// Default location: `~/.config/agent/notes/`.
+    /// Default location: `~/.config/oli/notes/`.
     pub fn default_dir() -> Option<PathBuf> {
         let base = std::env::var_os("XDG_CONFIG_HOME")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-        Some(base.join("agent").join("notes"))
+        Some(base.join("oli").join("notes"))
     }
 
     fn path_for(&self, id: &str) -> PathBuf {

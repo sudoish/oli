@@ -1,9 +1,9 @@
 [package]
-name = "codecrafters-claude-code"
+name = "oli"
 version = "0.1.0"
-authors = ["Codecrafters <hello@codecrafters.io>"]
 edition = "2024"
 rust-version = "1.95"
+description = "A minimal, hackable, single-binary terminal coding agent."
 
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "signal"] }

@@ -163,7 +163,7 @@ pub trait NotesStore: Send + Sync {
 }
 ```
 
-- Default impl: markdown files under `~/.config/agent/notes/` —
+- Default impl: markdown files under `~/.config/oli/notes/` —
   human-readable, model-writable, version-controllable.
 - Surfaced to the model as built-in tools (`WriteNote`, `SearchNotes`,
   `ListNotes`) — they appear in the tool registry alongside `Read` /

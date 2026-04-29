@@ -19,7 +19,7 @@ Spec lives at `specs/README.md`. This doc covers state, not goals.
 | 21f7bc5 | 1d    | `Memory` trait + `LinearWithCompact` default, token tracking, `maybe_compact` summarization, model-capability registry, tool-call fallback parser |
 | 19f849f | 2     | Policy engine, slash command set (`/cost` `/tools` `/system` `/memory` `/compact` `/provider` `/model`), subprocess tool registration, per-config caps overrides |
 | b3892dd | 3     | Session persistence (`--resume`/`--continue`/`/sessions`), hook dispatcher (`PreToolUse`/`PostToolUse`/`Stop`), subagent (`Task` tool) + `SubagentSpawner`, Lua plugin runtime via mlua + `/plugins` |
-| _next_  | 4     | Top-level `max_turns` (config + CLI), per-project `.agent/config.toml` overlay, diff preview for `Edit`/`Write`, expanded plugin host API (`ctx:prompt`/`shell`/`read_file`/`write_file`/`get_state`/`set_state`/`ask_user`), `NotesStore` trait + filesystem default + `WriteNote`/`SearchNotes`/`ListNotes` tools, native Anthropic provider with prompt caching |
+| _next_  | 4     | Top-level `max_turns` (config + CLI), per-project `.oli/config.toml` overlay, diff preview for `Edit`/`Write`, expanded plugin host API (`ctx:prompt`/`shell`/`read_file`/`write_file`/`get_state`/`set_state`/`ask_user`), `NotesStore` trait + filesystem default + `WriteNote`/`SearchNotes`/`ListNotes` tools, native Anthropic provider with prompt caching |
 
 Tip-of-master at last update: **Phase 4 (this commit)**.
 Tests: **202 unit tests, all green** (was 169). Release build: clean.
@@ -30,15 +30,15 @@ OpenAI-compat path against Ollama still works the same.
 ## What works today
 
 **CLI:** Two modes off the same binary.
-- `codecrafters-claude-code -p "prompt"` — single-shot, non-streaming,
+- `oli -p "prompt"` — single-shot, non-streaming,
   prints final assistant content. Same scripted-friendly behavior as before.
-- `codecrafters-claude-code` (no `-p`) — interactive REPL with streaming
+- `oli` (no `-p`) — interactive REPL with streaming
   output, multi-turn history, `/clear` / `/help` / `/exit`, Ctrl-C cancels
   the in-flight turn (history rolls back even after compaction), Ctrl-D
   exits.
 - OpenRouter via env vars (`OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`),
   model `anthropic/claude-haiku-4.5` by default.
-- TOML config at `~/.config/agent/config.toml` overrides defaults if
+- TOML config at `~/.config/oli/config.toml` overrides defaults if
   present. Config supports multiple named providers, all of `kind =
   "openai-compat"` for now.
 
@@ -46,9 +46,9 @@ OpenAI-compat path against Ollama still works the same.
 - Top-level agent `max_turns` (default 40) bounds the parent loop so a
   flaky fallback-parsed model can't spin forever. Configurable via
   `[agent].max_turns` and overridable per-run with `--max-turns`.
-- Per-project `.agent/config.toml` overlay. `Config::load_or_default`
+- Per-project `.oli/config.toml` overlay. `Config::load_or_default`
   walks up from cwd, finds the nearest project config, and merges it
-  over `~/.config/agent/config.toml`: tables merge per-key (overlay
+  over `~/.config/oli/config.toml`: tables merge per-key (overlay
   scalar wins on leaves), arrays concatenate with project entries
   first (so `[[caps]]` shadows globals in lookup order). API keys stay
   in the global file; project configs stay credential-free.
@@ -63,7 +63,7 @@ OpenAI-compat path against Ollama still works the same.
   `ctx:set_state` (per-plugin per-session HashMap), `ctx:ask_user`
   (blocking stdin read on a tokio blocking task).
 - `NotesStore` trait + `FilesystemNotesStore` default. Markdown files
-  with TOML frontmatter under `~/.config/agent/notes/<id>.md`.
+  with TOML frontmatter under `~/.config/oli/notes/<id>.md`.
   Distinct from active-context `Memory` because retrieval failures
   here don't poison the live conversation. Three tools surface to the
   model: `WriteNote`, `SearchNotes` (substring + tag filter), `ListNotes`.
@@ -80,7 +80,7 @@ OpenAI-compat path against Ollama still works the same.
 **Phase 3 — power features:**
 - Session persistence in `src/agent/memory/persisted.rs`. `PersistedMemory`
   decorates an inner `Memory` and mirrors every `record` / `pin` /
-  `clear` / `truncate` to JSONL at `~/.config/agent/sessions/<id>.jsonl`.
+  `clear` / `truncate` to JSONL at `~/.config/oli/sessions/<id>.jsonl`.
   On open, prior content replays into the inner memory before any new
   writes — sessions resume verbatim.
 - CLI flags: `--resume <id>`, `--continue` (latest by mtime). REPL
@@ -94,8 +94,8 @@ OpenAI-compat path against Ollama still works the same.
   agent with isolated memory and a turn cap; returns only the final
   summary. The same trait will power plugin `ctx:prompt(...)` later.
 - Lua plugin runtime (`src/plugins/`) via mlua (lua54+vendored+async+
-  send+serialize). Auto-discovers `~/.config/agent/plugins/*.lua` and
-  `./.agent/plugins/*.lua`. Sandbox strips `os`, `io`, `dofile`,
+  send+serialize). Auto-discovers `~/.config/oli/plugins/*.lua` and
+  `./.oli/plugins/*.lua`. Sandbox strips `os`, `io`, `dofile`,
   `loadfile`, `require`, `debug`, and `package.loadlib`/`cpath`/`path`.
   Plugins register tools, slash commands, and hooks via a `plugin`
   table return value. `ctx:tool(name, args)` async-bridges into the
@@ -330,9 +330,9 @@ Anything below is opportunistic polish, not a roadmap commitment.
   to skip the actual tool, mirroring Claude Code's hook semantics.
 - **Diff preview via `similar` crate.** Replace the inline old/new
   rendering with a unified diff for Edit calls that span many lines.
-- **Per-project `.agent/notes/`.** Today notes live globally; project-
+- **Per-project `.oli/notes/`.** Today notes live globally; project-
   scoped notes would let a repo carry its own knowledge alongside
-  `.agent/config.toml` and `.agent/plugins/`.
+  `.oli/config.toml` and `.oli/plugins/`.
 
 ### Phase 1d smoke-test results (2026-04-28)
 
@@ -361,7 +361,7 @@ Anything below is opportunistic polish, not a roadmap commitment.
   conversion). The HTTP path against api.anthropic.com is untested
   in this sandbox — the user can flip a config provider entry to
   `kind = "anthropic"` and a real ANTHROPIC_API_KEY to verify.
-- **Per-project `.agent/config.toml` merge**: covered by 4 unit
+- **Per-project `.oli/config.toml` merge**: covered by 4 unit
   tests (overlay scalar wins, table merge per-key, array concat with
   overlay first, walk-up parent dirs).
 - **Diff preview**: unit-tested Edit/Write rendering paths;
@@ -378,7 +378,7 @@ Anything below is opportunistic polish, not a roadmap commitment.
 ### Phase 3 smoke-test results (2026-04-29)
 
 - **Lua plugin runtime**: verified live. Drop a `hello.lua` into
-  `~/.config/agent/plugins/`, ask the agent to call `Greet`, and the
+  `~/.config/oli/plugins/`, ask the agent to call `Greet`, and the
   Lua function fires (`[plugin:hello] info Greet invoked` lines on
   stderr) and returns `"hello, plugins!"` to the model. Sandbox blocks
   `io` access (covered by unit test).
@@ -425,7 +425,7 @@ cargo test
 bash your_program.sh -p "your prompt here"
 
 # Quick API surface check
-/tmp/codecrafters-build-claude-code-rust/release/codecrafters-claude-code --help
+./target/release/oli --help
 
 # Format and lint
 cargo fmt --all && cargo build --release

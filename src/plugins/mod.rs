@@ -2,8 +2,8 @@
 //!
 //! ## What plugins can do
 //!
-//! Each `.lua` file under `~/.config/agent/plugins/` or
-//! `<project>/.agent/plugins/` returns a table:
+//! Each `.lua` file under `~/.config/oli/plugins/` or
+//! `<project>/.oli/plugins/` returns a table:
 //!
 //! ```lua
 //! local plugin = { name = "my-plugin", version = "0.1.0" }
@@ -672,7 +672,7 @@ pub fn default_plugin_dirs() -> Vec<PathBuf> {
     if let Some(global) = global_plugins_dir() {
         out.push(global);
     }
-    out.push(PathBuf::from(".agent").join("plugins"));
+    out.push(PathBuf::from(".oli").join("plugins"));
     out
 }
 
@@ -680,7 +680,7 @@ fn global_plugins_dir() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("agent").join("plugins"))
+    Some(base.join("oli").join("plugins"))
 }
 
 #[cfg(test)]

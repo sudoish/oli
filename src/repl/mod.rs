@@ -28,7 +28,7 @@ pub async fn run(
         registry.register_box(s);
     }
 
-    println!("agent ready. /help for commands, Ctrl-D to exit.");
+    println!("oli ready. /help for commands, Ctrl-D to exit.");
 
     loop {
         let line = match read_line(editor).await {

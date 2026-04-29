@@ -436,7 +436,7 @@ impl SlashCommand for Sessions {
         let entries = crate::agent::memory::list_sessions();
         if entries.is_empty() {
             return SlashOutcome::Continue(Some(
-                "(no saved sessions found in ~/.config/agent/sessions/)".into(),
+                "(no saved sessions found in ~/.config/oli/sessions/)".into(),
             ));
         }
         let mut out = format!("Sessions ({}):\n", entries.len());
@@ -454,7 +454,7 @@ impl SlashCommand for Sessions {
         if entries.len() > 20 {
             out.push_str(&format!("  ... and {} more\n", entries.len() - 20));
         }
-        out.push_str("Resume with: codecrafters-claude-code --resume <id>");
+        out.push_str("Resume with: oli --resume <id>");
         SlashOutcome::Continue(Some(out))
     }
 }
@@ -472,8 +472,8 @@ impl SlashCommand for Plugins {
     async fn run(&self, _args: &str, agent: &mut Agent) -> SlashOutcome {
         if agent.plugin_manifest.is_empty() {
             return SlashOutcome::Continue(Some(
-                "(no plugins loaded — drop .lua files into ~/.config/agent/plugins/ \
-                 or .agent/plugins/)"
+                "(no plugins loaded — drop .lua files into ~/.config/oli/plugins/ \
+                 or .oli/plugins/)"
                     .into(),
             ));
         }
