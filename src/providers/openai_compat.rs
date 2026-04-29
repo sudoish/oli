@@ -4,7 +4,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 
 use crate::error::{AgentError, Result};
-use crate::providers::{ChatRequest, ChatResponse, ContentSink, Provider};
+use crate::providers::{ChatRequest, ChatResponse, ContentSink, Provider, Usage};
 
 /// OpenAI-compatible provider. Works against OpenAI, OpenRouter, Ollama
 /// (via `http://localhost:11434/v1`), LM Studio, vLLM, llama.cpp's server,
@@ -49,7 +49,9 @@ impl Provider for OpenAICompatProvider {
                 AgentError::Provider(format!("response missing choices[0].message: {}", response))
             })?;
 
-        Ok(ChatResponse { message })
+        let usage = response.get("usage").and_then(Usage::from_value);
+
+        Ok(ChatResponse { message, usage })
     }
 
     async fn chat_stream(&self, req: ChatRequest, sink: ContentSink<'_>) -> Result<ChatResponse> {
@@ -58,6 +60,11 @@ impl Provider for OpenAICompatProvider {
             "messages": req.messages,
             "tools": req.tools,
             "stream": true,
+            // Required by the OpenAI spec for streaming responses to carry
+            // a `usage` block in the terminal chunk. Most OpenAI-compat
+            // servers (Ollama, OpenRouter) honor this; ones that don't
+            // simply leave usage `None`, which the agent already handles.
+            "stream_options": { "include_usage": true },
         });
 
         let mut stream = self
@@ -70,9 +77,18 @@ impl Provider for OpenAICompatProvider {
         let mut role: Option<String> = None;
         let mut content = String::new();
         let mut calls: Vec<ToolCallAcc> = Vec::new();
+        let mut usage: Option<Usage> = None;
 
         while let Some(chunk) = stream.next().await {
             let chunk: Value = chunk.map_err(|e| AgentError::Provider(e.to_string()))?;
+
+            // The terminal chunk in `include_usage` streams has empty
+            // `choices` and a populated `usage`. Capture either or both
+            // per chunk; the loop falls through naturally.
+            if let Some(u) = chunk.get("usage").and_then(Usage::from_value) {
+                usage = Some(u);
+            }
+
             let Some(delta) = chunk
                 .get("choices")
                 .and_then(|c| c.get(0))
@@ -138,7 +154,7 @@ impl Provider for OpenAICompatProvider {
             message["tool_calls"] = Value::Array(arr);
         }
 
-        Ok(ChatResponse { message })
+        Ok(ChatResponse { message, usage })
     }
 }
 

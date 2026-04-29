@@ -20,6 +20,33 @@ pub struct ChatRequest {
 pub struct ChatResponse {
     /// Raw assistant message in OpenAI shape: `{role, content?, tool_calls?}`.
     pub message: Value,
+    /// Per-call token accounting, when the provider supplies it. Streaming
+    /// requests must opt into `stream_options.include_usage` to populate
+    /// this field.
+    pub usage: Option<Usage>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Usage {
+    pub prompt_tokens: u32,
+    pub completion_tokens: u32,
+    pub total_tokens: u32,
+}
+
+impl Usage {
+    pub fn from_value(v: &Value) -> Option<Self> {
+        let prompt = v.get("prompt_tokens").and_then(|x| x.as_u64())?;
+        let completion = v.get("completion_tokens").and_then(|x| x.as_u64())?;
+        let total = v
+            .get("total_tokens")
+            .and_then(|x| x.as_u64())
+            .unwrap_or(prompt + completion);
+        Some(Self {
+            prompt_tokens: prompt as u32,
+            completion_tokens: completion as u32,
+            total_tokens: total as u32,
+        })
+    }
 }
 
 /// Sink for streamed assistant content tokens. Re-borrowed across multiple

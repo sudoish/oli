@@ -1,88 +1,149 @@
 use serde_json::{Value, json};
 
 use crate::error::Result;
-use crate::providers::{ChatRequest, ContentSink, Provider};
+use crate::providers::{ChatRequest, ContentSink, Provider, Usage};
 use crate::tools::{Registry, ToolContext};
 
+pub mod caps;
 pub mod context;
+pub mod memory;
+pub mod tool_parse;
+
+pub use caps::{ModelCaps, caps_for};
+pub use memory::{CompactContext, LinearWithCompact, Memory};
 
 pub struct Agent {
     pub provider: Box<dyn Provider>,
     pub tools: Registry,
     pub model: String,
-    pub system_prompt: Option<String>,
-    /// Conversation history accumulated across turns. Cleared by `clear()`.
-    pub messages: Vec<Value>,
+    /// Capabilities resolved from the model id at construction. Drives the
+    /// compaction target and (in step 5) whether the tool-call fallback
+    /// parser engages.
+    pub caps: ModelCaps,
+    /// Active-context memory. Default is `LinearWithCompact`. Swap via
+    /// `with_memory` to plug in alternative strategies (RAG, graph,
+    /// hierarchical) without touching the agent loop.
+    pub memory: Box<dyn Memory>,
+    /// Most recent per-call token accounting reported by the provider.
+    /// Populated after every chat round (streaming and non-streaming).
+    /// Drives `Memory::maybe_compact` decisions and is the data source for
+    /// the eventual `/cost` slash command.
+    pub last_usage: Option<Usage>,
     ctx: ToolContext,
 }
 
 impl Agent {
     pub fn new(provider: Box<dyn Provider>, tools: Registry, model: String) -> Self {
+        let caps = caps_for(&model);
         Self {
             provider,
             tools,
             model,
-            system_prompt: None,
-            messages: Vec::new(),
+            caps,
+            memory: Box::new(LinearWithCompact::new()),
+            last_usage: None,
             ctx: ToolContext::new(),
         }
     }
 
-    pub fn with_system_prompt(mut self, prompt: impl Into<String>) -> Self {
-        let s = prompt.into();
-        self.system_prompt = if s.is_empty() { None } else { Some(s) };
+    /// Replace the default `LinearWithCompact` memory with a custom impl.
+    /// Public extension point — tests and (eventually) plugins use it; the
+    /// binary itself doesn't, hence the explicit allow.
+    #[allow(dead_code)]
+    pub fn with_memory(mut self, memory: Box<dyn Memory>) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    /// Pin a system prompt onto memory so it survives compaction. Empty
+    /// strings are ignored. Async because `Memory::pin` is async on the
+    /// trait — strategies that go to disk can do their I/O here.
+    pub async fn pin_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+        let s: String = prompt.into();
+        if !s.is_empty() {
+            self.memory
+                .pin(json!({ "role": "system", "content": s }))
+                .await;
+        }
         self
     }
 
     /// Reset session state — drops conversation history and the per-tool
-    /// context (so `Edit`'s read-first invariant resets too). System prompt
-    /// is preserved and re-injected on the next turn.
-    pub fn clear(&mut self) {
-        self.messages.clear();
+    /// context (so `Edit`'s read-first invariant resets too). Pinned
+    /// content (system prompt) is preserved and re-injected on the next
+    /// turn.
+    pub async fn clear(&mut self) {
+        self.memory.clear().await;
         self.ctx = ToolContext::new();
     }
 
     /// Append `prompt` as a user turn, run the loop until the assistant
-    /// produces a response without tool calls, and return that final content.
-    /// Non-streaming path; uses a no-op sink under the hood.
+    /// produces a response without tool calls, and return that final
+    /// content. Non-streaming path; uses a no-op sink under the hood.
     pub async fn run(&mut self, prompt: &str) -> Result<String> {
         let mut nop = |_: &str| {};
         self.run_streaming(prompt, &mut nop).await
     }
 
-    /// Same as `run`, but emits assistant content tokens through `sink` as
-    /// the provider streams them. Tool-call rounds are silent — only model
-    /// content is forwarded.
+    /// Same as `run`, but emits assistant content tokens through `sink`
+    /// as the provider streams them. Tool-call rounds are silent — only
+    /// model content is forwarded.
     pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<String>
     where
         F: FnMut(&str) + Send,
     {
-        if self.messages.is_empty() {
-            if let Some(sys) = &self.system_prompt {
-                self.messages
-                    .push(json!({ "role": "system", "content": sys }));
-            }
-        }
-        self.messages
-            .push(json!({ "role": "user", "content": prompt }));
+        self.memory
+            .record(json!({ "role": "user", "content": prompt }))
+            .await;
 
         loop {
+            let current_tokens = self
+                .last_usage
+                .map(|u| u.prompt_tokens as usize)
+                .unwrap_or(0);
+            self.memory
+                .maybe_compact(CompactContext {
+                    provider: self.provider.as_ref(),
+                    model: &self.model,
+                    target_tokens: self.caps.compact_target(),
+                    current_tokens,
+                })
+                .await?;
+
             let req = ChatRequest {
                 model: self.model.clone(),
-                messages: self.messages.clone(),
+                messages: self.memory.snapshot().await,
                 tools: self.tools.openai_schemas(),
             };
 
             let sink_dyn: ContentSink<'_> = sink;
             let resp = self.provider.chat_stream(req, sink_dyn).await?;
-            self.messages.push(resp.message.clone());
+            if let Some(u) = resp.usage {
+                self.last_usage = Some(u);
+            }
 
-            let tool_calls = resp
-                .message
+            // Models without native tool-call support sometimes emit calls
+            // as raw JSON in `content`. Splice the parsed calls into the
+            // assistant message *before* recording so the model's next
+            // turn sees a coherent (assistant with tool_calls) → (tool
+            // result) sequence.
+            let mut message = resp.message.clone();
+            let mut tool_calls = message
                 .get("tool_calls")
                 .and_then(|v| v.as_array())
                 .cloned()
                 .unwrap_or_default();
+
+            if tool_calls.is_empty() && !self.caps.supports_native_tool_calls {
+                if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
+                    if let Some(parsed) = tool_parse::parse_text_tool_calls(content) {
+                        tool_calls = parsed.clone();
+                        message["tool_calls"] = Value::Array(parsed);
+                    }
+                }
+            }
+
+            self.memory.record(message).await;
 
             if tool_calls.is_empty() {
                 let content = resp
@@ -113,11 +174,13 @@ impl Agent {
                     Err(e) => format!("Error: {}", e),
                 };
 
-                self.messages.push(json!({
-                    "role": "tool",
-                    "tool_call_id": id,
-                    "content": result,
-                }));
+                self.memory
+                    .record(json!({
+                        "role": "tool",
+                        "tool_call_id": id,
+                        "content": result,
+                    }))
+                    .await;
             }
         }
     }
@@ -262,7 +325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn system_prompt_is_prepended_when_set() {
+    async fn system_prompt_is_pinned_and_appears_first() {
         let provider = FakeProvider::new(vec![assistant_text("ok")]);
         let raw = std::sync::Arc::new(provider);
         let mut agent = Agent::new(
@@ -270,7 +333,8 @@ mod tests {
             Registry::new(),
             "m".into(),
         )
-        .with_system_prompt("you are a coding agent");
+        .pin_system_prompt("you are a coding agent")
+        .await;
 
         agent.run("hi").await.unwrap();
         let seen = raw.requests();
@@ -281,14 +345,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_system_message_when_unset() {
+    async fn empty_system_prompt_is_skipped() {
         let provider = FakeProvider::new(vec![assistant_text("ok")]);
         let raw = std::sync::Arc::new(provider);
         let mut agent = Agent::new(
             Box::new(ScriptedProviderHandle(raw.clone())),
             Registry::new(),
             "m".into(),
-        );
+        )
+        .pin_system_prompt("")
+        .await;
 
         agent.run("hi").await.unwrap();
         let seen = raw.requests();
@@ -319,7 +385,8 @@ mod tests {
             Registry::new(),
             "m".into(),
         )
-        .with_system_prompt("sys");
+        .pin_system_prompt("sys")
+        .await;
 
         agent.run("a").await.unwrap();
         agent.run("b").await.unwrap();
@@ -345,10 +412,11 @@ mod tests {
             Registry::new(),
             "m".into(),
         )
-        .with_system_prompt("sys");
+        .pin_system_prompt("sys")
+        .await;
 
         agent.run("a").await.unwrap();
-        agent.clear();
+        agent.clear().await;
         agent.run("b").await.unwrap();
 
         let seen = raw.requests();
@@ -357,6 +425,144 @@ mod tests {
         assert_eq!(msgs.len(), 2);
         assert_eq!(msgs[0]["role"], "system");
         assert_eq!(msgs[1]["content"], "b");
+    }
+
+    #[tokio::test]
+    async fn last_usage_is_captured_when_provider_supplies_it() {
+        struct UsageProvider;
+        #[async_trait]
+        impl Provider for UsageProvider {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: assistant_text("done"),
+                    usage: Some(Usage {
+                        prompt_tokens: 12,
+                        completion_tokens: 5,
+                        total_tokens: 17,
+                    }),
+                })
+            }
+        }
+        let mut agent = Agent::new(Box::new(UsageProvider), Registry::new(), "m".into());
+        agent.run("hi").await.unwrap();
+        let u = agent.last_usage.expect("usage should be captured");
+        assert_eq!(u.prompt_tokens, 12);
+        assert_eq!(u.completion_tokens, 5);
+        assert_eq!(u.total_tokens, 17);
+    }
+
+    #[tokio::test]
+    async fn fallback_parser_dispatches_text_mode_tool_calls() {
+        // Two scripted responses:
+        //   1. assistant content is bare JSON tool call (qwen-style),
+        //      no structured `tool_calls` field.
+        //   2. plain text final answer.
+        let provider = FakeProvider::new(vec![
+            json!({
+                "role": "assistant",
+                "content": r#"{"name":"Echo","arguments":{}}"#,
+            }),
+            assistant_text("done"),
+        ]);
+
+        let mut tools = Registry::new();
+        tools.register(StaticTool {
+            name: "Echo",
+            out: "tool-output",
+        });
+
+        // qwen2.5-coder:7b has supports_native_tool_calls = false in
+        // the capability registry, which is what gates the parser.
+        let mut agent = Agent::new(Box::new(provider), tools, "qwen2.5-coder:7b".into());
+        let out = agent.run("hi").await.unwrap();
+        assert_eq!(out, "done");
+
+        // The recorded assistant message should now have synthesized
+        // `tool_calls` even though the provider didn't emit them.
+        let snap = agent.memory.snapshot().await;
+        let assistant = snap
+            .iter()
+            .find(|m| m["role"] == "assistant" && m.get("tool_calls").is_some())
+            .expect("parser should have spliced tool_calls onto the assistant message");
+        let calls = assistant["tool_calls"].as_array().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0]["function"]["name"], "Echo");
+    }
+
+    #[tokio::test]
+    async fn fallback_parser_skipped_for_models_with_native_tool_support() {
+        // Same JSON-as-content payload, but model claims native tool
+        // support — the agent should NOT engage the parser, so no tool
+        // dispatch happens and the JSON-shaped content becomes the final
+        // answer.
+        let provider = FakeProvider::new(vec![json!({
+            "role": "assistant",
+            "content": r#"{"name":"Echo","arguments":{}}"#,
+        })]);
+        let mut tools = Registry::new();
+        tools.register(StaticTool {
+            name: "Echo",
+            out: "tool-output",
+        });
+        let mut agent = Agent::new(
+            Box::new(provider),
+            tools,
+            "anthropic/claude-haiku-4.5".into(),
+        );
+        let out = agent.run("hi").await.unwrap();
+        assert_eq!(out, r#"{"name":"Echo","arguments":{}}"#);
+    }
+
+    #[tokio::test]
+    async fn with_memory_swaps_in_an_alternative_strategy() {
+        // Sanity check that a custom `Memory` impl flows through the
+        // agent loop unchanged — the swap-out point that justifies the
+        // trait-based design.
+        struct CountingMemory {
+            inner: LinearWithCompact,
+            recorded: usize,
+        }
+        #[async_trait]
+        impl Memory for CountingMemory {
+            async fn record(&mut self, m: Value) {
+                self.recorded += 1;
+                self.inner.record(m).await;
+            }
+            async fn snapshot(&self) -> Vec<Value> {
+                self.inner.snapshot().await
+            }
+            async fn pin(&mut self, m: Value) {
+                self.inner.pin(m).await;
+            }
+            fn len(&self) -> usize {
+                self.inner.len()
+            }
+            async fn truncate(&mut self, n: usize) {
+                self.inner.truncate(n).await;
+            }
+            async fn clear(&mut self) {
+                self.inner.clear().await;
+            }
+        }
+
+        let provider = FakeProvider::new(vec![assistant_text("ok")]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into()).with_memory(
+            Box::new(CountingMemory {
+                inner: LinearWithCompact::new(),
+                recorded: 0,
+            }),
+        );
+        agent.run("hi").await.unwrap();
+        // user + assistant.
+        assert_eq!(agent.memory.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn last_usage_stays_none_when_provider_omits_it() {
+        let provider = FakeProvider::new(vec![assistant_text("ok")]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
+        agent.run("hi").await.unwrap();
+        assert_eq!(agent.last_usage, None);
     }
 
     /// Newtype around `Arc<FakeProvider>` so we can both feed the agent and

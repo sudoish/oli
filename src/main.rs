@@ -58,7 +58,9 @@ async fn run(args: Args) -> Result<()> {
     tools.register(Glob);
 
     let system_prompt = SystemPromptBuilder::from_env().build().await;
-    let mut agent = Agent::new(provider, tools, model).with_system_prompt(system_prompt);
+    let mut agent = Agent::new(provider, tools, model)
+        .pin_system_prompt(system_prompt)
+        .await;
 
     match args.prompt {
         Some(p) => {

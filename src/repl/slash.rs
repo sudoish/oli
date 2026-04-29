@@ -85,7 +85,7 @@ impl SlashCommand for Clear {
         "drop conversation history (system prompt is preserved)"
     }
     async fn run(&self, _args: &str, agent: &mut Agent) -> SlashOutcome {
-        agent.clear();
+        agent.clear().await;
         SlashOutcome::Continue(Some("(history cleared)".into()))
     }
 }
@@ -156,17 +156,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn clear_resets_agent_history() {
+    async fn clear_resets_agent_history_but_keeps_pinned_system_prompt() {
         let reg = SlashRegistry::default_set();
-        let mut agent = fresh_agent().with_system_prompt("sys");
+        let mut agent = fresh_agent().pin_system_prompt("sys").await;
         agent
-            .messages
-            .push(json!({"role":"user","content":"prior"}));
+            .memory
+            .record(json!({"role":"user","content":"prior"}))
+            .await;
 
         let out = reg.dispatch("clear", &mut agent).await.unwrap();
         assert!(matches!(out, SlashOutcome::Continue(Some(_))));
-        assert!(agent.messages.is_empty());
-        assert_eq!(agent.system_prompt.as_deref(), Some("sys"));
+        assert_eq!(agent.memory.len(), 0);
+
+        // System prompt is pinned, so it survives `clear()` and reappears
+        // at the head of the next snapshot.
+        let snap = agent.memory.snapshot().await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0]["role"], "system");
+        assert_eq!(snap[0]["content"], "sys");
     }
 
     #[tokio::test]

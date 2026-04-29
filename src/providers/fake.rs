@@ -36,7 +36,10 @@ impl Provider for FakeProvider {
             .unwrap()
             .pop_front()
             .ok_or_else(|| AgentError::Provider("FakeProvider exhausted".into()))?;
-        Ok(ChatResponse { message })
+        Ok(ChatResponse {
+            message,
+            usage: None,
+        })
     }
 
     /// Splits scripted content into two halves at a char boundary so streaming

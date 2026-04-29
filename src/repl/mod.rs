@@ -79,7 +79,7 @@ pub async fn run(mut agent: Agent) -> Result<()> {
 /// pre-turn length so the next turn doesn't carry a half-completed
 /// state into the prompt.
 async fn run_turn(agent: &mut Agent, prompt: &str) {
-    let saved_len = agent.messages.len();
+    let saved_len = agent.memory.len();
     let mut sink = |s: &str| {
         print!("{s}");
         let _ = std::io::stdout().flush();
@@ -106,7 +106,7 @@ async fn run_turn(agent: &mut Agent, prompt: &str) {
     }
 
     if cancelled {
-        agent.messages.truncate(saved_len);
+        agent.memory.truncate(saved_len).await;
         println!("\n(cancelled)");
     }
 }

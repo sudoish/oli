@@ -14,10 +14,14 @@ Spec lives at `specs/README.md`. This doc covers state, not goals.
 | b10688a | 0     | Module split, `Tool`/`Provider` traits, config loader, error types, FakeProvider |
 | 829b3e9 | 1a    | `Edit`/`Grep`/`Glob`, `Read` pagination, output truncation, `ToolContext`        |
 | 1e33058 | 1b    | System prompt with env / git / dir listing / `CLAUDE.md` ingestion             |
-| _next_  | 1c    | Streaming `Provider`, stateful `Agent`, REPL with rustyline, `SlashCommand` trait + `/clear`, `/help`, `/exit` |
+| 1ac7fef | 1c    | Streaming `Provider`, stateful `Agent`, REPL with rustyline, `SlashCommand` trait + `/clear`, `/help`, `/exit` |
+| 254687e | docs  | `specs/memory.md` — pluggable active-context memory trait                       |
+| _next_  | 1d    | `Memory` trait + `LinearWithCompact` default, token tracking, `maybe_compact` summarization, model-capability registry, tool-call fallback parser |
 
-Tip-of-master at last update: **Phase 1c (this commit)**.
-Tests: **77 unit tests, all green** (was 68). Release build: clean, zero warnings.
+Tip-of-master at last update: **Phase 1d (this commit)**.
+Tests: **110 unit tests, all green** (was 77). Release build: clean, zero warnings.
+Smoke-tested against `qwen2.5-coder:7b` on Ollama — tool dispatch works
+end-to-end via the fallback parser.
 
 ## What works today
 
@@ -26,12 +30,33 @@ Tests: **77 unit tests, all green** (was 68). Release build: clean, zero warning
   prints final assistant content. Same scripted-friendly behavior as before.
 - `codecrafters-claude-code` (no `-p`) — interactive REPL with streaming
   output, multi-turn history, `/clear` / `/help` / `/exit`, Ctrl-C cancels
-  the in-flight turn (history rolls back), Ctrl-D exits.
+  the in-flight turn (history rolls back even after compaction), Ctrl-D
+  exits.
 - OpenRouter via env vars (`OPENROUTER_API_KEY`, `OPENROUTER_BASE_URL`),
   model `anthropic/claude-haiku-4.5` by default.
 - TOML config at `~/.config/agent/config.toml` overrides defaults if
   present. Config supports multiple named providers, all of `kind =
   "openai-compat"` for now.
+
+**Local-model survival kit (Phase 1d):**
+- `Memory` trait (`src/agent/memory/`) replaces the flat `Vec<Value>`. Default
+  `LinearWithCompact` keeps today's behavior plus auto-summarization when
+  `current_tokens > target_tokens`.
+- Compaction summarizes the older half via `provider.chat`, snapping to a
+  user-message boundary so tool-call/tool-result pairs aren't split.
+- `Memory::len` is monotonic across compaction events — REPL Ctrl-C
+  rollback works even after compaction has run mid-session.
+- Token tracking via `stream_options.include_usage`. Captured per-call as
+  `agent.last_usage`; feeds the compaction trigger.
+- Model-capability registry (`src/agent/caps.rs`) — hardcoded prefix → `{
+  ctx_window, supports_native_tool_calls, supports_streaming_tool_deltas
+  }`. `compact_target() = 80% of ctx_window`. qwen / llama / claude /
+  gpt families covered, conservative default for anything unknown.
+- Tool-call fallback parser (`src/agent/tool_parse.rs`) — for models
+  flagged `supports_native_tool_calls = false`, scans assistant content
+  for embedded JSON tool calls (bare, fenced, `<tool_call>`-tagged) and
+  splices them onto the assistant message before the agent loop dispatches.
+  Synthesizes globally-unique ids so subsequent tool results match.
 
 **Tools:** `Read` (with `offset`/`limit`), `Write`, `Edit` (with
 read-first invariant), `Bash`, `Grep` (via `rg`), `Glob` (via `glob`
@@ -107,19 +132,19 @@ Per-spec architecture sketch except: `agent/compact.rs` (Phase 1d),
 
 Gaps a daily-driver user would hit today:
 
-- **No token tracking, no auto-compact.** Long sessions will blow up the
-  model's context window. (Phase 1d.)
-- **No tool-call fallback parser.** Local models that emit tool calls as
-  text rather than structured `tool_calls` will fail. (Phase 1d.)
-- **No model-capability registry.** No way to know if a model needs the
-  fallback parser or its real context window size. (Phase 1d.)
 - **No policy / permission engine.** `Bash` runs whatever the model wants.
   (Phase 2.)
 - **Slash command set is minimal.** `/model`, `/provider`, `/cost`,
-  `/system`, `/tools`, `/compact` not yet implemented. (Phase 2.)
+  `/system`, `/tools`, `/compact`, `/memory` not yet implemented. (Phase 2.)
 - **No subprocess tools** (MCP-lite from Phase 2).
-- **No plugin runtime** (Phase 3).
+- **No plugin runtime** (Phase 3, including plugin-registered `Memory`
+  strategies).
+- **No alternative `Memory` strategies shipped.** Default
+  `LinearWithCompact` is the only impl in tree; `EmbeddingRAG` /
+  `GraphBacked` / `HierarchicalSummary` are sketched in `specs/memory.md`
+  but not implemented.
 - **No native Anthropic provider** with prompt caching (Phase 4).
+- **No `NotesStore`** for cross-session memory (Phase 4).
 - **No session persistence**, no `--resume` / `--continue`.
 
 ## Decisions made
@@ -185,54 +210,45 @@ Gaps a daily-driver user would hit today:
 Fresh-context boot sequence:
 
 1. Read `specs/README.md` — the vision and full roadmap.
-2. Read this file — current state.
-3. `git log --oneline -10` — phase boundaries with commit SHAs.
-4. `cargo test` — confirm 77 tests green.
-5. `cargo build --release` — confirm clean build.
-6. Pick the next phase below.
+2. Read `specs/memory.md` — the active-context memory architecture.
+3. Read this file — current state.
+4. `git log --oneline -10` — phase boundaries with commit SHAs.
+5. `cargo test` — confirm 110 tests green.
+6. `cargo build --release` — confirm clean build.
+7. Pick the next phase below.
 
 ### Next up
 
-**Phase 1d — local-model survival kit.** The remaining Phase 1 work.
-After this, the harness is a credible daily driver against
-`qwen2.5-coder:7b` on Ollama or Claude via OpenRouter.
+**Phase 2 — flexibility surface.** With the local-driver mission done,
+the next bottleneck is daily-use UX and safety.
 
-Design doc: `specs/memory.md` — Phase 1d introduces a `Memory` trait
-with `LinearWithCompact` as the default impl. The flat
-`Agent.messages: Vec<Value>` migrates to `Box<dyn Memory>` so future
-strategies (graph-backed, RAG, hierarchical summary) become drop-in.
+- **Policy engine.** `Policy::check(tool, args, cwd) -> Allow | Ask |
+  Deny`. `Bash` and `Edit` should never run unguarded.
+- **`/model`, `/provider`, `/cost`, `/tools`, `/compact`, `/memory`.**
+  Switching mid-session is the biggest single UX gap. `/cost` is
+  trivial now that `agent.last_usage` is wired. `/memory` should expose
+  `snapshot` for inspection and `compact` to manually trigger.
+- **Subprocess tool registration (MCP-lite).** Three config lines = new
+  tool, no recompile.
+- **Per-config-section overrides for `caps`.** Right now caps are
+  hardcoded; users with custom Ollama models can't override
+  `supports_native_tool_calls` or `ctx_window`. Add a config table.
 
-- **`Memory` trait + `LinearWithCompact` default.** Replaces today's
-  `Agent.messages` with `Box<dyn Memory>`. `record` / `snapshot` /
-  `pin` / `truncate` / `clear` / `maybe_compact`. Spec: `specs/memory.md`.
-- Token tracking from `usage` field on responses (request streaming
-  responses with `stream_options.include_usage: true` so the final
-  chunk carries totals). Lives outside the trait; tracker reads
-  snapshots and feeds `current_tokens` into `maybe_compact`.
-- Auto-compact: `LinearWithCompact::maybe_compact` collapses oldest
-  non-pinned span into one summary message via the agent's provider
-  when token pressure exceeds the configured target.
-- Model-capability registry: hardcoded prefix → `{ ctx_window,
-  supports_native_tool_calls, supports_streaming_tool_deltas }` map.
-- Tool-call fallback parser: if `tool_calls` is empty but content looks
-  like a tool call (`<tool_call>{...}</tool_call>`, fenced JSON), parse
-  and dispatch. **Confirmed needed during Phase 1c smoke test:**
-  qwen2.5-coder:7b emits tool calls as plain JSON in `content`, no
-  structured field — agent currently treats them as final answers.
+### Phase 1d smoke-test results (2026-04-28)
 
-### Known unverified-by-hand bits in 1c
-
-The streaming + REPL plumbing is unit-tested (FakeProvider, slash
-registry, agent state) but not exercised end-to-end in this commit
-because the sandbox lacks API access. First thing to verify on a fresh
-boot:
-
-- `cargo run --release` against a real OpenRouter key — confirm tokens
-  stream out smoothly turn-by-turn.
-- Ctrl-C mid-turn — confirm cancellation rolls history back and the
-  next turn behaves as if the cancelled turn never happened.
-- `/clear`, `/help`, `/exit` — confirm rustyline doesn't fight Tokio's
-  signal handler at the prompt.
+- **Token streaming + REPL plumbing**: still unverified by hand against
+  a real network — the live REPL with Ctrl-C/`/clear`/`/help` flow
+  hasn't been driven from a TTY in this sandbox.
+- **Tool-call fallback parser**: verified end-to-end against
+  `qwen2.5-coder:7b` on Ollama. `-p "Read Cargo.toml and tell me the
+  package name"` returns `codecrafters-claude-code` after the parser
+  splices the model's text-mode JSON into `tool_calls` and dispatches
+  the `Read` tool. Multi-tool prompt (`Glob` then summarize) also
+  succeeds.
+- **Compaction**: not yet exercised on a real long session — the unit
+  tests cover the algorithm; would be worth verifying the summary
+  prompt produces coherent transcripts on a real model under live
+  token pressure.
 
 ### Useful commands
 
