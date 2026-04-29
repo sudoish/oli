@@ -197,16 +197,28 @@ Fresh-context boot sequence:
 After this, the harness is a credible daily driver against
 `qwen2.5-coder:7b` on Ollama or Claude via OpenRouter.
 
+Design doc: `specs/memory.md` — Phase 1d introduces a `Memory` trait
+with `LinearWithCompact` as the default impl. The flat
+`Agent.messages: Vec<Value>` migrates to `Box<dyn Memory>` so future
+strategies (graph-backed, RAG, hierarchical summary) become drop-in.
+
+- **`Memory` trait + `LinearWithCompact` default.** Replaces today's
+  `Agent.messages` with `Box<dyn Memory>`. `record` / `snapshot` /
+  `pin` / `truncate` / `clear` / `maybe_compact`. Spec: `specs/memory.md`.
 - Token tracking from `usage` field on responses (request streaming
   responses with `stream_options.include_usage: true` so the final
-  chunk carries totals).
-- Auto-compact: when nearing the model's context window, summarize older
-  turns into a single message.
+  chunk carries totals). Lives outside the trait; tracker reads
+  snapshots and feeds `current_tokens` into `maybe_compact`.
+- Auto-compact: `LinearWithCompact::maybe_compact` collapses oldest
+  non-pinned span into one summary message via the agent's provider
+  when token pressure exceeds the configured target.
 - Model-capability registry: hardcoded prefix → `{ ctx_window,
   supports_native_tool_calls, supports_streaming_tool_deltas }` map.
 - Tool-call fallback parser: if `tool_calls` is empty but content looks
   like a tool call (`<tool_call>{...}</tool_call>`, fenced JSON), parse
-  and dispatch.
+  and dispatch. **Confirmed needed during Phase 1c smoke test:**
+  qwen2.5-coder:7b emits tool calls as plain JSON in `content`, no
+  structured field — agent currently treats them as final answers.
 
 ### Known unverified-by-hand bits in 1c
 

@@ -296,7 +296,9 @@ non-negotiable on a 7B local model:
 
 - **Token-aware context with auto-compact.** Track per-turn usage; when
   approaching the model's context window, summarize older turns into a single
-  message. Without this, daily use is impossible on small windows.
+  message. Without this, daily use is impossible on small windows. Lands
+  behind the `Memory` trait (default impl: `LinearWithCompact`); see
+  `specs/memory.md` for the pluggable strategy surface.
 - **Tool-call fallback parser.** Many local models emit tool calls as plain
   text (`<tool_call>{...}</tool_call>`, fenced JSON, etc.) rather than the
   structured `tool_calls` field. If the structured field is empty but the
@@ -369,7 +371,10 @@ add three config lines.
   OpenAI-compat genuinely can't deliver).
 - Diff preview before `Edit`/`Write`.
 - Per-project `.agent/config.toml` overrides.
-- Optional memory directory mirroring `~/.claude/memory`.
+- `NotesStore` trait + filesystem default — cross-session "long-term"
+  memory exposed to the model as `WriteNote` / `SearchNotes` /
+  `ListNotes` tools. Distinct from active-context `Memory`; see
+  `specs/memory.md`.
 
 ## Success criteria
 
