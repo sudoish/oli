@@ -7,7 +7,6 @@ description = "A minimal, hackable, single-binary terminal coding agent."
 
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "signal"] }
-async-openai = { version = "=0.32.4", features = ["byot", "chat-completion", "model"] }
 clap = { version = "4.3.14", features = ["derive"] }
 serde_json = "1.0.149"
 serde = { version = "1.0.228", features = ["derive"] }
