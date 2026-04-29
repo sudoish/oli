@@ -10,6 +10,7 @@ pub mod edit;
 pub mod glob;
 pub mod grep;
 pub mod read;
+pub mod subprocess;
 pub mod util;
 pub mod write;
 
@@ -44,6 +45,14 @@ impl Registry {
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {
         self.tools.get(name).map(|b| b.as_ref())
+    }
+
+    /// Iterate over registered tools in registration order. Used by the
+    /// `/tools` slash command and by future plugin hooks.
+    pub fn iter(&self) -> impl Iterator<Item = &dyn Tool> {
+        self.order
+            .iter()
+            .filter_map(|n| self.tools.get(n).map(|b| b.as_ref()))
     }
 
     pub async fn dispatch(&self, name: &str, args: Value, ctx: &ToolContext) -> Result<String> {

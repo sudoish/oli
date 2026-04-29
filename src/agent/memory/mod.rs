@@ -30,6 +30,15 @@ pub trait Memory: Send + Sync {
     /// instructions.
     async fn pin(&mut self, message: Value);
 
+    /// Return the pinned messages, in pin order. Default is empty for
+    /// strategies that don't separate pinned from regular content; the
+    /// `LinearWithCompact` default override returns its `pinned` vec so
+    /// `/system` can render what's anchored without reaching into
+    /// strategy internals.
+    async fn pinned(&self) -> Vec<Value> {
+        Vec::new()
+    }
+
     /// Number of raw records since the last `clear()`. Counts entries the
     /// caller passed to `record`, not pinned messages and not internally
     /// managed summary state. Used by the REPL for Ctrl-C rollback.

@@ -9,8 +9,11 @@
 //!   and future heuristics may want to know).
 //!
 //! Lookup is by longest-matching prefix, with a conservative default for
-//! anything we don't recognize. Hardcoded today; a config-driven override
-//! is a Phase 2 follow-up.
+//! anything we don't recognize. The hardcoded `ENTRIES` table covers the
+//! common families; users can extend or override via `[[caps]]` config
+//! entries (handled by `caps_for_with_overrides`).
+
+use serde::Deserialize;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelCaps {
@@ -119,6 +122,42 @@ pub fn caps_for(model: &str) -> ModelCaps {
     DEFAULT
 }
 
+/// User-supplied capability override. Matches by `prefix.starts_with`.
+/// `[[caps]]` config entries deserialize into this; a caller's overrides
+/// take precedence over the hardcoded `ENTRIES` table.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CapsOverride {
+    pub prefix: String,
+    pub ctx_window: usize,
+    #[serde(default)]
+    pub supports_native_tool_calls: bool,
+    #[serde(default)]
+    pub supports_streaming_tool_deltas: bool,
+}
+
+impl CapsOverride {
+    pub fn to_caps(&self) -> ModelCaps {
+        ModelCaps {
+            ctx_window: self.ctx_window,
+            supports_native_tool_calls: self.supports_native_tool_calls,
+            supports_streaming_tool_deltas: self.supports_streaming_tool_deltas,
+        }
+    }
+}
+
+/// Lookup capabilities for `model`. User-supplied overrides win over the
+/// hardcoded table. Within a list, the first matching prefix wins, so
+/// callers can shadow a built-in entry by listing a more specific one
+/// earlier.
+pub fn caps_for_with_overrides(model: &str, overrides: &[CapsOverride]) -> ModelCaps {
+    for ov in overrides {
+        if model.starts_with(&ov.prefix) {
+            return ov.to_caps();
+        }
+    }
+    caps_for(model)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +203,67 @@ mod tests {
         let c = caps_for("qwen2.5-coder:7b");
         assert_eq!(c.compact_target(), 32_000 * 80 / 100);
         assert!(c.compact_target() < c.ctx_window);
+    }
+
+    #[test]
+    fn override_takes_precedence_over_hardcoded_entry() {
+        let overrides = vec![CapsOverride {
+            prefix: "qwen2.5-coder".into(),
+            ctx_window: 64_000,
+            supports_native_tool_calls: true,
+            supports_streaming_tool_deltas: true,
+        }];
+        let c = caps_for_with_overrides("qwen2.5-coder:7b", &overrides);
+        assert_eq!(c.ctx_window, 64_000);
+        assert!(c.supports_native_tool_calls);
+    }
+
+    #[test]
+    fn override_can_introduce_brand_new_model_family() {
+        let overrides = vec![CapsOverride {
+            prefix: "my-custom".into(),
+            ctx_window: 4_096,
+            supports_native_tool_calls: false,
+            supports_streaming_tool_deltas: false,
+        }];
+        let c = caps_for_with_overrides("my-custom:13b", &overrides);
+        assert_eq!(c.ctx_window, 4_096);
+    }
+
+    #[test]
+    fn no_override_match_falls_through_to_hardcoded_then_default() {
+        // Model unknown to both lists → DEFAULT.
+        let overrides = vec![CapsOverride {
+            prefix: "irrelevant".into(),
+            ctx_window: 1,
+            supports_native_tool_calls: true,
+            supports_streaming_tool_deltas: true,
+        }];
+        let c = caps_for_with_overrides("totally-made-up:1b", &overrides);
+        assert_eq!(c, DEFAULT);
+    }
+
+    #[test]
+    fn override_order_decides_which_wins_when_two_prefixes_overlap() {
+        let overrides = vec![
+            CapsOverride {
+                prefix: "qwen2.5-coder:7b".into(),
+                ctx_window: 16_000,
+                supports_native_tool_calls: true,
+                supports_streaming_tool_deltas: true,
+            },
+            CapsOverride {
+                prefix: "qwen2.5-coder".into(),
+                ctx_window: 99_000,
+                supports_native_tool_calls: false,
+                supports_streaming_tool_deltas: false,
+            },
+        ];
+        // Specific entry comes first → it wins.
+        let c = caps_for_with_overrides("qwen2.5-coder:7b", &overrides);
+        assert_eq!(c.ctx_window, 16_000);
+        // Lookup for a sibling tag falls through to the broader prefix.
+        let c = caps_for_with_overrides("qwen2.5-coder:32b", &overrides);
+        assert_eq!(c.ctx_window, 99_000);
     }
 }

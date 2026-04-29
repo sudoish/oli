@@ -1,6 +1,7 @@
 mod agent;
 mod config;
 mod error;
+mod policy;
 mod providers;
 mod repl;
 mod tools;
@@ -12,6 +13,7 @@ use crate::agent::Agent;
 use crate::agent::context::SystemPromptBuilder;
 use crate::config::Config;
 use crate::error::{AgentError, Result};
+use crate::policy::{ConfigPolicy, ReadlineApprover};
 use crate::providers::openai_compat::OpenAICompatProvider;
 use crate::tools::{
     Registry, bash::Bash, edit::Edit, glob::Glob, grep::Grep, read::Read, write::Write,
@@ -35,7 +37,7 @@ async fn main() {
 }
 
 async fn run(args: Args) -> Result<()> {
-    let cfg = Config::load_or_default()?;
+    let cfg = std::sync::Arc::new(Config::load_or_default()?);
     let provider_name = cfg.default_provider.clone();
     let pcfg = cfg.provider(&provider_name)?;
     if pcfg.kind != "openai-compat" {
@@ -56,22 +58,39 @@ async fn run(args: Args) -> Result<()> {
     tools.register(Bash);
     tools.register(Grep);
     tools.register(Glob);
+    for sub in &cfg.tools.subprocess {
+        tools.register(crate::tools::subprocess::SubprocessTool::from_config(sub));
+    }
 
     let system_prompt = SystemPromptBuilder::from_env().build().await;
-    let mut agent = Agent::new(provider, tools, model)
-        .pin_system_prompt(system_prompt)
-        .await;
+    let policy = Box::new(ConfigPolicy::from_config(&cfg.policy));
+
+    let agent_base = Agent::new(provider, tools, model)
+        .with_policy(policy)
+        .with_config(cfg.clone(), provider_name);
 
     match args.prompt {
         Some(p) => {
-            // One-shot: keep the existing scripted-friendly behavior — print
-            // the final assistant content once, no streaming.
+            // One-shot: scripted-friendly. Policy still gates which tools
+            // run, but `Ask` decisions auto-approve (default `AlwaysApprove`)
+            // so the model isn't blocked by an interactive prompt no one
+            // can answer. Users who want a stricter scripted run can swap
+            // an `AlwaysDeny` approver in once the config flag for it
+            // exists (Phase 2 follow-up).
+            let mut agent = agent_base.pin_system_prompt(system_prompt).await;
             let output = agent.run(&p).await?;
             if !output.is_empty() {
                 println!("{}", output);
             }
             Ok(())
         }
-        None => repl::run(agent).await,
+        None => {
+            // Interactive: prompt the user via stdin for any `Ask`.
+            let agent = agent_base
+                .with_approver(Box::new(ReadlineApprover))
+                .pin_system_prompt(system_prompt)
+                .await;
+            repl::run(agent).await
+        }
     }
 }

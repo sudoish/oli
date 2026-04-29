@@ -16,12 +16,14 @@ Spec lives at `specs/README.md`. This doc covers state, not goals.
 | 1e33058 | 1b    | System prompt with env / git / dir listing / `CLAUDE.md` ingestion             |
 | 1ac7fef | 1c    | Streaming `Provider`, stateful `Agent`, REPL with rustyline, `SlashCommand` trait + `/clear`, `/help`, `/exit` |
 | 254687e | docs  | `specs/memory.md` — pluggable active-context memory trait                       |
-| _next_  | 1d    | `Memory` trait + `LinearWithCompact` default, token tracking, `maybe_compact` summarization, model-capability registry, tool-call fallback parser |
+| 21f7bc5 | 1d    | `Memory` trait + `LinearWithCompact` default, token tracking, `maybe_compact` summarization, model-capability registry, tool-call fallback parser |
+| _next_  | 2     | Policy engine, slash command set (`/cost` `/tools` `/system` `/memory` `/compact` `/provider` `/model`), subprocess tool registration, per-config caps overrides |
 
-Tip-of-master at last update: **Phase 1d (this commit)**.
-Tests: **110 unit tests, all green** (was 77). Release build: clean, zero warnings.
-Smoke-tested against `qwen2.5-coder:7b` on Ollama — tool dispatch works
-end-to-end via the fallback parser.
+Tip-of-master at last update: **Phase 2 (this commit)**.
+Tests: **146 unit tests, all green** (was 110). Release build: clean, zero warnings.
+Smoke-tested against `qwen2.5-coder:7b` on Ollama — tools dispatch
+through the policy gate, fallback parser still bridges JSON-as-content,
+multi-turn flow intact.
 
 ## What works today
 
@@ -37,6 +39,28 @@ end-to-end via the fallback parser.
 - TOML config at `~/.config/agent/config.toml` overrides defaults if
   present. Config supports multiple named providers, all of `kind =
   "openai-compat"` for now.
+
+**Phase 2 — flexibility surface:**
+- Policy engine in `src/policy/`. `Policy::check(tool, args) -> Allow | Ask
+  | Deny`; `Approver::approve(...)` resolves `Ask` outcomes asynchronously.
+  Default `ConfigPolicy` reads `[policy]` from config (auto_allow / ask /
+  bash_allowlist; baked-in defaults cover Read/Glob/Grep auto, Edit /
+  Write / Bash ask, common dev shell commands on the bash allowlist).
+- Three approvers ship: `AlwaysApprove` (default + scripted `-p`),
+  `ReadlineApprover` (REPL — prompts y/N via stdin on a blocking task),
+  `AlwaysDeny` (testing + future strict-mode flag).
+- Slash command set expanded: `/cost`, `/tools`, `/system`, `/memory`
+  (subcommands `stats` / `dump`), `/compact`, `/provider`, `/model`.
+  `/provider <name>` swaps to a fresh `OpenAICompatProvider` from config
+  and recomputes caps; `/model <id>` swaps within the active provider.
+- Subprocess tools (MCP-lite). `[[tools.subprocess]]` config entries
+  register external binaries that speak JSON over stdio. Args go in via
+  stdin, stdout becomes the tool result, non-zero exits surface stderr
+  to the model.
+- Per-config caps overrides. `[[caps]]` entries with a `prefix` field
+  shadow the hardcoded `caps.rs` registry, so a custom Ollama-tagged
+  model whose context window or tool-call support differs from the
+  family default can be made first-class without recompile.
 
 **Local-model survival kit (Phase 1d):**
 - `Memory` trait (`src/agent/memory/`) replaces the flat `Vec<Value>`. Default
@@ -132,20 +156,21 @@ Per-spec architecture sketch except: `agent/compact.rs` (Phase 1d),
 
 Gaps a daily-driver user would hit today:
 
-- **No policy / permission engine.** `Bash` runs whatever the model wants.
-  (Phase 2.)
-- **Slash command set is minimal.** `/model`, `/provider`, `/cost`,
-  `/system`, `/tools`, `/compact`, `/memory` not yet implemented. (Phase 2.)
-- **No subprocess tools** (MCP-lite from Phase 2).
-- **No plugin runtime** (Phase 3, including plugin-registered `Memory`
-  strategies).
+- **No `--strict-mode` / config flag for `AlwaysDeny`.** Today the `-p`
+  one-shot path uses `AlwaysApprove`. A user who wants scripted runs
+  with strict policy (any `Ask` decision becomes `Deny`) has to swap
+  approvers programmatically.
 - **No alternative `Memory` strategies shipped.** Default
   `LinearWithCompact` is the only impl in tree; `EmbeddingRAG` /
   `GraphBacked` / `HierarchicalSummary` are sketched in `specs/memory.md`
   but not implemented.
-- **No native Anthropic provider** with prompt caching (Phase 4).
-- **No `NotesStore`** for cross-session memory (Phase 4).
-- **No session persistence**, no `--resume` / `--continue`.
+- **No session persistence**, no `--resume` / `--continue`. (Phase 3.)
+- **No subagent (`Task` tool).** (Phase 3.)
+- **No hooks** (`PreToolUse` / `PostToolUse` / `Stop`). (Phase 3.)
+- **No plugin runtime** (Phase 3, including plugin-registered `Memory`
+  strategies and approvers).
+- **No native Anthropic provider** with prompt caching. (Phase 4.)
+- **No `NotesStore`** for cross-session memory. (Phase 4.)
 
 ## Decisions made
 
@@ -213,26 +238,29 @@ Fresh-context boot sequence:
 2. Read `specs/memory.md` — the active-context memory architecture.
 3. Read this file — current state.
 4. `git log --oneline -10` — phase boundaries with commit SHAs.
-5. `cargo test` — confirm 110 tests green.
+5. `cargo test` — confirm 146 tests green.
 6. `cargo build --release` — confirm clean build.
 7. Pick the next phase below.
 
 ### Next up
 
-**Phase 2 — flexibility surface.** With the local-driver mission done,
-the next bottleneck is daily-use UX and safety.
+**Phase 3 — power features.** With safety + extensibility surfaces in
+place, the next leg is making the harness a long-lived environment
+rather than a per-invocation tool.
 
-- **Policy engine.** `Policy::check(tool, args, cwd) -> Allow | Ask |
-  Deny`. `Bash` and `Edit` should never run unguarded.
-- **`/model`, `/provider`, `/cost`, `/tools`, `/compact`, `/memory`.**
-  Switching mid-session is the biggest single UX gap. `/cost` is
-  trivial now that `agent.last_usage` is wired. `/memory` should expose
-  `snapshot` for inspection and `compact` to manually trigger.
-- **Subprocess tool registration (MCP-lite).** Three config lines = new
-  tool, no recompile.
-- **Per-config-section overrides for `caps`.** Right now caps are
-  hardcoded; users with custom Ollama models can't override
-  `supports_native_tool_calls` or `ctx_window`. Add a config table.
+- **Session persistence.** JSONL transcript per session, `--resume <id>`,
+  `--continue` (latest). The `Memory` trait already provides a
+  reasonable serialization seam (`snapshot` + `record` round-trip).
+- **Subagent (`Task` tool).** Spawn a child loop with isolated context,
+  return only the summary. Same machinery powers plugin
+  `ctx:prompt(...)` later.
+- **Hook dispatcher.** `PreToolUse`, `PostToolUse`, `Stop`. Shared
+  between built-in hooks and plugin-registered hooks.
+- **Plugin runtime: Lua via `mlua`.** Auto-discover from
+  `~/.config/agent/plugins/` and `<project>/.agent/plugins/`. Sandbox
+  removes raw `os` / `io` access; everything flows through the policy
+  engine. Plugin hooks share the dispatcher with built-ins.
+- **`/plugins` and `/plugins reload`** slash commands.
 
 ### Phase 1d smoke-test results (2026-04-28)
 
@@ -249,6 +277,29 @@ the next bottleneck is daily-use UX and safety.
   tests cover the algorithm; would be worth verifying the summary
   prompt produces coherent transcripts on a real model under live
   token pressure.
+
+### Phase 2 smoke-test results (2026-04-28)
+
+- **Policy through dispatch**: verified against `qwen2.5-coder:7b` on
+  Ollama. `-p "Use the Read tool ... package name"` returns
+  `codecrafters-claude-code` — Read is auto-allowed by the default
+  policy, dispatch flows through the policy gate, fallback parser still
+  bridges JSON-as-content. Plain chat without tools also works.
+- **Slash commands `/cost`, `/tools`, `/system`, `/memory`, `/compact`,
+  `/provider`, `/model`**: unit-tested end-to-end (132+ tests covering
+  the listing/swap/inspection paths). Live REPL behavior under user
+  input still needs a TTY-driven session.
+- **Approval prompt**: `ReadlineApprover` reads y/N via stdin on a
+  blocking task; not exercised live yet because the smoke test went
+  through `-p` (`AlwaysApprove`). Needs a REPL session that triggers an
+  `Edit` or unknown `Bash` to verify the prompt rendering.
+- **Subprocess tools**: round-trip exercised via `cat` / `wc -c` /
+  `false` in unit tests; no live model has been steered into calling a
+  config-registered subprocess tool yet.
+- **Caps overrides**: unit-tested in `caps.rs`. Live Ollama usage with
+  a `[[caps]]` config block to flip `supports_native_tool_calls=true`
+  on qwen would let us measure whether qwen's structured output is
+  reliable enough to skip the fallback parser.
 
 ### Useful commands
 

@@ -156,6 +156,23 @@ impl Provider for OpenAICompatProvider {
 
         Ok(ChatResponse { message, usage })
     }
+
+    async fn list_models(&self) -> Result<Vec<String>> {
+        let resp: Value = self
+            .client
+            .models()
+            .list_byot()
+            .await
+            .map_err(|e| AgentError::Provider(e.to_string()))?;
+        let data = resp
+            .get("data")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| AgentError::Provider("models response missing `data` array".into()))?;
+        Ok(data
+            .iter()
+            .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
+            .collect())
+    }
 }
 
 #[derive(Default)]

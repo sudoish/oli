@@ -1,6 +1,10 @@
+use std::sync::Arc;
+
 use serde_json::{Value, json};
 
+use crate::config::Config;
 use crate::error::Result;
+use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
 use crate::providers::{ChatRequest, ContentSink, Provider, Usage};
 use crate::tools::{Registry, ToolContext};
 
@@ -9,11 +13,16 @@ pub mod context;
 pub mod memory;
 pub mod tool_parse;
 
-pub use caps::{ModelCaps, caps_for};
+pub use caps::{ModelCaps, caps_for, caps_for_with_overrides};
 pub use memory::{CompactContext, LinearWithCompact, Memory};
 
 pub struct Agent {
     pub provider: Box<dyn Provider>,
+    /// Name of the active provider in `cfg.providers`. Empty when the
+    /// agent was constructed without a Config (tests). Used by
+    /// `/provider` to know which entry is current and by `/model` to
+    /// look up the right `base_url` for endpoint queries.
+    pub provider_name: String,
     pub tools: Registry,
     pub model: String,
     /// Capabilities resolved from the model id at construction. Drives the
@@ -29,6 +38,18 @@ pub struct Agent {
     /// Drives `Memory::maybe_compact` decisions and is the data source for
     /// the eventual `/cost` slash command.
     pub last_usage: Option<Usage>,
+    /// Gate every tool call. Default is `ConfigPolicy::defaults()` (Read /
+    /// Glob / Grep auto-allow, Edit / Write / Bash ask, common dev shell
+    /// commands on the bash allowlist).
+    pub policy: Box<dyn Policy>,
+    /// Resolves `Decision::Ask` outcomes. Default is `AlwaysApprove` so
+    /// non-interactive scripted invocations don't deadlock; the REPL
+    /// swaps in `ReadlineApprover` at startup.
+    pub approver: Box<dyn Approver>,
+    /// Optional handle on the parsed configuration. The `/provider` and
+    /// `/model` slash commands need it to enumerate alternatives and
+    /// build new providers. Tests construct agents without a config.
+    pub cfg: Option<Arc<Config>>,
     ctx: ToolContext,
 }
 
@@ -37,13 +58,56 @@ impl Agent {
         let caps = caps_for(&model);
         Self {
             provider,
+            provider_name: String::new(),
             tools,
             model,
             caps,
             memory: Box::new(LinearWithCompact::new()),
             last_usage: None,
+            policy: Box::new(ConfigPolicy::defaults()),
+            approver: Box::new(AlwaysApprove),
+            cfg: None,
             ctx: ToolContext::new(),
         }
+    }
+
+    /// Bind the agent to a Config and the name of the currently-active
+    /// provider entry in it. Required for `/provider` (to enumerate and
+    /// swap) and helpful for `/model` (to look up the active base URL
+    /// when listing models).
+    ///
+    /// Re-resolves `self.caps` against the config's `[[caps]]` overrides
+    /// — running `Agent::new(...).with_config(...)` produces the same
+    /// caps the user would see after a `/model` swap.
+    pub fn with_config(mut self, cfg: Arc<Config>, provider_name: impl Into<String>) -> Self {
+        self.caps = caps_for_with_overrides(&self.model, &cfg.caps);
+        self.cfg = Some(cfg);
+        self.provider_name = provider_name.into();
+        self
+    }
+
+    /// Resolve capabilities for `model` honoring the bound config's
+    /// overrides if any. Used by the `/model` slash command so a swap
+    /// picks up `[[caps]]` overrides without re-plumbing config access.
+    pub fn resolve_caps(&self, model: &str) -> ModelCaps {
+        match &self.cfg {
+            Some(cfg) => caps_for_with_overrides(model, &cfg.caps),
+            None => caps_for(model),
+        }
+    }
+
+    /// Override the default policy. Pairs with `with_approver` for
+    /// REPL-vs-script approval ergonomics.
+    pub fn with_policy(mut self, policy: Box<dyn Policy>) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    /// Override the default approver. The REPL swaps in `ReadlineApprover`;
+    /// scripted `-p` mode keeps `AlwaysApprove`.
+    pub fn with_approver(mut self, approver: Box<dyn Approver>) -> Self {
+        self.approver = approver;
+        self
     }
 
     /// Replace the default `LinearWithCompact` memory with a custom impl.
@@ -75,6 +139,46 @@ impl Agent {
     pub async fn clear(&mut self) {
         self.memory.clear().await;
         self.ctx = ToolContext::new();
+    }
+
+    /// Force a compaction pass regardless of current token usage. Drives
+    /// the `/compact` slash command. Returns whatever `maybe_compact`
+    /// returns — strategies that decide there's nothing to compact (too
+    /// few messages) report success without changing state.
+    pub async fn force_compact(&mut self) -> Result<()> {
+        self.memory
+            .maybe_compact(CompactContext {
+                provider: self.provider.as_ref(),
+                model: &self.model,
+                target_tokens: 0,
+                current_tokens: usize::MAX,
+            })
+            .await
+    }
+
+    /// Run a single tool call through the policy gate, then through the
+    /// tool registry. The returned string is what the model sees as the
+    /// tool result — including policy denials and user declines, which
+    /// are not errors at the agent level.
+    async fn dispatch_with_policy(&self, name: &str, args: Value) -> String {
+        let decision = self.policy.check(name, &args);
+        match decision {
+            Decision::Allow => match self.tools.dispatch(name, args, &self.ctx).await {
+                Ok(s) => s,
+                Err(e) => format!("Error: {}", e),
+            },
+            Decision::Deny(reason) => format!("policy denied {}: {}", name, reason),
+            Decision::Ask(reason) => {
+                if self.approver.approve(name, &args, &reason).await {
+                    match self.tools.dispatch(name, args, &self.ctx).await {
+                        Ok(s) => s,
+                        Err(e) => format!("Error: {}", e),
+                    }
+                } else {
+                    format!("user declined {}: {}", name, reason)
+                }
+            }
+        }
     }
 
     /// Append `prompt` as a user turn, run the loop until the assistant
@@ -169,10 +273,7 @@ impl Agent {
                     .unwrap_or("{}");
                 let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
 
-                let result = match self.tools.dispatch(name, args, &self.ctx).await {
-                    Ok(s) => s,
-                    Err(e) => format!("Error: {}", e),
-                };
+                let result = self.dispatch_with_policy(name, args).await;
 
                 self.memory
                     .record(json!({
@@ -511,6 +612,131 @@ mod tests {
         );
         let out = agent.run("hi").await.unwrap();
         assert_eq!(out, r#"{"name":"Echo","arguments":{}}"#);
+    }
+
+    #[tokio::test]
+    async fn policy_denial_surfaces_as_tool_result_not_error() {
+        struct DenyAll;
+        impl Policy for DenyAll {
+            fn check(&self, tool: &str, _: &Value) -> Decision {
+                Decision::Deny(format!("nope: {}", tool))
+            }
+        }
+
+        let provider = FakeProvider::new(vec![
+            assistant_with_tool_calls(vec![tool_call("c1", "Echo", json!({}))]),
+            assistant_text("recovered"),
+        ]);
+        let raw = std::sync::Arc::new(provider);
+        let provider_ref = raw.clone();
+
+        let mut tools = Registry::new();
+        tools.register(StaticTool {
+            name: "Echo",
+            out: "tool-output",
+        });
+
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(provider_ref.clone())),
+            tools,
+            "m".into(),
+        )
+        .with_policy(Box::new(DenyAll));
+
+        let out = agent.run("hi").await.unwrap();
+        assert_eq!(out, "recovered");
+
+        let seen = provider_ref.requests();
+        let tool_msg = &seen[1].messages[2];
+        assert_eq!(tool_msg["role"], "tool");
+        assert!(
+            tool_msg["content"]
+                .as_str()
+                .unwrap()
+                .contains("policy denied")
+        );
+    }
+
+    #[tokio::test]
+    async fn ask_decision_resolved_by_approver_returning_false_is_user_declined() {
+        struct AskAll;
+        impl Policy for AskAll {
+            fn check(&self, _: &str, _: &Value) -> Decision {
+                Decision::Ask("you sure?".into())
+            }
+        }
+        struct No;
+        #[async_trait]
+        impl crate::policy::Approver for No {
+            async fn approve(&self, _: &str, _: &Value, _: &str) -> bool {
+                false
+            }
+        }
+
+        let provider = FakeProvider::new(vec![
+            assistant_with_tool_calls(vec![tool_call("c1", "Echo", json!({}))]),
+            assistant_text("got it"),
+        ]);
+        let raw = std::sync::Arc::new(provider);
+        let provider_ref = raw.clone();
+
+        let mut tools = Registry::new();
+        tools.register(StaticTool {
+            name: "Echo",
+            out: "tool-output",
+        });
+
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(provider_ref.clone())),
+            tools,
+            "m".into(),
+        )
+        .with_policy(Box::new(AskAll))
+        .with_approver(Box::new(No));
+
+        agent.run("hi").await.unwrap();
+        let seen = provider_ref.requests();
+        let tool_msg = &seen[1].messages[2];
+        assert!(
+            tool_msg["content"]
+                .as_str()
+                .unwrap()
+                .contains("user declined")
+        );
+    }
+
+    #[tokio::test]
+    async fn allow_decision_runs_the_tool_unchanged() {
+        struct AllowAll;
+        impl Policy for AllowAll {
+            fn check(&self, _: &str, _: &Value) -> Decision {
+                Decision::Allow
+            }
+        }
+
+        let provider = FakeProvider::new(vec![
+            assistant_with_tool_calls(vec![tool_call("c1", "Echo", json!({}))]),
+            assistant_text("ok"),
+        ]);
+        let raw = std::sync::Arc::new(provider);
+        let provider_ref = raw.clone();
+
+        let mut tools = Registry::new();
+        tools.register(StaticTool {
+            name: "Echo",
+            out: "tool-output",
+        });
+
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(provider_ref.clone())),
+            tools,
+            "m".into(),
+        )
+        .with_policy(Box::new(AllowAll));
+
+        agent.run("hi").await.unwrap();
+        let seen = provider_ref.requests();
+        assert_eq!(seen[1].messages[2]["content"], "tool-output");
     }
 
     #[tokio::test]

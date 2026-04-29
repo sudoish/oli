@@ -73,4 +73,12 @@ pub trait Provider: Send + Sync {
         }
         Ok(resp)
     }
+
+    /// Enumerate model ids the provider can serve. Used by the `/model`
+    /// slash command. Default returns an empty list — providers that
+    /// don't expose a discovery endpoint shouldn't error, just say
+    /// nothing.
+    async fn list_models(&self) -> Result<Vec<String>> {
+        Ok(Vec::new())
+    }
 }

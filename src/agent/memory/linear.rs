@@ -71,6 +71,10 @@ impl Memory for LinearWithCompact {
         self.pinned.push(message);
     }
 
+    async fn pinned(&self) -> Vec<Value> {
+        self.pinned.clone()
+    }
+
     fn len(&self) -> usize {
         self.record_count
     }

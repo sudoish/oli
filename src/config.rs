@@ -1,11 +1,14 @@
 use serde::Deserialize;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{AgentError, Result};
+use crate::policy::PolicyConfig;
 
-/// Top-level harness config. Phase 0 only models the providers section;
-/// later phases will add `[policy]`, `[plugins]`, `[[tools.subprocess]]`, etc.
+/// Top-level harness config. Modeled progressively as phases land:
+/// providers (phase 0), policy (phase 2), plugins / subprocess tools
+/// (phase 2/3), per-project overrides (phase 4).
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub default_provider: String,
@@ -15,6 +18,50 @@ pub struct Config {
 
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
+
+    /// Policy / approval rules. When the section is missing, baked-in
+    /// defaults (Read/Glob/Grep auto-allow, Edit/Write/Bash ask, common
+    /// dev commands on the bash allowlist) are used.
+    #[serde(default)]
+    pub policy: PolicyConfig,
+
+    /// External tools registered as subprocesses (MCP-lite). Empty by
+    /// default. Each `[[tools.subprocess]]` entry is wrapped in the
+    /// `SubprocessTool` adapter at startup.
+    #[serde(default)]
+    pub tools: ToolsConfig,
+
+    /// Per-model capability overrides. `[[caps]]` entries with a
+    /// `prefix` field shadow the hardcoded registry. Useful when running
+    /// a custom Ollama-tagged model whose context window or tool-call
+    /// support differs from the family default.
+    #[serde(default)]
+    pub caps: Vec<crate::agent::caps::CapsOverride>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ToolsConfig {
+    #[serde(default)]
+    pub subprocess: Vec<SubprocessToolConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct SubprocessToolConfig {
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    pub description: String,
+    /// JSON-Schema describing the tool's args object. Defaults to a
+    /// no-args `{type:"object", properties:{}}` so a config entry that
+    /// only sets `name`, `command`, `description` still produces a valid
+    /// tool spec for the model.
+    #[serde(default = "default_parameters")]
+    pub parameters: Value,
+}
+
+fn default_parameters() -> Value {
+    json!({"type": "object", "properties": {}})
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -71,6 +118,9 @@ impl Config {
             default_provider: "openrouter".to_string(),
             default_model: None,
             providers,
+            policy: PolicyConfig::default(),
+            tools: ToolsConfig::default(),
+            caps: Vec::new(),
         }
     }
 
