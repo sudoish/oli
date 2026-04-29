@@ -18,6 +18,15 @@ pub enum AgentError {
 
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+
+    #[error("plugin error: {0}")]
+    Plugin(String),
+}
+
+impl From<mlua::Error> for AgentError {
+    fn from(e: mlua::Error) -> Self {
+        AgentError::Plugin(e.to_string())
+    }
 }
 
 #[derive(Debug, Error)]

@@ -11,6 +11,7 @@ pub mod glob;
 pub mod grep;
 pub mod read;
 pub mod subprocess;
+pub mod task;
 pub mod util;
 pub mod write;
 
@@ -36,11 +37,17 @@ impl Registry {
     }
 
     pub fn register<T: Tool + 'static>(&mut self, tool: T) {
+        self.register_box(Box::new(tool));
+    }
+
+    /// Insert an already-boxed tool. The plugin loader uses this to
+    /// register Lua-backed `Tool` impls without re-boxing.
+    pub fn register_box(&mut self, tool: Box<dyn Tool>) {
         let name = tool.name().to_string();
         if !self.tools.contains_key(&name) {
             self.order.push(name.clone());
         }
-        self.tools.insert(name, Box::new(tool));
+        self.tools.insert(name, tool);
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn Tool> {

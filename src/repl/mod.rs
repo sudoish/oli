@@ -15,10 +15,18 @@ use slash::{SlashOutcome, SlashRegistry};
 const PROMPT: &str = "> ";
 
 /// Drive an interactive session against `agent` until the user exits.
-pub async fn run(mut agent: Agent) -> Result<()> {
+/// `plugin_slashes` is the bag of Lua-backed slash commands discovered
+/// at startup; the binary threads them in alongside the built-ins.
+pub async fn run(
+    mut agent: Agent,
+    plugin_slashes: Vec<Box<dyn slash::SlashCommand>>,
+) -> Result<()> {
     let mut editor =
         DefaultEditor::new().map_err(|e| AgentError::Provider(format!("rustyline: {e}")))?;
-    let registry = SlashRegistry::default_set();
+    let mut registry = SlashRegistry::default_set();
+    for s in plugin_slashes {
+        registry.register_box(s);
+    }
 
     println!("agent ready. /help for commands, Ctrl-D to exit.");
 

@@ -34,11 +34,16 @@ impl SlashRegistry {
     }
 
     pub fn register<C: SlashCommand + 'static>(&mut self, cmd: C) {
+        self.register_box(Box::new(cmd));
+    }
+
+    /// Insert an already-boxed slash command. Plugin loader uses this.
+    pub fn register_box(&mut self, cmd: Box<dyn SlashCommand>) {
         let name = cmd.name().to_string();
         if !self.commands.contains_key(&name) {
             self.order.push(name.clone());
         }
-        self.commands.insert(name, Box::new(cmd));
+        self.commands.insert(name, cmd);
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn SlashCommand> {
@@ -76,6 +81,8 @@ impl SlashRegistry {
         r.register(Compact);
         r.register(Provider);
         r.register(Model);
+        r.register(Sessions);
+        r.register(Plugins);
         r.register(Exit);
         r
     }
@@ -412,6 +419,84 @@ impl SlashCommand for Model {
         agent.caps = crate::agent::caps_for(arg);
         agent.last_usage = None;
         SlashOutcome::Continue(Some(format!("model switched to {}", arg)))
+    }
+}
+
+pub struct Sessions;
+
+#[async_trait]
+impl SlashCommand for Sessions {
+    fn name(&self) -> &str {
+        "sessions"
+    }
+    fn description(&self) -> &str {
+        "list saved sessions, newest first"
+    }
+    async fn run(&self, _args: &str, _agent: &mut Agent) -> SlashOutcome {
+        let entries = crate::agent::memory::list_sessions();
+        if entries.is_empty() {
+            return SlashOutcome::Continue(Some(
+                "(no saved sessions found in ~/.config/agent/sessions/)".into(),
+            ));
+        }
+        let mut out = format!("Sessions ({}):\n", entries.len());
+        for (i, e) in entries.iter().take(20).enumerate() {
+            let when = e
+                .mtime
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| {
+                    let secs = d.as_secs();
+                    format!("epoch+{}s", secs)
+                })
+                .unwrap_or_else(|| "?".into());
+            out.push_str(&format!("  {:>2}. {}  ({})\n", i + 1, e.id, when));
+        }
+        if entries.len() > 20 {
+            out.push_str(&format!("  ... and {} more\n", entries.len() - 20));
+        }
+        out.push_str("Resume with: codecrafters-claude-code --resume <id>");
+        SlashOutcome::Continue(Some(out))
+    }
+}
+
+pub struct Plugins;
+
+#[async_trait]
+impl SlashCommand for Plugins {
+    fn name(&self) -> &str {
+        "plugins"
+    }
+    fn description(&self) -> &str {
+        "list loaded Lua plugins"
+    }
+    async fn run(&self, _args: &str, agent: &mut Agent) -> SlashOutcome {
+        if agent.plugin_manifest.is_empty() {
+            return SlashOutcome::Continue(Some(
+                "(no plugins loaded — drop .lua files into ~/.config/agent/plugins/ \
+                 or .agent/plugins/)"
+                    .into(),
+            ));
+        }
+        let mut out = format!("Loaded plugins ({}):\n", agent.plugin_manifest.len());
+        for m in &agent.plugin_manifest {
+            let v = m.version.as_deref().unwrap_or("?");
+            out.push_str(&format!(
+                "  {} (v{})  source={}\n",
+                m.name,
+                v,
+                m.source.display()
+            ));
+            if !m.tools.is_empty() {
+                out.push_str(&format!("    tools: {}\n", m.tools.join(", ")));
+            }
+            if !m.slash_commands.is_empty() {
+                out.push_str(&format!("    slash: /{}\n", m.slash_commands.join(", /")));
+            }
+            if !m.hook_events.is_empty() {
+                out.push_str(&format!("    hooks: {}\n", m.hook_events.join(", ")));
+            }
+        }
+        SlashOutcome::Continue(Some(out.trim_end().to_string()))
     }
 }
 

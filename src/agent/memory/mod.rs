@@ -12,8 +12,10 @@ use crate::error::Result;
 use crate::providers::Provider;
 
 pub mod linear;
+pub mod persisted;
 
 pub use linear::LinearWithCompact;
+pub use persisted::{PersistedMemory, SessionEntry, list_sessions, new_session_id, sessions_dir};
 
 #[async_trait]
 pub trait Memory: Send + Sync {

@@ -4,6 +4,7 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::error::Result;
+use crate::hooks::{HookPayload, HookRegistry};
 use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
 use crate::providers::{ChatRequest, ContentSink, Provider, Usage};
 use crate::tools::{Registry, ToolContext};
@@ -50,6 +51,18 @@ pub struct Agent {
     /// `/model` slash commands need it to enumerate alternatives and
     /// build new providers. Tests construct agents without a config.
     pub cfg: Option<Arc<Config>>,
+    /// Lifecycle hook dispatcher. Empty by default; populated by the
+    /// binary at startup with built-in hooks (Phase 3) and by the
+    /// plugin runtime (Phase 3 step 4) with user-authored Lua hooks.
+    pub hooks: HookRegistry,
+    /// Bound on the number of model turns per `run` invocation.
+    /// `None` means unbounded — the default for top-level interactive
+    /// runs. Subagents set this to a small number so a runaway child
+    /// can't spin forever.
+    pub max_turns: Option<usize>,
+    /// Plugin manifest captured at startup (or after `/plugins reload`).
+    /// `/plugins` introspects this to render its listing.
+    pub plugin_manifest: Vec<crate::plugins::PluginManifest>,
     ctx: ToolContext,
 }
 
@@ -67,8 +80,31 @@ impl Agent {
             policy: Box::new(ConfigPolicy::defaults()),
             approver: Box::new(AlwaysApprove),
             cfg: None,
+            hooks: HookRegistry::new(),
+            max_turns: None,
+            plugin_manifest: Vec::new(),
             ctx: ToolContext::new(),
         }
+    }
+
+    /// Stash plugin metadata for later introspection by `/plugins`.
+    pub fn with_plugin_manifest(mut self, manifest: Vec<crate::plugins::PluginManifest>) -> Self {
+        self.plugin_manifest = manifest;
+        self
+    }
+
+    /// Cap turns for this agent. Used by subagent spawning to keep a
+    /// child's loop bounded. Builder.
+    pub fn with_max_turns(mut self, n: usize) -> Self {
+        self.max_turns = Some(n);
+        self
+    }
+
+    /// Replace the hook registry. Builder; lets the binary or plugin
+    /// loader inject pre-populated hooks at construction.
+    pub fn with_hooks(mut self, hooks: HookRegistry) -> Self {
+        self.hooks = hooks;
+        self
     }
 
     /// Bind the agent to a Config and the name of the currently-active
@@ -120,15 +156,20 @@ impl Agent {
     }
 
     /// Pin a system prompt onto memory so it survives compaction. Empty
-    /// strings are ignored. Async because `Memory::pin` is async on the
-    /// trait — strategies that go to disk can do their I/O here.
+    /// strings are ignored. Skipped when the memory already has pinned
+    /// content — on `--resume` the persisted pin is authoritative; we
+    /// don't want to stack a fresh system prompt on top of the loaded one.
     pub async fn pin_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         let s: String = prompt.into();
-        if !s.is_empty() {
-            self.memory
-                .pin(json!({ "role": "system", "content": s }))
-                .await;
+        if s.is_empty() {
+            return self;
         }
+        if !self.memory.pinned().await.is_empty() {
+            return self;
+        }
+        self.memory
+            .pin(json!({ "role": "system", "content": s }))
+            .await;
         self
     }
 
@@ -200,7 +241,20 @@ impl Agent {
             .record(json!({ "role": "user", "content": prompt }))
             .await;
 
+        let mut turn = 0usize;
         loop {
+            if let Some(cap) = self.max_turns {
+                if turn >= cap {
+                    let msg = format!("(max_turns reached: {})", cap);
+                    self.hooks
+                        .dispatch(HookPayload::Stop {
+                            final_content: &msg,
+                        })
+                        .await;
+                    return Ok(msg);
+                }
+            }
+            turn += 1;
             let current_tokens = self
                 .last_usage
                 .map(|u| u.prompt_tokens as usize)
@@ -256,6 +310,11 @@ impl Agent {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                self.hooks
+                    .dispatch(HookPayload::Stop {
+                        final_content: &content,
+                    })
+                    .await;
                 return Ok(content);
             }
 
@@ -273,7 +332,22 @@ impl Agent {
                     .unwrap_or("{}");
                 let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
 
-                let result = self.dispatch_with_policy(name, args).await;
+                self.hooks
+                    .dispatch(HookPayload::PreToolUse {
+                        tool: name,
+                        args: &args,
+                    })
+                    .await;
+
+                let result = self.dispatch_with_policy(name, args.clone()).await;
+
+                self.hooks
+                    .dispatch(HookPayload::PostToolUse {
+                        tool: name,
+                        args: &args,
+                        result: &result,
+                    })
+                    .await;
 
                 self.memory
                     .record(json!({
@@ -550,6 +624,108 @@ mod tests {
         assert_eq!(u.prompt_tokens, 12);
         assert_eq!(u.completion_tokens, 5);
         assert_eq!(u.total_tokens, 17);
+    }
+
+    #[tokio::test]
+    async fn hooks_fire_around_tool_use_and_on_stop() {
+        use crate::hooks::{Hook, HookPayload, HookRegistry};
+        use std::sync::{Arc, Mutex};
+
+        struct TraceHook(Arc<Mutex<Vec<String>>>);
+        #[async_trait]
+        impl Hook for TraceHook {
+            fn name(&self) -> &str {
+                "trace"
+            }
+            async fn handle(&self, payload: &HookPayload<'_>) {
+                let line = match payload {
+                    HookPayload::PreToolUse { tool, .. } => format!("pre:{}", tool),
+                    HookPayload::PostToolUse { tool, result, .. } => {
+                        format!("post:{}:{}", tool, result)
+                    }
+                    HookPayload::Stop { final_content } => format!("stop:{}", final_content),
+                };
+                self.0.lock().unwrap().push(line);
+            }
+        }
+
+        let provider = FakeProvider::new(vec![
+            assistant_with_tool_calls(vec![tool_call("c1", "Echo", json!({}))]),
+            assistant_text("done"),
+        ]);
+        let mut tools = Registry::new();
+        tools.register(StaticTool {
+            name: "Echo",
+            out: "tool-output",
+        });
+
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = HookRegistry::new();
+        hooks.register(TraceHook(trace.clone()));
+
+        let mut agent = Agent::new(Box::new(provider), tools, "m".into()).with_hooks(hooks);
+        let out = agent.run("hi").await.unwrap();
+        assert_eq!(out, "done");
+
+        let log = trace.lock().unwrap().clone();
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0], "pre:Echo");
+        assert_eq!(log[1], "post:Echo:tool-output");
+        assert_eq!(log[2], "stop:done");
+    }
+
+    #[tokio::test]
+    async fn pre_hook_fires_even_when_policy_denies() {
+        use crate::hooks::{Hook, HookPayload, HookRegistry};
+        use std::sync::{Arc, Mutex};
+
+        struct TraceHook(Arc<Mutex<Vec<String>>>);
+        #[async_trait]
+        impl Hook for TraceHook {
+            fn name(&self) -> &str {
+                "trace"
+            }
+            async fn handle(&self, payload: &HookPayload<'_>) {
+                let line = match payload {
+                    HookPayload::PreToolUse { tool, .. } => format!("pre:{}", tool),
+                    HookPayload::PostToolUse { result, .. } => format!("post:{}", result),
+                    HookPayload::Stop { .. } => "stop".into(),
+                };
+                self.0.lock().unwrap().push(line);
+            }
+        }
+
+        struct DenyAll;
+        impl Policy for DenyAll {
+            fn check(&self, _: &str, _: &Value) -> Decision {
+                Decision::Deny("nope".into())
+            }
+        }
+
+        let provider = FakeProvider::new(vec![
+            assistant_with_tool_calls(vec![tool_call("c1", "Echo", json!({}))]),
+            assistant_text("recovered"),
+        ]);
+        let mut tools = Registry::new();
+        tools.register(StaticTool {
+            name: "Echo",
+            out: "tool-output",
+        });
+
+        let trace = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = HookRegistry::new();
+        hooks.register(TraceHook(trace.clone()));
+
+        let mut agent = Agent::new(Box::new(provider), tools, "m".into())
+            .with_policy(Box::new(DenyAll))
+            .with_hooks(hooks);
+        agent.run("hi").await.unwrap();
+
+        let log = trace.lock().unwrap().clone();
+        // pre fires before policy → still see Echo. post sees the
+        // policy-denied result string.
+        assert_eq!(log[0], "pre:Echo");
+        assert!(log[1].starts_with("post:policy denied"));
     }
 
     #[tokio::test]

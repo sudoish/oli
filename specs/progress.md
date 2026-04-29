@@ -17,13 +17,15 @@ Spec lives at `specs/README.md`. This doc covers state, not goals.
 | 1ac7fef | 1c    | Streaming `Provider`, stateful `Agent`, REPL with rustyline, `SlashCommand` trait + `/clear`, `/help`, `/exit` |
 | 254687e | docs  | `specs/memory.md` — pluggable active-context memory trait                       |
 | 21f7bc5 | 1d    | `Memory` trait + `LinearWithCompact` default, token tracking, `maybe_compact` summarization, model-capability registry, tool-call fallback parser |
-| _next_  | 2     | Policy engine, slash command set (`/cost` `/tools` `/system` `/memory` `/compact` `/provider` `/model`), subprocess tool registration, per-config caps overrides |
+| 19f849f | 2     | Policy engine, slash command set (`/cost` `/tools` `/system` `/memory` `/compact` `/provider` `/model`), subprocess tool registration, per-config caps overrides |
+| _next_  | 3     | Session persistence (`--resume`/`--continue`/`/sessions`), hook dispatcher (`PreToolUse`/`PostToolUse`/`Stop`), subagent (`Task` tool) + `SubagentSpawner`, Lua plugin runtime via mlua + `/plugins` |
 
-Tip-of-master at last update: **Phase 2 (this commit)**.
-Tests: **146 unit tests, all green** (was 110). Release build: clean, zero warnings.
-Smoke-tested against `qwen2.5-coder:7b` on Ollama — tools dispatch
-through the policy gate, fallback parser still bridges JSON-as-content,
-multi-turn flow intact.
+Tip-of-master at last update: **Phase 3 (this commit)**.
+Tests: **169 unit tests, all green** (was 146). Release build: clean, zero warnings.
+Smoke-tested against `qwen2.5-coder:7b` on Ollama — Lua plugin loads,
+sandbox blocks `io`, `Greet` tool callable through the agent loop.
+The runaway-tool-call behavior we saw is a model-side issue with
+fallback-parsed tools, not a plugin-runtime bug.
 
 ## What works today
 
@@ -39,6 +41,33 @@ multi-turn flow intact.
 - TOML config at `~/.config/agent/config.toml` overrides defaults if
   present. Config supports multiple named providers, all of `kind =
   "openai-compat"` for now.
+
+**Phase 3 — power features:**
+- Session persistence in `src/agent/memory/persisted.rs`. `PersistedMemory`
+  decorates an inner `Memory` and mirrors every `record` / `pin` /
+  `clear` / `truncate` to JSONL at `~/.config/agent/sessions/<id>.jsonl`.
+  On open, prior content replays into the inner memory before any new
+  writes — sessions resume verbatim.
+- CLI flags: `--resume <id>`, `--continue` (latest by mtime). REPL
+  always persists; `-p` is ephemeral unless one of those flags is
+  passed. `/sessions` slash command lists recent ids.
+- Hook dispatcher (`src/hooks/`). One trait + registry shared between
+  built-in hooks and Lua plugin-registered ones. Three events fire from
+  the agent loop: `PreToolUse` (before policy), `PostToolUse` (after
+  dispatch, with result), `Stop` (on final assistant content).
+- Subagent (`Task` tool) + `SubagentSpawner` trait. Spawns a child
+  agent with isolated memory and a turn cap; returns only the final
+  summary. The same trait will power plugin `ctx:prompt(...)` later.
+- Lua plugin runtime (`src/plugins/`) via mlua (lua54+vendored+async+
+  send+serialize). Auto-discovers `~/.config/agent/plugins/*.lua` and
+  `./.agent/plugins/*.lua`. Sandbox strips `os`, `io`, `dofile`,
+  `loadfile`, `require`, `debug`, and `package.loadlib`/`cpath`/`path`.
+  Plugins register tools, slash commands, and hooks via a `plugin`
+  table return value. `ctx:tool(name, args)` async-bridges into the
+  harness's tool registry; `ctx:log(level, msg)` prints to stderr.
+- `/plugins` slash command lists loaded plugins with their registered
+  components. (`/plugins reload` deferred — needs registry-rebuild
+  semantics worked out first.)
 
 **Phase 2 — flexibility surface:**
 - Policy engine in `src/policy/`. `Policy::check(tool, args) -> Allow | Ask
@@ -164,11 +193,19 @@ Gaps a daily-driver user would hit today:
   `LinearWithCompact` is the only impl in tree; `EmbeddingRAG` /
   `GraphBacked` / `HierarchicalSummary` are sketched in `specs/memory.md`
   but not implemented.
-- **No session persistence**, no `--resume` / `--continue`. (Phase 3.)
-- **No subagent (`Task` tool).** (Phase 3.)
-- **No hooks** (`PreToolUse` / `PostToolUse` / `Stop`). (Phase 3.)
-- **No plugin runtime** (Phase 3, including plugin-registered `Memory`
-  strategies and approvers).
+- **No `/plugins reload`.** Listing works; reloading would need a
+  registry-rebuild path that swaps out the previously loaded plugin
+  components without disturbing built-ins. Punted from Phase 3.
+- **Plugin host API is minimal.** `ctx:log` and `ctx:tool` ship; the
+  spec's `ctx:prompt` / `ctx:shell` / `ctx:read_file` / `ctx:write_file`
+  / `ctx:ask_user` / `ctx:get_state` / `ctx:set_state` are not yet
+  implemented.
+- **Hooks are observe-only.** `PreToolUse` cannot veto a tool call;
+  policy is the only gating path. Mutation/short-circuit hooks are a
+  Phase 4-or-later concern.
+- **Top-level agent has no `max_turns` cap by default.** A flaky
+  fallback-parsed model can loop on a tool call. Subagents are bounded
+  via `Task`'s `max_turns`; the parent loop isn't.
 - **No native Anthropic provider** with prompt caching. (Phase 4.)
 - **No `NotesStore`** for cross-session memory. (Phase 4.)
 
@@ -238,29 +275,36 @@ Fresh-context boot sequence:
 2. Read `specs/memory.md` — the active-context memory architecture.
 3. Read this file — current state.
 4. `git log --oneline -10` — phase boundaries with commit SHAs.
-5. `cargo test` — confirm 146 tests green.
+5. `cargo test` — confirm 169 tests green.
 6. `cargo build --release` — confirm clean build.
 7. Pick the next phase below.
 
 ### Next up
 
-**Phase 3 — power features.** With safety + extensibility surfaces in
-place, the next leg is making the harness a long-lived environment
-rather than a per-invocation tool.
+**Phase 4 — native Anthropic + polish.** The remaining roadmap items.
 
-- **Session persistence.** JSONL transcript per session, `--resume <id>`,
-  `--continue` (latest). The `Memory` trait already provides a
-  reasonable serialization seam (`snapshot` + `record` round-trip).
-- **Subagent (`Task` tool).** Spawn a child loop with isolated context,
-  return only the summary. Same machinery powers plugin
-  `ctx:prompt(...)` later.
-- **Hook dispatcher.** `PreToolUse`, `PostToolUse`, `Stop`. Shared
-  between built-in hooks and plugin-registered hooks.
-- **Plugin runtime: Lua via `mlua`.** Auto-discover from
-  `~/.config/agent/plugins/` and `<project>/.agent/plugins/`. Sandbox
-  removes raw `os` / `io` access; everything flows through the policy
-  engine. Plugin hooks share the dispatcher with built-ins.
-- **`/plugins` and `/plugins reload`** slash commands.
+- **`AnthropicNativeProvider` with prompt caching.** The one feature
+  OpenAI-compat genuinely can't deliver. Worth wiring native Anthropic
+  for prompt-cache hit rates that materially affect cost on long
+  agent sessions.
+- **Diff preview before `Edit` / `Write`.** Show the change that's
+  about to land, gate on user approval (REPL) or pass through (`-p`).
+  Fits inside the existing `Approver` surface.
+- **Per-project `.agent/config.toml` overrides.** Today config lives
+  only at `~/.config/agent/config.toml`; per-project overlays give
+  repos their own provider/model defaults.
+- **`NotesStore` trait + filesystem default.** Cross-session "long-term"
+  memory exposed to the model as `WriteNote` / `SearchNotes` /
+  `ListNotes` tools. Distinct from active-context `Memory`; see
+  `specs/memory.md`.
+- **Plugin host API expansion.** `ctx:prompt` (via the existing
+  `SubagentSpawner`), `ctx:shell`/`ctx:read_file`/`ctx:write_file`
+  (through the policy gate), `ctx:get_state`/`ctx:set_state`
+  (per-plugin per-session storage), `ctx:ask_user`.
+- **`/plugins reload`.** Rebuild registries on disk-change; pair with
+  a config flag to auto-watch the plugin dirs.
+- **Top-level `max_turns` config.** Cap unbounded loops on flaky
+  fallback-parsed models without forcing every prompt through `Task`.
 
 ### Phase 1d smoke-test results (2026-04-28)
 
@@ -277,6 +321,23 @@ rather than a per-invocation tool.
   tests cover the algorithm; would be worth verifying the summary
   prompt produces coherent transcripts on a real model under live
   token pressure.
+
+### Phase 3 smoke-test results (2026-04-29)
+
+- **Lua plugin runtime**: verified live. Drop a `hello.lua` into
+  `~/.config/agent/plugins/`, ask the agent to call `Greet`, and the
+  Lua function fires (`[plugin:hello] info Greet invoked` lines on
+  stderr) and returns `"hello, plugins!"` to the model. Sandbox blocks
+  `io` access (covered by unit test).
+- **Caveat surfaced**: qwen2.5-coder:7b's fallback-parsed tool calls
+  can loop — the model re-emits the same JSON tool call on each turn
+  even after seeing the result. Not a runtime bug; a known weakness of
+  the model with text-mode tools. Top-level `max_turns` config (Phase
+  4) would short-circuit this.
+- **Session persistence + hook dispatcher + Task subagent**: unit-tested
+  end-to-end (replay, hook firing, spawner forwarding) but not yet
+  exercised in a live multi-turn REPL. Worth a manual session that
+  does `/sessions` → exit → `--continue` → continue working.
 
 ### Phase 2 smoke-test results (2026-04-28)
 
