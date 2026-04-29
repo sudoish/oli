@@ -50,6 +50,14 @@ pub struct PolicyConfig {
 
     #[serde(default = "PolicyConfig::default_bash_allowlist")]
     pub bash_allowlist: Vec<String>,
+
+    /// Auto-allow MCP tools whose bare name (after the `<server>__`
+    /// prefix) starts with a pure-read verb. Per the spec the agent
+    /// shouldn't make users hit y/N for every `linear__get_issue` —
+    /// reads are cheap and the model loops on them. Default true. Off
+    /// by setting `auto_allow_pure_reads = false`.
+    #[serde(default = "PolicyConfig::default_auto_allow_pure_reads")]
+    pub auto_allow_pure_reads: bool,
 }
 
 impl PolicyConfig {
@@ -65,6 +73,10 @@ impl PolicyConfig {
             .iter()
             .map(|s| s.to_string())
             .collect()
+    }
+
+    fn default_auto_allow_pure_reads() -> bool {
+        true
     }
 
     fn default_bash_allowlist() -> Vec<String> {
@@ -112,6 +124,7 @@ impl Default for PolicyConfig {
             auto_allow: Self::default_auto_allow(),
             ask: Self::default_ask(),
             bash_allowlist: Self::default_bash_allowlist(),
+            auto_allow_pure_reads: Self::default_auto_allow_pure_reads(),
         }
     }
 }
@@ -123,7 +136,20 @@ pub struct ConfigPolicy {
     auto_allow: HashSet<String>,
     ask: HashSet<String>,
     bash_patterns: Vec<glob::Pattern>,
+    /// Mirror of `PolicyConfig::auto_allow_pure_reads`. When true,
+    /// MCP tools (recognized by the `<server>__<tool>` namespacing
+    /// convention) whose bare-name verb is a pure read get auto-allow
+    /// treatment without an explicit allow-list entry.
+    auto_allow_pure_reads: bool,
 }
+
+/// Verbs treated as pure reads when `auto_allow_pure_reads` is on.
+/// Every published MCP server we've seen so far uses one of these
+/// prefixes for its read endpoints; everything else (save_, create_,
+/// update_, delete_, run_, exec_, ...) stays in the Ask path.
+const PURE_READ_PREFIXES: &[&str] = &[
+    "get_", "list_", "search_", "fetch_", "read_", "describe_", "show_", "find_", "query_",
+];
 
 impl ConfigPolicy {
     pub fn from_config(cfg: &PolicyConfig) -> Self {
@@ -136,6 +162,7 @@ impl ConfigPolicy {
             auto_allow: cfg.auto_allow.iter().cloned().collect(),
             ask: cfg.ask.iter().cloned().collect(),
             bash_patterns,
+            auto_allow_pure_reads: cfg.auto_allow_pure_reads,
         }
     }
 
@@ -165,8 +192,25 @@ impl Policy for ConfigPolicy {
         if self.ask.contains(tool) {
             return Decision::Ask(format!("invoke {}", tool));
         }
+        // MCP-pure-reads heuristic: tools register as `<server>__<bare>`.
+        // If the bare name starts with a known read verb, auto-allow
+        // unless the user has turned the heuristic off.
+        if self.auto_allow_pure_reads {
+            if let Some(bare) = mcp_bare_name(tool) {
+                if PURE_READ_PREFIXES.iter().any(|p| bare.starts_with(p)) {
+                    return Decision::Allow;
+                }
+            }
+        }
         Decision::Ask(format!("invoke unknown tool {}", tool))
     }
+}
+
+/// Extract the bare tool name from an MCP-namespaced identifier
+/// (`<server>__<tool>`). Returns `None` for non-MCP tools so the
+/// heuristic only fires where it's intended.
+fn mcp_bare_name(tool: &str) -> Option<&str> {
+    tool.split_once("__").map(|(_, bare)| bare)
 }
 
 /// Approver that always says yes. Used for `-p` one-shot mode and tests
@@ -395,11 +439,86 @@ mod tests {
             auto_allow: vec!["Edit".into()],
             ask: vec![],
             bash_allowlist: vec![],
+            auto_allow_pure_reads: false,
         };
         let p = ConfigPolicy::from_config(&cfg);
         assert_eq!(p.check("Edit", &json!({})), Decision::Allow);
         // Read isn't on the override list — falls through to Ask.
         assert!(matches!(p.check("Read", &json!({})), Decision::Ask(_)));
+    }
+
+    #[test]
+    fn pure_read_heuristic_auto_allows_get_list_search_etc() {
+        let p = ConfigPolicy::defaults();
+        // Default has auto_allow_pure_reads = true.
+        for tool in &[
+            "linear__get_issue",
+            "github__list_pull_requests",
+            "sentry__search_issues",
+            "notion__fetch_database",
+            "vault__read_secret",
+            "playwright__describe_page",
+            "linear__find_user",
+            "datadog__query_metrics",
+        ] {
+            assert!(
+                matches!(p.check(tool, &json!({})), Decision::Allow),
+                "expected Allow for {}",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn pure_read_heuristic_does_not_auto_allow_writes() {
+        let p = ConfigPolicy::defaults();
+        for tool in &[
+            "linear__save_issue",
+            "linear__delete_user",
+            "github__create_pull_request",
+            "sentry__update_alert",
+            "playwright__browser_click",
+        ] {
+            assert!(
+                matches!(p.check(tool, &json!({})), Decision::Ask(_)),
+                "expected Ask for {}",
+                tool
+            );
+        }
+    }
+
+    #[test]
+    fn pure_read_heuristic_off_falls_through_to_ask() {
+        let cfg = PolicyConfig {
+            auto_allow_pure_reads: false,
+            ..PolicyConfig::default()
+        };
+        let p = ConfigPolicy::from_config(&cfg);
+        assert!(matches!(
+            p.check("linear__get_issue", &json!({})),
+            Decision::Ask(_)
+        ));
+    }
+
+    #[test]
+    fn pure_read_heuristic_does_not_match_non_mcp_tools() {
+        // `Read` is a built-in already on the auto_allow list. The
+        // heuristic shouldn't fire on tool names that don't have the
+        // `<server>__<tool>` shape — otherwise a custom plugin tool
+        // named `get_thing` would silently bypass the Ask gate.
+        let cfg = PolicyConfig {
+            auto_allow: vec![],
+            ask: vec![],
+            bash_allowlist: vec![],
+            auto_allow_pure_reads: true,
+        };
+        let p = ConfigPolicy::from_config(&cfg);
+        assert!(matches!(p.check("get_thing", &json!({})), Decision::Ask(_)));
+        // Multiple underscores but no `__` separator: still not MCP-shaped.
+        assert!(matches!(
+            p.check("get_my_thing", &json!({})),
+            Decision::Ask(_)
+        ));
     }
 
     #[tokio::test]

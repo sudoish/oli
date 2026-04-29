@@ -2,6 +2,7 @@ mod agent;
 mod config;
 mod error;
 mod hooks;
+mod mcp;
 mod notes;
 mod plugins;
 mod policy;
@@ -93,6 +94,16 @@ async fn run(args: Args) -> Result<()> {
     ));
 
     let mut tools = build_default_tools(&cfg, notes_store.clone());
+
+    // MCP servers: dial up everything in `[mcp.servers]` in parallel,
+    // register healthy servers' tools alongside the built-ins. Failed
+    // servers are kept in `mcp_handles` (Down) so `/mcp` can show why
+    // they're missing.
+    let mcp_handles = Arc::new(mcp::connect_all(&cfg.mcp).await);
+    for tool in mcp::build_tools(&mcp_handles).await {
+        tools.register_box(tool);
+    }
+
     // The Task subagent tool spawns a fresh agent per call. We register
     // it only on the parent — a child built by the spawner gets the
     // baseline tool set without `Task`, preventing infinite recursion
@@ -101,6 +112,7 @@ async fn run(args: Args) -> Result<()> {
         cfg: cfg.clone(),
         provider_name: provider_name.clone(),
         notes_store: notes_store.clone(),
+        mcp_handles: mcp_handles.clone(),
     });
     tools.register(Task::new(spawner.clone()));
 
@@ -118,8 +130,11 @@ async fn run(args: Args) -> Result<()> {
     }
     // Plugin-registered slash commands and hooks land in the agent
     // alongside the built-in ones. We thread them through builders
-    // below.
-    let plugin_slashes = plugins.slash_commands;
+    // below. The /mcp command rides the same channel — it's not a
+    // plugin, but the REPL's `extra slashes` bag is the right shape
+    // for "extra commands constructed at startup with their own state."
+    let mut plugin_slashes = plugins.slash_commands;
+    plugin_slashes.push(Box::new(repl::slash::Mcp::new(mcp_handles.clone())));
     let plugin_hooks = plugins.hooks;
 
     let system_prompt = SystemPromptBuilder::from_env().build().await;
@@ -238,6 +253,10 @@ struct AgentSpawner {
     cfg: Arc<Config>,
     provider_name: String,
     notes_store: Arc<dyn notes::NotesStore>,
+    /// Subagents see the same MCP tools the parent does. We share the
+    /// connected handles by Arc so spawning a child doesn't re-dial the
+    /// servers.
+    mcp_handles: Arc<Vec<mcp::McpHandle>>,
 }
 
 #[async_trait]
@@ -256,7 +275,10 @@ impl SubagentSpawner for AgentSpawner {
                 )));
             }
         };
-        let tools = build_default_tools(&self.cfg, self.notes_store.clone());
+        let mut tools = build_default_tools(&self.cfg, self.notes_store.clone());
+        for tool in mcp::build_tools(&self.mcp_handles).await {
+            tools.register_box(tool);
+        }
         let policy = Box::new(ConfigPolicy::from_config(&self.cfg.policy));
 
         let mut agent = Agent::new(provider, tools, model)

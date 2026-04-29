@@ -19,15 +19,92 @@ Spec lives at `specs/README.md`. This doc covers state, not goals.
 | 21f7bc5 | 1d    | `Memory` trait + `LinearWithCompact` default, token tracking, `maybe_compact` summarization, model-capability registry, tool-call fallback parser |
 | 19f849f | 2     | Policy engine, slash command set (`/cost` `/tools` `/system` `/memory` `/compact` `/provider` `/model`), subprocess tool registration, per-config caps overrides |
 | b3892dd | 3     | Session persistence (`--resume`/`--continue`/`/sessions`), hook dispatcher (`PreToolUse`/`PostToolUse`/`Stop`), subagent (`Task` tool) + `SubagentSpawner`, Lua plugin runtime via mlua + `/plugins` |
-| _next_  | 4     | Top-level `max_turns` (config + CLI), per-project `.oli/config.toml` overlay, diff preview for `Edit`/`Write`, expanded plugin host API (`ctx:prompt`/`shell`/`read_file`/`write_file`/`get_state`/`set_state`/`ask_user`), `NotesStore` trait + filesystem default + `WriteNote`/`SearchNotes`/`ListNotes` tools, native Anthropic provider with prompt caching |
+| 0472f3b | 4     | Top-level `max_turns` (config + CLI), per-project `.oli/config.toml` overlay, diff preview for `Edit`/`Write`, expanded plugin host API (`ctx:prompt`/`shell`/`read_file`/`write_file`/`get_state`/`set_state`/`ask_user`), `NotesStore` trait + filesystem default + `WriteNote`/`SearchNotes`/`ListNotes` tools, native Anthropic provider with prompt caching |
+| 59c07c0 | 5a    | MCP client: `McpTransport` trait + `StdioTransport` (newline-delimited JSON-RPC 2.0 over child stdio), `McpServer` lifecycle (initialize → notifications/initialized → tools/list), `McpTool` namespaced adapter (`<server>__<tool>`), `[mcp.servers.*]` config + env-var expansion + allow/deny filter + per-server timeouts + `enabled` overlay, parallel best-effort startup with `HealthState::Down` for failed servers, `/mcp` slash (list / `tools <s>` / `logs <s>`) |
+| _next_  | 5b    | `HttpTransport` for streamable-http (POST + JSON or SSE response, `Mcp-Session-Id` capture/echo, env-expanded user headers), `/mcp restart <server>` (re-spawn + re-handshake in place; existing `Arc<Mutex<McpServer>>` tool registrations stay valid), `auto_allow_pure_reads` policy heuristic (auto-allow MCP tools whose bare name starts with `get_`/`list_`/`search_`/`fetch_`/`read_`/`describe_`/`show_`/`find_`/`query_`; default true; off via `[policy].auto_allow_pure_reads = false`) |
 
-Tip-of-master at last update: **Phase 4 (this commit)**.
-Tests: **202 unit tests, all green** (was 169). Release build: clean.
-Native Anthropic provider unit-tested via shape-conversion tests; live
-HTTP path not exercised in this sandbox (no Anthropic key). The
-OpenAI-compat path against Ollama still works the same.
+Tip-of-master at last update: **Phase 5b (this commit)**.
+Tests: **244 unit tests, all green** (was 231). Release build: clean.
+13 new tests cover the HTTP transport (unary JSON, SSE, error
+envelopes, session-id capture, user-header forwarding, 202 notify
+acks via an inline tokio TCP fake server), the restart lifecycle (a
+second handshake against the Python fake plus a Down-failure path),
+and the pure-reads policy heuristic (auto-allow on get/list/search,
+no escape on save/delete/create, off-flag falls through, doesn't
+trigger on non-MCP tools).
 
 ## What works today
+
+**Phase 5b — MCP client extensions:**
+- `HttpTransport` (`src/mcp/http.rs`) for streamable-http servers.
+  Uses the existing `reqwest::Client` + `eventsource-stream` crates.
+  Each request is a POST with `Accept: application/json,
+  text/event-stream`; the client handles both response shapes (single
+  JSON body for unary RPCs, SSE for streaming) and picks the response
+  whose `id` matches the outgoing request out of the SSE stream
+  (server-initiated notifications and unrelated requests are dropped
+  silently). The transport captures the first `Mcp-Session-Id`
+  response header it sees and echoes it on every subsequent call so
+  servers that require session affinity work without explicit user
+  config. User headers (typically `Authorization`) are forwarded with
+  `${VAR}` expansion handled at config-load time.
+- `/mcp restart <server>` re-runs the connect + initialize sequence
+  in place. The existing `Arc<Mutex<McpServer>>` shared with every
+  registered `McpTool` keeps tool entries valid across the restart;
+  the user sees the new health state and tool count in the response.
+  Restart of a misconfigured server leaves it `Down(reason)` rather
+  than vanishing.
+- `auto_allow_pure_reads` policy heuristic (default true). MCP tools
+  named `<server>__<bare>` whose bare verb starts with `get_`,
+  `list_`, `search_`, `fetch_`, `read_`, `describe_`, `show_`,
+  `find_`, or `query_` are auto-allowed without an explicit
+  allow-list entry. Save/delete/create/update verbs still drop into
+  the `Ask` path. The heuristic intentionally only fires on MCP-
+  shaped names (`__` separator), so a custom plugin tool named
+  `get_thing` keeps the safe Ask default. Off via
+  `[policy].auto_allow_pure_reads = false`.
+
+**Phase 5a — MCP client:**
+- `src/mcp/` module with `transport.rs` (trait), `stdio.rs`
+  (newline-delimited JSON-RPC 2.0 over child stdio), `server.rs`
+  (lifecycle + parsed metadata), `tool.rs` (registry adapter),
+  `config.rs` (TOML schema + env expansion + glob-style allow/deny).
+- Stdio transport spawns the configured `command` with a minimal env
+  carried over from the harness (`PATH`, `HOME`, `USER`, `LANG`,
+  `TMPDIR`, `TERM`) layered with the user's explicit `env` table. A
+  background reader task parses each stdout line as a JSON-RPC
+  message, demuxes responses by id into per-call `oneshot` waiters,
+  and drops server-initiated notifications (v1 doesn't subscribe to
+  resources or implement sampling). Stderr is captured into a
+  ring-trimmed 64 KB buffer so a chatty server can't OOM us.
+- `McpServer::connect` runs initialize → notifications/initialized →
+  tools/list with per-call timeout (default 5s init, 60s call). A
+  failure flips the server to `HealthState::Down(reason)` and the REPL
+  proceeds — the failed server's tools simply don't register.
+- `McpTool` adapts each server-side tool into the harness's `Tool`
+  trait. Name is namespaced as `<server>__<tool>` (matches Claude.ai's
+  convention; servers can collide on bare names). `inputSchema` passes
+  through to `openai_schemas()` verbatim — no translation layer. Tool
+  results are unwrapped from MCP's `content` array (text blocks
+  concatenated, non-text blocks marked, `isError: true` prefixed).
+- `[mcp.servers.<id>]` config tables with `kind = "stdio"` (working)
+  or `"streamable-http"` (reserved — fails fast). Per-server `tools`
+  filter with `allow` + `deny` glob lists. `enabled = false` lets a
+  project overlay disable a globally-defined server. `${VAR}`
+  expansion in `env` values resolves at spawn time; missing vars fail
+  the server with a clear error naming the var.
+- `/mcp` slash command: bare lists configured servers with health and
+  tool counts; `/mcp tools <server>` enumerates that server's exposed
+  tools (post-filter); `/mcp logs <server>` dumps captured stderr.
+- Subagents inherit MCP tools through a shared `Arc<Vec<McpHandle>>`
+  in `AgentSpawner` so spawning a child doesn't re-dial servers.
+- Policy gating: MCP tools fall through to the default `Ask` branch
+  in `ConfigPolicy` (since `<server>__<tool>` isn't in `auto_allow`),
+  matching the spec's "approve once per session" guidance until the
+  phase-5b `auto_allow_pure_reads` heuristic lands. Hooks fire as
+  normal — `PreToolUse`/`PostToolUse` see the namespaced name.
+
+
 
 **CLI:** Two modes off the same binary.
 - `oli -p "prompt"` — single-shot, non-streaming,

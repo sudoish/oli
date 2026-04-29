@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::{AgentError, Result};
+use crate::mcp::McpConfig;
 use crate::policy::PolicyConfig;
 
 /// Top-level harness config. Modeled progressively as phases land:
@@ -41,6 +42,11 @@ pub struct Config {
     /// Top-level agent runtime knobs.
     #[serde(default)]
     pub agent: AgentConfig,
+
+    /// MCP client config — `[mcp.servers.*]` tables. Empty by default;
+    /// each entry the user adds becomes a connected server at startup.
+    #[serde(default)]
+    pub mcp: McpConfig,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -183,6 +189,7 @@ impl Config {
             tools: ToolsConfig::default(),
             caps: Vec::new(),
             agent: AgentConfig::default(),
+            mcp: McpConfig::default(),
         }
     }
 
