@@ -25,7 +25,10 @@ use crate::providers;
 use crate::providers::Provider as ProviderTrait;
 use crate::tools::context::ReadLogger;
 use crate::tools::task::SubagentSpawner;
-use crate::tools::{Registry, bash::Bash, edit::Edit, glob::Glob, grep::Grep, read::Read, write::Write};
+use crate::tools::{
+    Registry, bash::Bash, edit::Edit, glob::Glob, grep::Grep, read::Read, show_full::ShowFull,
+    write::Write,
+};
 
 /// Built-in tool set shared between the parent agent and any
 /// subagent spawned via `Task`. Excludes `Task` itself so
@@ -40,6 +43,7 @@ pub fn build_default_tools(cfg: &Config, notes_store: Arc<dyn notes::NotesStore>
     tools.register(Bash);
     tools.register(Grep);
     tools.register(Glob);
+    tools.register(ShowFull);
     tools.register(crate::tools::notes::WriteNote::new(notes_store.clone()));
     tools.register(crate::tools::notes::SearchNotes::new(notes_store.clone()));
     tools.register(crate::tools::notes::ListNotes::new(notes_store));

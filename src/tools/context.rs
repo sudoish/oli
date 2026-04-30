@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::time::SystemTime;
 use tokio::sync::Mutex;
 
@@ -10,7 +11,31 @@ use tokio::sync::Mutex;
 #[derive(Default, Clone)]
 pub struct ToolContext {
     inner: Arc<Mutex<SessionState>>,
+    /// Truncated tool results' full bodies, keyed by a
+    /// monotonic id. The `ShowFull` tool reads from here so the
+    /// model can pull deeper detail when the trimmed content
+    /// isn't enough — without forcing every tool result to
+    /// blanket-load the full body into the context window.
+    /// Standalone std `Mutex` so `truncate_with_cache` (sync)
+    /// can stash without async plumbing through every tool's
+    /// call site.
+    result_cache: Arc<StdMutex<ResultCache>>,
 }
+
+/// Bounded cache of full tool-result bodies. Capped at 32 entries
+/// (FIFO eviction) so a chatty agent can't blow up memory; the
+/// last few truncated tool results are the only ones a model
+/// realistically wants to inspect via `ShowFull`.
+#[derive(Default)]
+struct ResultCache {
+    next_id: u64,
+    entries: HashMap<u64, String>,
+    /// Insertion order; we evict the oldest id once `entries.len()`
+    /// would exceed `MAX_ENTRIES`.
+    order: std::collections::VecDeque<u64>,
+}
+
+const MAX_CACHE_ENTRIES: usize = 32;
 
 #[derive(Default)]
 pub struct SessionState {
@@ -176,6 +201,62 @@ impl ToolContext {
             state.read_files.insert(path, mtime);
         }
     }
+
+    /// Stash a full tool-result body in the cache and return the
+    /// id `ShowFull` can use to retrieve it. Used by
+    /// `tools::util::truncate_with_cache` when a result hits
+    /// the byte cap; tools that produce small enough output
+    /// never invoke this.
+    pub fn cache_full_result(&self, body: String) -> u64 {
+        let mut cache = self.result_cache.lock().unwrap();
+        let id = cache.next_id;
+        cache.next_id += 1;
+        cache.entries.insert(id, body);
+        cache.order.push_back(id);
+        // Evict oldest until under the cap.
+        while cache.entries.len() > MAX_CACHE_ENTRIES {
+            if let Some(old) = cache.order.pop_front() {
+                cache.entries.remove(&old);
+            } else {
+                break;
+            }
+        }
+        id
+    }
+
+    /// Slice a previously-cached body. Returns `None` if the id
+    /// is unknown (already evicted) and the requested window
+    /// otherwise. `offset` and `limit` are byte-counted; `limit`
+    /// of `0` means "to end of body". The slice is rounded back
+    /// to the nearest UTF-8 char boundary so the caller never
+    /// hands a malformed string back to the model.
+    pub fn read_full_result(
+        &self,
+        id: u64,
+        offset: usize,
+        limit: usize,
+    ) -> Option<String> {
+        let cache = self.result_cache.lock().unwrap();
+        let body = cache.entries.get(&id)?;
+        let total = body.len();
+        if offset >= total {
+            return Some(String::new());
+        }
+        // Step `start` back to a char boundary.
+        let mut start = offset;
+        while start > 0 && !body.is_char_boundary(start) {
+            start -= 1;
+        }
+        let mut end = if limit == 0 {
+            total
+        } else {
+            (start + limit).min(total)
+        };
+        while end < total && !body.is_char_boundary(end) {
+            end += 1;
+        }
+        Some(body[start..end].to_string())
+    }
 }
 
 #[cfg(test)]
@@ -242,6 +323,47 @@ mod tests {
         assert_eq!(*count.lock().unwrap(), 0, "replay must not re-log");
         assert!(ctx.was_read("/tmp/replayed").await || true);
         // (`was_read` would re-canonicalize; we just care the logger wasn't poked.)
+    }
+
+    #[tokio::test]
+    async fn cache_full_result_round_trips_via_read_full_result() {
+        let ctx = ToolContext::new();
+        let id = ctx.cache_full_result("abcdefghij".into());
+        let out = ctx.read_full_result(id, 0, 0).unwrap();
+        assert_eq!(out, "abcdefghij");
+        // offset + limit window
+        let mid = ctx.read_full_result(id, 3, 4).unwrap();
+        assert_eq!(mid, "defg");
+    }
+
+    #[tokio::test]
+    async fn cache_evicts_oldest_when_over_capacity() {
+        let ctx = ToolContext::new();
+        // Insert 40 entries; cap is 32. The oldest 8 should be
+        // evicted.
+        let mut ids = Vec::new();
+        for i in 0..40 {
+            ids.push(ctx.cache_full_result(format!("body-{}", i)));
+        }
+        // First 8 ids should now be evicted.
+        for id in &ids[..8] {
+            assert!(
+                ctx.read_full_result(*id, 0, 0).is_none(),
+                "expected id {} to be evicted",
+                id
+            );
+        }
+        // Last entry must still be present.
+        let last = ctx.read_full_result(*ids.last().unwrap(), 0, 0).unwrap();
+        assert_eq!(last, "body-39");
+    }
+
+    #[tokio::test]
+    async fn cache_offset_past_end_returns_empty_string() {
+        let ctx = ToolContext::new();
+        let id = ctx.cache_full_result("short".into());
+        let out = ctx.read_full_result(id, 1000, 0).unwrap();
+        assert!(out.is_empty());
     }
 
     #[tokio::test]

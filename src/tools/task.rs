@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::error::{Result, ToolError};
-use crate::tools::util::truncate;
+use crate::tools::util::truncate_with_cache;
 use crate::tools::{Tool, ToolContext};
 
 const DEFAULT_MAX_TURNS: usize = 10;
@@ -117,7 +117,7 @@ impl Tool for Task {
             .spawner
             .spawn(prompt, max_turns, Some(ctx.clone()))
             .await?;
-        Ok(truncate(&raw, max_result_bytes))
+        Ok(truncate_with_cache(ctx, &raw, max_result_bytes))
     }
 }
 

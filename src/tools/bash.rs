@@ -5,7 +5,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use crate::error::{Result, ToolError};
-use crate::tools::util::{DEFAULT_MAX_OUTPUT_BYTES, truncate};
+use crate::tools::util::{DEFAULT_MAX_OUTPUT_BYTES, truncate_with_cache};
 use crate::tools::{Tool, ToolContext};
 
 pub struct Bash;
@@ -70,10 +70,8 @@ impl Tool for Bash {
             None => ctx.cwd().await,
         };
 
-        Ok(truncate(
-            &run_bash(command, cwd.as_deref(), Duration::from_millis(timeout_ms)).await,
-            DEFAULT_MAX_OUTPUT_BYTES,
-        ))
+        let raw = run_bash(command, cwd.as_deref(), Duration::from_millis(timeout_ms)).await;
+        Ok(truncate_with_cache(ctx, &raw, DEFAULT_MAX_OUTPUT_BYTES))
     }
 }
 

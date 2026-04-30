@@ -110,7 +110,7 @@ impl Tool for SearchNotes {
             "required": ["query"]
         })
     }
-    async fn run(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn run(&self, args: Value, ctx: &ToolContext) -> Result<String> {
         let query = args.get("query").and_then(|v| v.as_str()).ok_or_else(|| {
             ToolError::InvalidArguments {
                 tool: "SearchNotes".into(),
@@ -124,7 +124,8 @@ impl Tool for SearchNotes {
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_SEARCH_LIMIT);
         let notes = self.store.search(query, tag, limit).await?;
-        Ok(util::truncate(
+        Ok(util::truncate_with_cache(
+            ctx,
             &render_listing(&notes),
             util::DEFAULT_MAX_OUTPUT_BYTES,
         ))
@@ -157,10 +158,11 @@ impl Tool for ListNotes {
             }
         })
     }
-    async fn run(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn run(&self, args: Value, ctx: &ToolContext) -> Result<String> {
         let tag = args.get("tag").and_then(|v| v.as_str());
         let notes = self.store.list(tag).await?;
-        Ok(util::truncate(
+        Ok(util::truncate_with_cache(
+            ctx,
             &render_listing(&notes),
             util::DEFAULT_MAX_OUTPUT_BYTES,
         ))

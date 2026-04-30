@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use tokio::process::Command;
 
 use crate::error::{Result, ToolError};
-use crate::tools::util::{DEFAULT_MAX_OUTPUT_BYTES, truncate};
+use crate::tools::util::{DEFAULT_MAX_OUTPUT_BYTES, truncate_with_cache};
 use crate::tools::{Tool, ToolContext};
 
 pub struct Grep;
@@ -33,7 +33,7 @@ impl Tool for Grep {
         })
     }
 
-    async fn run(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn run(&self, args: Value, ctx: &ToolContext) -> Result<String> {
         let pattern = args["pattern"]
             .as_str()
             .ok_or_else(|| ToolError::InvalidArguments {
@@ -85,7 +85,7 @@ impl Tool for Grep {
             _ => format!("rg failed (exit {}): {}", code, stderr.trim()),
         };
 
-        Ok(truncate(&body, DEFAULT_MAX_OUTPUT_BYTES))
+        Ok(truncate_with_cache(ctx, &body, DEFAULT_MAX_OUTPUT_BYTES))
     }
 }
 

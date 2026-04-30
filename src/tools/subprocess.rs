@@ -52,7 +52,7 @@ impl Tool for SubprocessTool {
         self.parameters.clone()
     }
 
-    async fn run(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn run(&self, args: Value, ctx: &ToolContext) -> Result<String> {
         let mut child = Command::new(&self.command)
             .args(&self.args)
             .stdin(Stdio::piped())
@@ -81,7 +81,8 @@ impl Tool for SubprocessTool {
         let stderr = String::from_utf8_lossy(&output.stderr);
 
         if output.status.success() {
-            Ok(util::truncate(
+            Ok(util::truncate_with_cache(
+                ctx,
                 stdout.trim_end(),
                 util::DEFAULT_MAX_OUTPUT_BYTES,
             ))
@@ -95,7 +96,8 @@ impl Tool for SubprocessTool {
             } else {
                 format!("{}\n--- stderr ---\n{}", stdout.trim(), stderr.trim())
             };
-            Ok(util::truncate(
+            Ok(util::truncate_with_cache(
+                ctx,
                 &format!(
                     "subprocess exited {} — {}",
                     output.status.code().unwrap_or(-1),

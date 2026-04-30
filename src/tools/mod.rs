@@ -35,6 +35,7 @@ pub mod glob;
 pub mod grep;
 pub mod notes;
 pub mod read;
+pub mod show_full;
 pub mod subprocess;
 pub mod task;
 pub mod util;
