@@ -53,8 +53,13 @@ impl App {
     }
 
     pub fn on_content_chunk(&mut self, chunk: &str) {
-        if matches!(self.mode, Mode::Thinking { .. }) {
-            self.mode = Mode::Streaming;
+        // First chunk of any tool/thinking phase flips to Streaming.
+        // We always reset `since` so the activity strip's elapsed
+        // counter reflects time-in-this-stream, not time-since-turn.
+        if !matches!(self.mode, Mode::Streaming { .. }) {
+            self.mode = Mode::Streaming {
+                since: Instant::now(),
+            };
         }
         if self.active_assistant.is_none() {
             self.transcript.push(TranscriptItem::Assistant {
@@ -84,12 +89,15 @@ impl App {
                 }
             }
         }
+        let started_at = Instant::now();
+        self.mode = Mode::ToolRunning {
+            tool: tool.clone(),
+            since: started_at,
+        };
         self.transcript.push(TranscriptItem::ToolCard {
             tool,
             args_preview,
-            state: ToolCardState::Running {
-                started_at: Instant::now(),
-            },
+            state: ToolCardState::Running { started_at },
         });
         self.active_tools.insert(id, self.transcript.len() - 1);
         self.note_arrival(2);
@@ -104,6 +112,14 @@ impl App {
                     ok,
                 };
             }
+        }
+        // Tool finished — agent will be processing the result before
+        // the next stream resumes. Reflect that with Thinking; the
+        // next content chunk flips it to Streaming.
+        if matches!(self.mode, Mode::ToolRunning { .. }) && self.active_tools.is_empty() {
+            self.mode = Mode::Thinking {
+                since: Instant::now(),
+            };
         }
     }
 

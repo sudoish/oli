@@ -27,7 +27,8 @@ pub use transcript::{ToolCardState, TranscriptItem};
 pub enum Mode {
     Idle,
     Thinking { since: Instant },
-    Streaming,
+    Streaming { since: Instant },
+    ToolRunning { tool: String, since: Instant },
 }
 
 impl Default for Mode {

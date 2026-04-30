@@ -209,7 +209,7 @@ fn streaming_lifecycle_appends_chunks_to_active_assistant_item() {
     assert_eq!(app.transcript.len(), prior + 1);
     assert!(matches!(app.mode, Mode::Thinking { .. }));
     app.on_content_chunk("hello");
-    assert!(matches!(app.mode, Mode::Streaming));
+    assert!(matches!(app.mode, Mode::Streaming { .. }));
     app.on_content_chunk(" world");
     match &app.transcript[prior] {
         TranscriptItem::Assistant { body, done } => {
@@ -236,6 +236,49 @@ fn tool_start_closes_active_assistant_and_pushes_running_card() {
         }
         _ => panic!(),
     }
+}
+
+#[test]
+fn tool_start_flips_mode_to_tool_running() {
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_content_chunk("partial");
+    app.on_tool_start(1, "grep".into(), "pattern=foo".into());
+    match &app.mode {
+        Mode::ToolRunning { tool, .. } => assert_eq!(tool, "grep"),
+        other => panic!("expected ToolRunning, got {:?}", std::mem::discriminant(other)),
+    }
+}
+
+#[test]
+fn tool_done_returns_to_thinking_when_no_tools_pending() {
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_start(1, "grep".into(), "".into());
+    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true);
+    assert!(matches!(app.mode, Mode::Thinking { .. }));
+}
+
+#[test]
+fn tool_done_stays_in_tool_running_when_other_tools_pending() {
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_start(1, "grep".into(), "".into());
+    app.on_tool_start(2, "read".into(), "".into());
+    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true);
+    // Tool 2 is still running; mode should remain ToolRunning.
+    assert!(matches!(app.mode, Mode::ToolRunning { .. }));
+}
+
+#[test]
+fn content_chunk_after_tool_done_flips_to_streaming() {
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_start(1, "grep".into(), "".into());
+    app.on_tool_done(1, Duration::from_millis(1), "ok".into(), true);
+    assert!(matches!(app.mode, Mode::Thinking { .. }));
+    app.on_content_chunk("here's what I found");
+    assert!(matches!(app.mode, Mode::Streaming { .. }));
 }
 
 #[test]

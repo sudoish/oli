@@ -266,12 +266,24 @@ fn render_mode_indicator(app: &App) -> Vec<Span<'static>> {
                 Style::default().fg(Color::Yellow),
             )]
         }
-        Mode::Streaming => vec![Span::styled(
-            " ▶ streaming ".to_string(),
-            Style::default()
-                .fg(Color::Green)
-                .add_modifier(Modifier::BOLD),
-        )],
+        Mode::Streaming { since } => {
+            let secs = since.elapsed().as_secs_f32();
+            vec![Span::styled(
+                format!(" ▶ streaming · {:.1}s ", secs),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )]
+        }
+        Mode::ToolRunning { tool, since } => {
+            let secs = since.elapsed().as_secs_f32();
+            vec![Span::styled(
+                format!(" {} running {} · {:.1}s ", spinner_glyph(secs), tool, secs),
+                Style::default()
+                    .fg(Color::Magenta)
+                    .add_modifier(Modifier::BOLD),
+            )]
+        }
     }
 }
 
