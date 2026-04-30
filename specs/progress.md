@@ -21,19 +21,292 @@ Spec lives at `specs/README.md`. This doc covers state, not goals.
 | b3892dd | 3     | Session persistence (`--resume`/`--continue`/`/sessions`), hook dispatcher (`PreToolUse`/`PostToolUse`/`Stop`), subagent (`Task` tool) + `SubagentSpawner`, Lua plugin runtime via mlua + `/plugins` |
 | 0472f3b | 4     | Top-level `max_turns` (config + CLI), per-project `.oli/config.toml` overlay, diff preview for `Edit`/`Write`, expanded plugin host API (`ctx:prompt`/`shell`/`read_file`/`write_file`/`get_state`/`set_state`/`ask_user`), `NotesStore` trait + filesystem default + `WriteNote`/`SearchNotes`/`ListNotes` tools, native Anthropic provider with prompt caching |
 | 59c07c0 | 5a    | MCP client: `McpTransport` trait + `StdioTransport` (newline-delimited JSON-RPC 2.0 over child stdio), `McpServer` lifecycle (initialize → notifications/initialized → tools/list), `McpTool` namespaced adapter (`<server>__<tool>`), `[mcp.servers.*]` config + env-var expansion + allow/deny filter + per-server timeouts + `enabled` overlay, parallel best-effort startup with `HealthState::Down` for failed servers, `/mcp` slash (list / `tools <s>` / `logs <s>`) |
-| _next_  | 5b    | `HttpTransport` for streamable-http (POST + JSON or SSE response, `Mcp-Session-Id` capture/echo, env-expanded user headers), `/mcp restart <server>` (re-spawn + re-handshake in place; existing `Arc<Mutex<McpServer>>` tool registrations stay valid), `auto_allow_pure_reads` policy heuristic (auto-allow MCP tools whose bare name starts with `get_`/`list_`/`search_`/`fetch_`/`read_`/`describe_`/`show_`/`find_`/`query_`; default true; off via `[policy].auto_allow_pure_reads = false`) |
+| e83c9fb | 5b    | `HttpTransport` for streamable-http (POST + JSON or SSE response, `Mcp-Session-Id` capture/echo, env-expanded user headers), `/mcp restart <server>` in place, `auto_allow_pure_reads` policy heuristic (default on; only fires on `<server>__<verb>`-shaped names) |
+| 8ef275f | A     | Daily-driver safety: Bash timeout + per-call cwd, `--strict` flag, persisted-reads round-trip, REPL `→ Tool(...)` progress hook |
+| 18f27f7 | B     | Hook short-circuit (`PreToolUse` can return synthetic result), result-mutation hook outcome |
+| e1af9ce | C     | `/plugins reload` (registry rebuild via shared `Arc<Mutex<Registry>>`), `session-cost` in `/cost`, subagent result cap |
+| 2fbecfb | D     | Caching/parity polish: OpenRouter cache control, Anthropic model list, unified-diff preview via `similar`, stale-`Edit` detection (mtime check) |
+| 0193495 | E1    | Plugin instruction-count budget via mlua thread hooks (`max_instructions` config; deterministic timeout for runaway loops) |
+| 19b32f8 | E2    | `EmbeddingRagMemory` (retrieval-mediated snapshots; `Embedder` trait + `OllamaEmbedder` default; configurable via `[memory] kind = "rag"`) |
+| 110d8ee | E3    | MCP `tools/list_changed` live refresh (per-turn diff against per-server `Arc<AtomicBool>`; agent loop swaps registry entries atomically) |
+| c23da45 | F     | TUI skeleton + alt-screen lifecycle + `--plain` fallback                                              |
+| a5db293 | G     | TUI agent integration: streaming, mode indicator, slash dispatch, Ctrl-C cancel, rebuild on swap        |
+| 5d0ca6e | H     | TUI tool-call cards: live spinner, timing, result summaries                                           |
+| f9fb277 | I     | TUI approval modal: single-key dispatch, scrollable diff preview, session-scoped allow/deny           |
+| 1515a42 | J     | TUI markdown rendering + syntect-highlighted code fences                                              |
+| d0f4d4e | K     | TUI input ergonomics: multi-line, completion popups, persistent history                               |
+| 020da39 | K4    | TUI Ctrl-R history search overlay                                                                     |
+| 895fdf8 | L     | TUI scrollable transcript + stick-to-bottom + `/copy N` via OSC52                                     |
+| d21567e | M     | TUI status bar: identity strip + token gauge + live mode + width-aware collapse                       |
+| 7ea160e | N     | TUI discoverability overlays: `/sessions` picker, `/help` browser, `/<cmd> ?` cards, fading hints     |
+| 3e1c69b | N4    | TUI first-run wizard + Bash process-group kill (real grandchild termination via `setpgid` + `killpg`) |
+| cec3113 | O     | TUI recoverability: `/undo`, `Ctrl+E` edit-and-rerun, verified Bash cancel kills the whole process group |
+| 2b2e571 | docs  | `specs/review-2.md` — deep review #2 (rated 9/10)                                                     |
+| 43da094 | docs  | `specs/polish.md` — 9/10 → 10/10 polish roadmap                                                       |
+| c243257 | P1    | Zero build warnings: drop real dead code, annotate intentional public surface with `#[allow(dead_code)]` + comment |
+| fe1fed2 | P2    | Overlay sum type: replace App's six `Option<*State>` overlay fields with one `Overlay` enum; single-match keypress router |
+| 1687232 | P3    | Split `tui/app.rs` (1729 LOC) → `app/{mod,overlay,transcript,tests}.rs`; split `tui/ui.rs` (1358 LOC) → `ui/{mod,overlays,transcript}.rs` |
+| 735fb45 | Q1+Q2 | Extract `src/lib.rs` with public re-exports, move binary to `src/bin/oli.rs`, factor reusable wiring into `src/bootstrap.rs` |
+| 09876fd | Q3    | Module-level `//!` docs on every top-level module; `cargo doc --no-deps` produces a clean module index |
+| fa718c4 | R     | `/diagnostics` ring buffer (8 KB cap, FIFO eviction) + `log_*!` shim replacing `eprintln!` in mcp/plugins/providers/repl; `RUST_LOG` threshold (info default) |
+| ba630c8 | S1    | Persisted approval allow-list at `~/.config/oli/policy-allow.json`; capital `[A]` writes through, lowercase `a` stays session-only |
+| 7e2e67f | S2    | Subagent inherits parent's `ToolContext`: `SubagentSpawner::spawn` takes `Option<ToolContext>`; child gets parent's read-set + sticky cwd |
+| d5e5961 | S3    | `ShowFull(id, offset, limit)` tool + per-session result cache (32-entry FIFO); truncation marker embeds the cache id |
+| 9ab0d70 | T1    | `oli init` headless CLI subcommand (`--provider`, `--api-key`, `--force`); `wizard_init` module shared with TUI wizard |
+| 343462c | T2    | `/config reload` slash command: re-parse config.toml, swap provider/model/policy/caps; memory + transcript + system prompt survive |
+| 0fe85b6 | T3    | `tui` and `syntax-highlight` Cargo features; `cargo build --no-default-features` produces an 8.5 MB line-mode-only binary (was 11 MB) |
+| 2582b5f | T4+T5 | `docs/cheatsheet.md` (full keybind/slash/path/env/feature reference, linked from `oli --help`); `specs/README.md` TOC pointing at every spec doc |
 
-Tip-of-master at last update: **Phase 5b (this commit)**.
-Tests: **244 unit tests, all green** (was 231). Release build: clean.
-13 new tests cover the HTTP transport (unary JSON, SSE, error
-envelopes, session-id capture, user-header forwarding, 202 notify
-acks via an inline tokio TCP fake server), the restart lifecycle (a
-second handshake against the Python fake plus a Down-failure path),
-and the pure-reads policy heuristic (auto-allow on get/list/search,
-no escape on save/delete/create, off-flag falls through, doesn't
-trigger on non-MCP tools).
+Tip-of-master at last update: **Phase T (polish complete: 17/17)**.
+Tests: **470 unit tests, all green** (was 244 at end of phase 5b — +226
+from phases A–E, F–O, P–T, plus the deferred N4/K4/O work).
+Release build: clean across all three feature configs (`default`,
+`--no-default-features`, `--no-default-features --features tui`).
 
 ## What works today
+
+**Phase T — onboarding & packaging (latest):**
+- `oli init` subcommand (`src/bin/oli.rs`) — headless mirror of the
+  TUI's first-run wizard. Flags `--provider {ollama,openrouter,
+  anthropic}`, `--api-key <key>`, `--force`. Without `--provider`,
+  prompts on stdin with a numbered menu. Refuses to clobber an
+  existing config without `--force`. Output mirrors the TUI's
+  confirmation card (provider label, default model, "Run `oli` to
+  start").
+- `wizard_init` module (`src/wizard_init.rs`) — data layer shared
+  with the TUI wizard. `WizardProvider` enum (with `from_name` for
+  case-insensitive CLI parsing), `render_toml(provider, api_key)`,
+  `save(path, body, force)`, `config_path()`. The TUI's
+  `tui::wizard::WizardState::render_toml` is now a one-line
+  delegation; both surfaces produce byte-identical config files.
+- `/config reload` slash command — re-parses `config.toml` (global +
+  project-local overlay), rebuilds the active provider via
+  `crate::providers::build`, recomputes caps from the new model id,
+  swaps `[policy]`. Memory, transcript, system prompt, and session
+  totals survive. Reload errors don't touch live state, so a
+  fat-fingered edit is recoverable.
+- Cargo feature gates. `default = ["tui", "syntax-highlight"]`;
+  `tui` covers ratatui + crossterm + tui-textarea-2 + pulldown-cmark;
+  `syntax-highlight` adds syntect on top. `--no-default-features`
+  produces an 8.5 MB line-mode-only binary (was 11 MB), useful for
+  piped CI usage. Code fences fall back to a plain cyan-gutter card
+  when syntect is off; the TUI is excluded entirely without the
+  `tui` feature.
+- `docs/cheatsheet.md` — every keybind, slash command, file path,
+  env var, and feature flag in one page. Linked from
+  `oli --help` via clap's `long_about`.
+- `specs/README.md` TOC — "Where to start reading" table at the top
+  pointing at every spec doc plus the cheatsheet. Existing
+  high-level spec content kept verbatim below.
+
+**Phase S — persistent user state:**
+- Persisted approval allow-list at
+  `~/.config/oli/policy-allow.json`. Capital `[A]` on the approval
+  modal writes the (tool, args-canonical-json) fingerprint through
+  to disk; lowercase `[a]` stays session-only. Versioned JSON
+  envelope (`{"version": 1, "fingerprints": [...]}`); malformed,
+  missing, or version-mismatched files yield an empty list (a
+  corrupt cache never denies tools the user already approved).
+- Subagent inherits parent's `ToolContext`. `SubagentSpawner::spawn`
+  takes `Option<ToolContext>`; `Task::run` passes the parent's;
+  `bootstrap::DefaultAgentSpawner` snapshots the parent's read-set
+  + sticky cwd into the child's context after building the agent.
+  One-way clone — child reads stay local. `read_logger` is
+  intentionally not propagated.
+- `ShowFull(id, offset, limit)` tool + per-session result cache.
+  Tool calls that hit the 30 KB byte cap stash their full body in
+  the cache (32-entry FIFO ring on `ToolContext`) and embed the id
+  in the truncation marker. The model can paginate deeper without
+  blanket-loading every oversized result. Bash, Grep, Subprocess,
+  Notes (Search/List), Task all migrated; Edit/Write/Read keep their
+  own truncation strategies.
+
+**Phase R — operational visibility:**
+- `src/diagnostics.rs` — process-wide
+  `Mutex<VecDeque<DiagnosticEntry>>` capped at 8 KB (FIFO
+  eviction). `push()` stashes everything regardless of level;
+  stderr printing gates on `RUST_LOG` (info default,
+  trace/debug/info/warn/error). Whole module under 200 LOC; no
+  `tracing`/`log` dep.
+- `crate::log_warn!` / `log_info!` / `log_error!` / `log_debug!`
+  macros replace the operational `eprintln!` sites in `mcp/`,
+  `plugins/`, `providers/openai_compat.rs`, and `repl/`. The Lua
+  `ctx:log` binding routes through diagnostics with level mapping.
+- `/diagnostics` slash command renders the most-recent 50 entries
+  as `[level] body`; `/diagnostics clear` wipes the ring. Picked up
+  automatically by both the line-mode REPL and the TUI through
+  `default_set_with_reloader`.
+
+**Phase Q — library split:**
+- `src/lib.rs` exposes the public API for embedders. Re-exports
+  `Agent`, `Provider`, `Tool`, `Memory`, `LinearWithCompact`,
+  `PersistedMemory`, `EmbeddingRagMemory`, `OllamaEmbedder`, `Hook`,
+  `Policy`, `Approver`, `SlashCommand`, `Config`, `McpHandle`,
+  `SubagentSpawner`, `AgentError`, `Result`. Crate-level `//!` doc
+  with the trait taxonomy.
+- `src/bin/oli.rs` — binary moved out of `src/main.rs`. Uses
+  `oli::*` for substance instead of redeclaring modules. CLI
+  parsing + orchestration only; reusable wiring (`build_default_tools`,
+  `resolve_session_id`, `build_memory`, `DefaultAgentSpawner`)
+  factored into `src/bootstrap.rs` so embedders can build their
+  own oli-flavored agent without copying main.
+- Module-level `//!` docs on every top-level module:
+  `agent`, `bootstrap`, `config`, `diagnostics`, `error`, `hooks`,
+  `mcp`, `notes`, `plugins`, `policy`, `providers`, `repl`, `tools`,
+  `tui`, `wizard_init`. `cargo doc --no-deps --lib` renders a
+  module index where every entry has a meaningful one-paragraph
+  summary; zero rustdoc warnings.
+
+**Phase P — cleanup:**
+- Zero build warnings on `cargo build` and `cargo build --tests`.
+  Real dead code removed (`WizardStep::Cancelled`, `MULTI_LINE`
+  hint, `set_slash_names`, `has_overlay`, `default_set` for
+  prod-only callers, `CompletionMenu.query`, `ApprovalState.id`,
+  `ToolCard.id`, `UiEvent::ApprovalRequested.id` +
+  `TuiApprover.next_id`); intentional public API kept for the
+  contract annotated with `#[allow(dead_code)]` + a one-line
+  comment.
+- App's six `Option<*State>` overlay fields (approval,
+  sessions_picker, help_browser, inline_help, history_search,
+  wizard) collapsed into one `pub overlay: Option<Overlay>` enum.
+  Keypress router and render dispatcher are now single-match.
+  Completion stays separate (it's an in-input affordance, not modal).
+- `tui/app.rs` (1729 LOC) split into `app/{mod, overlay, transcript,
+  tests}.rs`; `tui/ui.rs` (1358 LOC) split into
+  `ui/{mod, overlays, transcript}.rs`. Largest remaining file is
+  624 LOC.
+
+**Phase O — TUI recoverability:**
+- `/undo` slash command pops the last user turn from memory and
+  the transcript, returning the prompt body so the user can edit
+  it. Active assistant + tool indices reset.
+- `Ctrl+E` edit-and-rerun: equivalent to `/undo` but loads the
+  popped body straight into the input buffer.
+- Bash cancel verified to kill the entire process group, not just
+  the immediate `sh` child. `setpgid(0, 0)` in `pre_exec` puts
+  every grandchild in the same session; `ProcessGroupKillGuard`
+  uses `libc::killpg` on drop. Tested end-to-end against
+  `sh -c 'sleep 60 & wait'`.
+
+**Phase N — TUI discoverability:**
+- First-run setup wizard. Welcome → PickProvider → (EnterApiKey if
+  applicable) → Confirm → Saved. Esc skips at any point. Triggered
+  when `~/.config/oli/config.toml` doesn't exist at TUI startup.
+- `/sessions` interactive picker overlay with arrow-key navigation;
+  Enter copies a `oli --resume <id>` command to the clipboard via
+  OSC52.
+- `/help` interactive command browser (two-pane: list + full
+  description). Arrow keys cycle, Esc / Enter closes.
+- `/<cmd> ?` one-shot help cards for any registered slash command.
+- Fading onboarding hints persisted in
+  `~/.config/oli/tui-hints.json` so tips fade once the user has
+  used the feature.
+
+**Phase M — TUI status bar:**
+- Identity strip on the left: model | session | branch | ctx
+  window. Width-aware collapse drops fields right-to-left when the
+  terminal narrows.
+- Token gauge: green under 60%, amber 60–85%, red above 85%. Reads
+  the live `last_usage` from the agent.
+- Mode indicator on the right: idle / thinking (with elapsed
+  spinner) / streaming / awaiting-approval (yellow override when
+  the modal is up).
+
+**Phase L — TUI scroll + clipboard:**
+- Scrollable transcript with stick-to-bottom default.
+  PgUp/PgDn/Ctrl+Home/Ctrl+End + mouse wheel detach into a manual
+  offset; reattach when reaching bottom; `↓ N new` badge surfaces
+  unread lines while detached.
+- `/copy N` slash command copies the Nth-most-recent assistant
+  message to the OS clipboard via OSC52 (works through SSH).
+
+**Phase K — TUI input ergonomics:**
+- Multi-line input via `tui-textarea-2`. Shift+Enter / Alt+Enter
+  inserts a newline; Enter submits. Up/Down walks the persistent
+  history (single-line buffers only); Ctrl+R opens a substring
+  history-search overlay (newest-first, arrow-key navigate, Enter
+  loads the picked entry).
+- Slash and `@path` completion popups. Tab accepts; Shift+Tab
+  cycles backwards. Path completion fires at any word boundary
+  starting with `@`.
+- Persistent history at `~/.config/oli/tui-history.jsonl`,
+  rotated when it grows past 1000 entries.
+
+**Phase J — TUI markdown rendering:**
+- pulldown-cmark renders headings, bold/italic/strikethrough,
+  inline code, code fences, lists, links, paragraphs into ratatui
+  `Vec<Line>`. Streaming-safe — re-parsed each frame; mid-stream
+  un-closed tokens render as literal text.
+- Code fences route through syntect for syntax highlighting (when
+  the `syntax-highlight` feature is on; default). Lazy-loaded
+  `SyntaxSet` + `ThemeSet`. Plain dim-text fallback when the
+  feature is off.
+
+**Phase F–I — TUI foundations:**
+- ratatui-driven alt-screen TUI with `--plain` line-mode REPL
+  fallback (auto-engaged on non-TTY stdin/stdout for piped usage).
+- Streaming agent integration; mode indicator switches between
+  idle/thinking/streaming; Ctrl+C cancels the current turn.
+- Per-tool-call cards in the transcript with a live spinner,
+  elapsed time, and result summary on completion.
+- Approval modal with scrollable diff preview, single-key dispatch
+  (`y`/`n`/`a`/`A`/`d`/`Esc`), session-scoped allow/deny.
+
+**Phase E — late-Phase-5 follow-ups:**
+- Plugin instruction-count budget via mlua thread hooks. Per-call
+  `max_instructions` (default 10M) prevents a runaway Lua loop
+  from blocking the agent indefinitely.
+- `EmbeddingRagMemory` (`src/agent/memory/rag.rs`). Retrieval-
+  mediated snapshots: embed every recorded message, keep recent
+  K turns verbatim, retrieve top-N similar older turns by cosine
+  similarity. `Embedder` trait + `OllamaEmbedder` default; opt-in
+  via `[memory] kind = "rag"`.
+- MCP `tools/list_changed` live refresh. Each turn drains a per-
+  server `Arc<AtomicBool>`; servers that pushed the notification
+  have their tool list refetched and the agent's registry swapped
+  in place. New tools become callable on the next model turn.
+
+**Phase D — caching, parity, polish:**
+- OpenRouter cache control on the system prompt + last tool
+  definition (mirrors the native Anthropic provider's
+  `cache_control: ephemeral`).
+- Anthropic provider's `list_models` enumerates real model ids via
+  the `/v1/models` endpoint.
+- Unified-diff preview via the `similar` crate for `Edit` calls
+  (replaces the JSON old/new rendering).
+- Stale-`Edit` detection: `ToolContext` captures mtime at
+  `mark_read` time; `Edit` refuses if the on-disk mtime has
+  advanced since the last `Read`.
+
+**Phase C — polish:**
+- `/plugins reload` re-scans `~/.config/oli/plugins/` and
+  `<project>/.oli/plugins/` without restarting. Registry is rebuilt
+  via a shared `Arc<Mutex<Registry>>` between the agent and the
+  reloader.
+- `/cost` now reports session totals in addition to last-call.
+- Subagent (`Task`) result is capped at 8 KB by default
+  (configurable via `max_result_bytes`) so a chatty child can't
+  blow up the parent's context.
+
+**Phase B — hooks:**
+- `PreToolUse` hooks can short-circuit by returning a synthetic
+  `HookOutcome::Replace(result)`, skipping the actual tool call.
+- `PostToolUse` hooks can mutate the tool's result before it
+  reaches the model (`HookOutcome::ReplaceResult`).
+
+**Phase A — daily-driver safety:**
+- Bash timeout (default 120s, max 600s) + per-call `cwd` argument
+  with sticky behavior across calls (the last explicit cwd carries
+  forward).
+- `--strict` flag for `-p` runs flips every `Ask` policy decision
+  to `Deny` (suitable for unattended scripted runs that must not
+  rubber-stamp Edit/Write/unknown-Bash).
+- Persisted-reads round-trip. `PersistedMemory` writes `read` ops
+  to the JSONL transcript; `--resume` replays them back into the
+  `ToolContext` so `Edit`'s read-first invariant survives across
+  sessions.
+- REPL `→ Tool(...)` progress hook surfaces tool calls inline as
+  they fire (interactive only; scripted `-p` stays quiet).
 
 **Phase 5b — MCP client extensions:**
 - `HttpTransport` (`src/mcp/http.rs`) for streamable-http servers.
@@ -270,55 +543,78 @@ captured request stream.
 
 ```
 src/
-├── main.rs              # CLI: -p one-shot or REPL
+├── lib.rs                          # Public API surface (Agent, Tool, Provider, ...)
+├── bin/oli.rs                      # CLI entry: clap + dispatch to TUI / REPL / init
+├── bootstrap.rs                    # Reusable wiring (build_default_tools, ...)
+├── config.rs                       # Layered TOML config (global + project overlay)
+├── diagnostics.rs                  # Ring buffer + log_*! shim
+├── error.rs                        # AgentError / ToolError / Result alias
+├── wizard_init.rs                  # Headless config bootstrap (shared with TUI wizard)
 ├── agent/
-│   ├── mod.rs           # Stateful Agent: messages, run, run_streaming, clear
-│   └── context.rs       # SystemPromptBuilder
+│   ├── mod.rs                      # Agent loop + builder
+│   ├── caps.rs                     # Model-capability registry
+│   ├── context.rs                  # SystemPromptBuilder
+│   ├── tool_parse.rs               # Tool-call fallback parser
+│   └── memory/
+│       ├── mod.rs                  # Memory trait + LinearWithCompact default
+│       ├── linear.rs               # LinearWithCompact impl
+│       ├── persisted.rs            # JSONL session persistence
+│       └── rag.rs                  # EmbeddingRagMemory + Embedder + OllamaEmbedder
+├── hooks/mod.rs                    # Hook trait + HookRegistry
+├── mcp/                            # MCP client (stdio + http transports)
+│   ├── mod.rs / config.rs / server.rs / stdio.rs / http.rs / transport.rs / tool.rs
+├── notes/mod.rs                    # NotesStore trait + filesystem default
+├── plugins/mod.rs                  # Lua plugin runtime via mlua
+├── policy/
+│   ├── mod.rs                      # Policy / Approver traits + ConfigPolicy
+│   └── persisted_allow.rs          # ~/.config/oli/policy-allow.json
 ├── providers/
-│   ├── mod.rs           # Provider trait + chat / chat_stream + ContentSink
-│   ├── openai_compat.rs # OpenAICompatProvider with SSE streaming
-│   └── fake.rs          # FakeProvider (cfg(test)), 2-chunk streaming for tests
+│   ├── mod.rs                      # Provider trait + build factory
+│   ├── anthropic.rs                # Native Anthropic + prompt caching
+│   ├── openai_compat.rs            # OpenAI / OpenRouter / Ollama / vLLM / ...
+│   └── fake.rs                     # FakeProvider (cfg(test))
 ├── repl/
-│   ├── mod.rs           # rustyline + tokio::select Ctrl-C cancel
-│   └── slash.rs         # SlashCommand trait + /clear /help /exit
+│   ├── mod.rs                      # Line-mode REPL (rustyline + tokio::select)
+│   └── slash.rs                    # SlashCommand trait + 15 built-ins
 ├── tools/
-│   ├── mod.rs           # Tool trait + Registry
-│   ├── context.rs       # ToolContext + SessionState
-│   ├── util.rs          # truncate + DEFAULT_MAX_OUTPUT_BYTES
-│   ├── read.rs / write.rs / edit.rs / bash.rs / grep.rs / glob.rs
-├── config.rs            # TOML loader + env-default fallback
-└── error.rs             # AgentError + ToolError via thiserror
+│   ├── mod.rs                      # Tool trait + Registry
+│   ├── context.rs                  # ToolContext (read-set, cwd, result cache)
+│   ├── util.rs                     # truncate / truncate_with_cache
+│   ├── show_full.rs                # ShowFull tool (paginate truncated results)
+│   ├── task.rs                     # Task subagent + SubagentSpawner trait
+│   └── bash / edit / glob / grep / notes / read / subprocess / write
+└── tui/                            # ratatui front-end (gated behind `tui` feature)
+    ├── mod.rs / driver.rs / event.rs / hook.rs / approver.rs / completion.rs
+    ├── history.rs / hints.rs / markdown.rs / terminal.rs / wizard.rs
+    ├── app/{mod,overlay,transcript,tests}.rs
+    └── ui/{mod,overlays,transcript}.rs
 ```
 
-Per-spec architecture sketch except: `agent/compact.rs` (Phase 1d),
-`providers/anthropic.rs` (Phase 4), `policy/`, `plugins/` not yet written.
+12 traits anchor the extension surface: `Tool`, `Provider`, `Memory`,
+`Hook`, `Policy`, `Approver`, `SlashCommand`, `NotesStore`,
+`McpTransport`, `SubagentSpawner`, `ReadLogger`, `Embedder`. Each has
+at least one bundled impl plus public visibility for embedders to
+plug in their own.
 
 ## What's NOT done
 
-Gaps a daily-driver user would hit today:
+The 17-item polish plan (`specs/polish.md`) closed every gap from the
+post-TUI deep review. Remaining open items are forward-looking, not
+regressions:
 
-- **No `--strict-mode` / config flag for `AlwaysDeny`.** Today the `-p`
-  one-shot path uses `AlwaysApprove`. A user who wants scripted runs
-  with strict policy (any `Ask` decision becomes `Deny`) has to swap
-  approvers programmatically.
-- **No alternative `Memory` strategies shipped.** Default
-  `LinearWithCompact` is the only impl in tree; `EmbeddingRAG` /
-  `GraphBacked` / `HierarchicalSummary` are sketched in `specs/memory.md`
-  but not implemented.
-- **No `/plugins reload`.** Listing works; reload was deferred from
-  Phase 3 and Phase 4 — needs a registry-rebuild refactor (the slash
-  registry isn't on Agent yet, so reload from inside a slash dispatch
-  can't swap it out cleanly).
-- **Hooks are observe-only.** `PreToolUse` cannot veto a tool call;
-  policy is the only gating path.
-- **Native Anthropic provider live-call not exercised.** Shape
-  conversion is unit-tested. The HTTP / SSE path needs a real
-  ANTHROPIC_API_KEY to verify end-to-end; the user can flip
-  `kind = "anthropic"` in config and try.
-- **Diff preview is JSON-style, not unified diff.** It shows old/new
-  strings rather than a context-aware unified diff. Adequate for the
-  small Edit calls the model typically makes; would benefit from a
-  proper diff lib for large changes.
+- **`tracing`-style structured logging.** The diagnostics ring is a
+  flat string store. Embedders who want per-event spans / kv pairs
+  would need a `tracing-subscriber` adapter. Not blocking — the
+  ring buffer covers the "where did that error come from?" case.
+- **GraphBacked / HierarchicalSummary memory strategies.** Sketched
+  in `specs/memory.md`; only `LinearWithCompact` and
+  `EmbeddingRagMemory` are implemented. Adding a third is a clean
+  drop-in via the `Memory` trait.
+- **Hosted/multi-user mode.** Out of scope per the spec; flagged
+  here so a future contributor sees it's an explicit non-goal.
+- **`oli init --reset`.** Today `--force` overwrites; a `--reset`
+  flag that deletes + recreates is on the polish plan's open
+  decisions list. Not landed.
 
 ## Decisions made
 
@@ -379,34 +675,39 @@ Gaps a daily-driver user would hit today:
 
 Fresh-context boot sequence:
 
-1. Read `specs/README.md` — the vision and full roadmap.
-2. Read `specs/memory.md` — the active-context memory architecture.
-3. Read this file — current state.
-4. `git log --oneline -10` — phase boundaries with commit SHAs.
-5. `cargo test` — confirm 202 tests green.
-6. `cargo build --release` — confirm clean build.
-7. Pick the next phase below.
+1. Read `specs/README.md` — vision + roadmap + the new TOC at the
+   top pointing at every other spec doc.
+2. Read `docs/cheatsheet.md` — every keybind / slash / file path /
+   env var / feature flag in one page.
+3. Read this file — current state, phase ledger with SHAs.
+4. `git log --oneline -20` — phase boundaries.
+5. `cargo test` — confirm 470 tests green.
+6. `cargo build --release` and
+   `cargo build --release --no-default-features` — confirm both
+   feature configs build clean.
+7. `cargo doc --no-deps --lib --open` — render the public API
+   index (every top-level module has a `//!` overview).
 
 ### Next up
 
-**Beyond Phase 4 — open follow-ups.** The original roadmap is shipped.
-Anything below is opportunistic polish, not a roadmap commitment.
+The original roadmap (Phases 0–5) and the post-MCP roadmap (A–E,
+F–O, P–T) are all shipped. Anything below is opportunistic polish
+or research, not a roadmap commitment.
 
-- **`/plugins reload`.** Will require the slash registry to live on
-  Agent (or a rebuild path that returns to the REPL boundary).
-- **Strict-mode flag for `-p`.** Switch to `AlwaysDeny` on `Ask`
-  decisions for fully-automated runs that shouldn't auto-approve.
-- **An alternative `Memory` strategy.** `EmbeddingRAG` is the most
-  obvious next impl — `nomic-embed-text` runs on the same Ollama
-  instance; would let us measure whether retrieval-mediated context
-  beats linear+compact on long sessions.
-- **Hook short-circuit.** Let `PreToolUse` return a synthetic result
-  to skip the actual tool, mirroring Claude Code's hook semantics.
-- **Diff preview via `similar` crate.** Replace the inline old/new
-  rendering with a unified diff for Edit calls that span many lines.
-- **Per-project `.oli/notes/`.** Today notes live globally; project-
-  scoped notes would let a repo carry its own knowledge alongside
-  `.oli/config.toml` and `.oli/plugins/`.
+- **`tracing` adapter.** Optional feature that bridges
+  `crate::log_*!` macros into `tracing` events for embedders who
+  want structured logging.
+- **`oli init --reset`.** `--force` overwrites; `--reset` would
+  delete + recreate. Flagged in `specs/polish.md` open decisions.
+- **GraphBacked or HierarchicalSummary memory.** Third drop-in for
+  the `Memory` trait once a real workload makes the choice obvious.
+- **Per-project `.oli/notes/`.** Notes are globally-scoped today;
+  project-scoped would let a repo carry its own knowledge.
+- **Provider-side Anthropic prompt caching coverage.** The native
+  provider sets cache_control on system + last tool; OpenRouter
+  cache hooks on the same surfaces (Phase D). A real measurement
+  pass on long sessions would tell us whether the cache cutoffs
+  are placed where they actually pay off.
 
 ### Phase 1d smoke-test results (2026-04-28)
 
@@ -492,15 +793,27 @@ Anything below is opportunistic polish, not a roadmap commitment.
 ### Useful commands
 
 ```sh
-# Run the full test suite
+# Run the full test suite (470 tests)
 cargo test
 
-# Build and run the release binary
+# Run lib-only tests for each feature config
+cargo test --lib                                          # default (470)
+cargo test --lib --no-default-features --features tui     # tui without syntect (470)
+cargo test --lib --no-default-features                    # plain only (353; TUI gated out)
+
+# Build the binary
+cargo build --release                                     # 11 MB, full TUI
+cargo build --release --no-default-features               # 8.5 MB, line-mode only
+
+# Run against a real model
 cargo run --release -- -p "your prompt here"
+
+# Headless first-run config bootstrap
+./target/release/oli init --provider ollama
 
 # Quick API surface check
 ./target/release/oli --help
 
-# Format and lint
-cargo fmt --all && cargo build --release
+# Render the public-API docs
+cargo doc --no-deps --lib --open
 ```
