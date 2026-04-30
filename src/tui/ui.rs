@@ -11,12 +11,13 @@
 //! against the previous frame.
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Position, Rect};
+use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::tui::app::{App, ApprovalState, Mode, ToolCardState, TranscriptItem};
+use crate::tui::markdown;
 
 const TITLE: &str = "oli";
 
@@ -128,7 +129,7 @@ fn draw_approval_modal(f: &mut Frame, full_area: Rect, approval: &ApprovalState)
 /// `policy::render_unified_diff` emits `    + body` / `    - body`
 /// / `      body` (4 spaces indent + sign + space + body). Others
 /// (the "file: …", "(replace_all)" header lines etc) stay white.
-fn diff_line_to_styled(line: &str) -> Line {
+fn diff_line_to_styled(line: &str) -> Line<'_> {
     let trimmed = line.trim_start();
     if let Some(rest) = trimmed.strip_prefix("+ ") {
         Line::from(vec![
@@ -215,23 +216,10 @@ fn spinner_glyph(secs: f32) -> char {
 }
 
 fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
-    // Pre-pass: count logical lines so we can update scroll
-    // metrics on `app` before we hold any borrow into
-    // `app.transcript`. The render builds Lines that may carry
-    // borrows back into the transcript items (tool card name /
-    // args preview), so we need to settle the &mut work first.
-    let total = transcript_line_count(&app.transcript) as u16;
-    let height = area.height;
-    let max = total.saturating_sub(height);
-    app.note_scroll_metrics(max, height);
-    let offset = match app.scroll_manual {
-        None => max,
-        Some(o) => o.min(max),
-    };
-    let detached = app.is_scroll_detached();
-    let unread = app.unread_lines;
-
-    let mut lines: Vec<Line> = Vec::new();
+    // Build the Vec<Line> first. Each line carries owned content
+    // so it doesn't borrow from `app.transcript` — we need that
+    // freedom to mutate `app.scroll_*` afterwards.
+    let mut lines: Vec<Line<'static>> = Vec::new();
     for (i, item) in app.transcript.iter().enumerate() {
         let is_active = app.active_assistant == Some(i);
         match item {
@@ -258,8 +246,6 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
                         .add_modifier(Modifier::BOLD),
                 )));
                 if body.is_empty() && is_active {
-                    // Reserve a row so the user sees something
-                    // happening even before the first chunk lands.
                     lines.push(Line::from(Span::styled(
                         "  · waiting for first token",
                         Style::default()
@@ -267,17 +253,20 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
                             .add_modifier(Modifier::ITALIC),
                     )));
                 } else {
-                    for body_line in body.lines() {
-                        lines.push(Line::from(Span::styled(
-                            format!("  {}", body_line),
-                            Style::default().fg(Color::White),
-                        )));
+                    // Re-parse the current body each frame.
+                    // pulldown-cmark on a few KB of prose is
+                    // microsecond-fast; mid-stream un-closed
+                    // tokens render as literal text. Each
+                    // markdown line gets a 2-space gutter so it
+                    // visually nests under the `▌ oli` header.
+                    for md_line in markdown::render(body, app.theme) {
+                        let mut spans: Vec<Span<'static>> = Vec::with_capacity(md_line.spans.len() + 1);
+                        spans.push(Span::raw("  "));
+                        spans.extend(md_line.spans.into_iter());
+                        lines.push(Line::from(spans));
                     }
                 }
                 if !done && is_active {
-                    // Subtle live-cursor block at the end of the
-                    // active streaming message so the user can
-                    // tell content is still arriving.
                     let last = lines
                         .last_mut()
                         .expect("at least the header was pushed");
@@ -316,6 +305,19 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
         }
     }
 
+    // Now that the borrow on `app.transcript` is dropped, settle
+    // the scroll metrics from the actual rendered line count.
+    let total = lines.len() as u16;
+    let height = area.height;
+    let max = total.saturating_sub(height);
+    app.note_scroll_metrics(max, height);
+    let offset = match app.scroll_manual {
+        None => max,
+        Some(o) => o.min(max),
+    };
+    let detached = app.is_scroll_detached();
+    let unread = app.unread_lines;
+
     let para = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
         .scroll((offset, 0));
@@ -349,12 +351,12 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Header line of a tool card:
 /// `→ Read   src/main.rs                            0.04s ✓`
-fn render_tool_card_line<'a>(
-    tool: &'a str,
-    args_preview: &'a str,
+fn render_tool_card_line(
+    tool: &str,
+    args_preview: &str,
     state: &ToolCardState,
-) -> Line<'a> {
-    let mut spans: Vec<Span<'a>> = Vec::new();
+) -> Line<'static> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
     let arrow_color = match state {
         ToolCardState::Running { .. } => Color::Yellow,
         ToolCardState::Done { ok: true, .. } => Color::Green,
@@ -404,7 +406,7 @@ fn render_tool_card_line<'a>(
 /// Optional detail line under a card. Running cards show no
 /// detail; done cards show their summary indented under the
 /// header.
-fn render_tool_card_detail<'a>(state: &'a ToolCardState) -> Option<Line<'a>> {
+fn render_tool_card_detail(state: &ToolCardState) -> Option<Line<'static>> {
     match state {
         ToolCardState::Running { .. } => None,
         ToolCardState::Done { summary, ok, .. } => {
@@ -421,40 +423,10 @@ fn render_tool_card_detail<'a>(state: &'a ToolCardState) -> Option<Line<'a>> {
     }
 }
 
-/// Count the logical lines a transcript item set produces, in the
-/// same shape `draw_transcript` uses to fill its `Vec<Line>`.
-/// Slight under-count when a body wraps because of narrow
-/// terminals, but close enough for scroll math; the user gets a
-/// PgDn-of-1 mismatch rather than wrong content.
-fn transcript_line_count(items: &[TranscriptItem]) -> usize {
-    let mut total: usize = 0;
-    for item in items {
-        match item {
-            TranscriptItem::UserPrompt { body } => {
-                total += 1; // ▌ you header
-                total += body.lines().count().max(1);
-                total += 1; // blank
-            }
-            TranscriptItem::Assistant { body, .. } => {
-                total += 1; // ▌ oli header
-                total += body.lines().count().max(1);
-                total += 1; // blank
-            }
-            TranscriptItem::System { body } => {
-                total += body.lines().count().max(1);
-                total += 1; // blank
-            }
-            TranscriptItem::ToolCard { state, .. } => {
-                total += 1; // header
-                if matches!(state, ToolCardState::Done { .. }) {
-                    total += 1; // detail line
-                }
-                total += 1; // blank
-            }
-        }
-    }
-    total
-}
+// transcript_line_count was an approximation used while the
+// renderer borrowed `app.transcript`. The current single-pass
+// design (Vec<Line<'static>> built upfront) lets us use the
+// real count, so the helper is gone.
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let busy = app.is_busy();

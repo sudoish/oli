@@ -27,6 +27,7 @@ mod driver;
 mod event;
 mod history;
 mod hook;
+mod markdown;
 mod terminal;
 mod ui;
 

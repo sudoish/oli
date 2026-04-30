@@ -478,10 +478,10 @@ line-oriented plan; this doc supersedes it.
 | I2 | Single-key approval (y/n/a/d/ESC)                 | DONE   |
 | I3 | Diff preview inside modal                         | DONE   |
 | I4 | Modal scroll for long diffs                       | DONE   |
-| J1 | Markdown parser → ratatui Lines                   | TODO   |
-| J2 | Syntect-highlighted code fences                   | TODO   |
-| J3 | Light/dark theme detection                        | TODO   |
-| J4 | Streaming-safe markdown re-parse                  | TODO   |
+| J1 | Markdown parser → ratatui Lines                   | DONE   |
+| J2 | Syntect-highlighted code fences                   | DONE   |
+| J3 | Light/dark theme detection                        | DONE   |
+| J4 | Streaming-safe markdown re-parse                  | DONE   |
 | K1 | Multi-line input via tui-textarea                 | DONE   |
 | K2 | Slash autocomplete popup                          | DONE   |
 | K3 | `@path` file autocomplete                         | DONE   |

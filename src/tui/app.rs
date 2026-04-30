@@ -15,6 +15,7 @@ use tokio::sync::oneshot;
 use tui_textarea::{CursorMove, Input, Key as TaKey, TextArea};
 
 use crate::tui::completion::{self, CompletionContext};
+use crate::tui::markdown::Theme;
 
 /// What kind of in-flight completion is being offered.
 #[derive(Debug, Clone)]
@@ -137,6 +138,11 @@ pub struct App {
     pub scroll_max: u16,
     /// Cached transcript-pane height for PgUp/PgDn step size.
     pub scroll_viewport_height: u16,
+
+    /// Color theme for markdown / syntax-highlighted content.
+    /// Detected from `$COLORFGBG` at TUI startup; defaults to
+    /// dark on detection failure.
+    pub theme: Theme,
 }
 
 impl Default for App {
@@ -159,6 +165,7 @@ impl Default for App {
             unread_lines: 0,
             scroll_max: 0,
             scroll_viewport_height: 0,
+            theme: Theme::Dark,
         }
     }
 }
@@ -173,6 +180,7 @@ pub enum SubmitAction {
 impl App {
     pub fn new() -> Self {
         let mut app = Self::default();
+        app.theme = Theme::detect();
         app.transcript.push(TranscriptItem::System {
             body: "oli ready. type a message and press Enter (Shift+Enter for newline). \
                    /help for commands, Ctrl+D to exit."
