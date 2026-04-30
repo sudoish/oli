@@ -485,7 +485,7 @@ line-oriented plan; this doc supersedes it.
 | K1 | Multi-line input via tui-textarea                 | DONE   |
 | K2 | Slash autocomplete popup                          | DONE   |
 | K3 | `@path` file autocomplete                         | DONE   |
-| K4 | Up/Down + Ctrl-R history                          | PART   |
+| K4 | Up/Down + Ctrl-R history                          | DONE   |
 | K5 | Persistent history file                           | DONE   |
 | L1 | Scrollable transcript (Pg/wheel)                  | DONE   |
 | L2 | Stick-to-bottom + "↓ N new" hint                  | DONE   |

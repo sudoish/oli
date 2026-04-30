@@ -17,8 +17,8 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::tui::app::{
-    App, ApprovalState, HelpBrowserState, InlineHelpState, Mode, SessionsPickerState,
-    ToolCardState, TranscriptItem,
+    App, ApprovalState, HelpBrowserState, HistorySearchState, InlineHelpState, Mode,
+    SessionsPickerState, ToolCardState, TranscriptItem,
 };
 use crate::tui::hints;
 use crate::tui::markdown;
@@ -54,6 +54,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if let Some(card) = &app.inline_help {
         draw_inline_help(f, area, card);
+    }
+    if let Some(search) = &app.history_search {
+        draw_history_search(f, area, search, app);
     }
 }
 
@@ -353,6 +356,109 @@ fn draw_inline_help(f: &mut Frame, full_area: Rect, card: &InlineHelpState) {
             .add_modifier(Modifier::ITALIC),
     )));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+}
+
+/// Ctrl-R history search overlay. Top row shows the current
+/// query (with a cursor block); the rest is a scrolling list of
+/// matches, newest-first, highlighting the selected row.
+fn draw_history_search(f: &mut Frame, full_area: Rect, search: &HistorySearchState, app: &App) {
+    let modal = centered_rect(full_area, 70, 60).intersection(full_area);
+    f.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title(Line::from(Span::styled(
+            " (i-search) ↑↓ select · Enter load · Esc cancel ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    let parts = Layout::vertical([Constraint::Length(2), Constraint::Min(3)]).split(inner);
+
+    // Query row.
+    let query_line = Line::from(vec![
+        Span::styled("  search: ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            search.query.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "▍",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::SLOW_BLINK),
+        ),
+    ]);
+    f.render_widget(Paragraph::new(query_line), parts[0]);
+
+    if search.matches.is_empty() {
+        let hint = if search.query.is_empty() {
+            "  (history is empty)"
+        } else {
+            "  no matches"
+        };
+        let p = Paragraph::new(Line::from(Span::styled(
+            hint,
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
+        f.render_widget(p, parts[1]);
+        return;
+    }
+
+    let visible = parts[1].height as usize;
+    let start = search
+        .selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(search.matches.len().saturating_sub(visible));
+    let lines: Vec<Line<'static>> = search
+        .matches
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(i, &history_idx)| {
+            let body = app
+                .history
+                .get(history_idx)
+                .map(|s| s.replace('\n', " ⏎ "))
+                .unwrap_or_default();
+            let body = clip_to_width(&body, parts[1].width.saturating_sub(4) as usize);
+            let selected = i == search.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(
+                if selected {
+                    format!("▌ {}", body)
+                } else {
+                    format!("  {}", body)
+                },
+                style,
+            ))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), parts[1]);
+}
+
+fn clip_to_width(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// Centered rectangle within `r`, sized as a percentage. Clamped

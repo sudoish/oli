@@ -81,6 +81,18 @@ pub struct InlineHelpState {
     pub description: String,
 }
 
+/// Ctrl-R history search overlay. Substring match (case-
+/// insensitive); newest matches first; arrow keys navigate;
+/// Enter loads the picked entry into the input; Esc cancels.
+#[derive(Debug, Clone, Default)]
+pub struct HistorySearchState {
+    pub query: String,
+    /// Indices into `App.history`, newest-first, filtered by
+    /// `query`. Recomputed on every keystroke.
+    pub matches: Vec<usize>,
+    pub selected: usize,
+}
+
 pub enum Mode {
     Idle,
     Thinking { since: Instant },
@@ -155,6 +167,8 @@ pub struct App {
     /// `/<cmd> ?` one-shot inline help card. Closes on any
     /// keypress or on Esc.
     pub inline_help: Option<InlineHelpState>,
+    /// Ctrl-R history search overlay. `Some(_)` while open.
+    pub history_search: Option<HistorySearchState>,
     /// Set of hint ids the user has already dismissed. Persisted
     /// across sessions in `~/.config/oli/tui-hints.json` so
     /// onboarding tips fade once the user has used the feature
@@ -238,6 +252,7 @@ impl Default for App {
             sessions_picker: None,
             help_browser: None,
             inline_help: None,
+            history_search: None,
             shown_hints: HashSet::new(),
         }
     }
@@ -337,6 +352,82 @@ impl App {
     pub fn sessions_picker_pick(&self) -> Option<String> {
         let p = self.sessions_picker.as_ref()?;
         p.entries.get(p.selected).map(|r| r.id.clone())
+    }
+
+    pub fn open_history_search(&mut self) {
+        let mut state = HistorySearchState::default();
+        state.matches = self.history_search_compute_matches("");
+        self.history_search = Some(state);
+    }
+
+    pub fn close_history_search(&mut self) {
+        self.history_search = None;
+    }
+
+    pub fn history_search_push_char(&mut self, c: char) {
+        if self.history_search.is_none() {
+            return;
+        }
+        let new_query = {
+            let s = self.history_search.as_ref().unwrap();
+            let mut q = s.query.clone();
+            q.push(c);
+            q
+        };
+        let matches = self.history_search_compute_matches(&new_query);
+        let s = self.history_search.as_mut().unwrap();
+        s.query = new_query;
+        s.matches = matches;
+        s.selected = 0;
+    }
+
+    pub fn history_search_backspace(&mut self) {
+        if self.history_search.is_none() {
+            return;
+        }
+        let new_query = {
+            let s = self.history_search.as_ref().unwrap();
+            let mut q = s.query.clone();
+            q.pop();
+            q
+        };
+        let matches = self.history_search_compute_matches(&new_query);
+        let s = self.history_search.as_mut().unwrap();
+        s.query = new_query;
+        s.matches = matches;
+        s.selected = 0;
+    }
+
+    pub fn history_search_navigate(&mut self, delta: i32) {
+        if let Some(s) = self.history_search.as_mut() {
+            if s.matches.is_empty() {
+                return;
+            }
+            let n = s.matches.len() as i32;
+            let next = (s.selected as i32 + delta).rem_euclid(n);
+            s.selected = next as usize;
+        }
+    }
+
+    /// Pick the highlighted entry's body (or `None` if no
+    /// matches). Used by the Enter handler in `tui::mod` to
+    /// load it into the input box.
+    pub fn history_search_pick(&self) -> Option<String> {
+        let s = self.history_search.as_ref()?;
+        let idx = *s.matches.get(s.selected)?;
+        self.history.get(idx).cloned()
+    }
+
+    fn history_search_compute_matches(&self, query: &str) -> Vec<usize> {
+        let q = query.to_ascii_lowercase();
+        // Newest-first iteration over indices.
+        let mut out: Vec<usize> = (0..self.history.len()).rev().collect();
+        if !q.is_empty() {
+            out.retain(|&i| self.history[i].to_ascii_lowercase().contains(&q));
+        }
+        // Cap so the popup stays small even on huge histories.
+        out.truncate(50);
+        out
     }
 
     pub fn open_inline_help(&mut self, name: &str) {
@@ -1489,6 +1580,77 @@ mod tests {
         type_str(&mut app, "draft");
         app.set_input_text_pub("re-edit me");
         assert_eq!(input_string(&app), "re-edit me");
+    }
+
+    #[test]
+    fn history_search_returns_newest_first_when_query_is_empty() {
+        let mut app = App::new();
+        app.set_history(vec!["one".into(), "two".into(), "three".into()]);
+        app.open_history_search();
+        let s = app.history_search.as_ref().unwrap();
+        // newest-first: indices 2, 1, 0
+        assert_eq!(s.matches, vec![2, 1, 0]);
+        assert_eq!(s.selected, 0);
+    }
+
+    #[test]
+    fn history_search_filters_by_substring_case_insensitive() {
+        let mut app = App::new();
+        app.set_history(vec![
+            "edit src/main.rs".into(),
+            "show CARGO.toml".into(),
+            "list files".into(),
+        ]);
+        app.open_history_search();
+        for c in "Cargo".chars() {
+            app.history_search_push_char(c);
+        }
+        let s = app.history_search.as_ref().unwrap();
+        // Only the second entry matches `cargo`. Index 1.
+        assert_eq!(s.matches, vec![1]);
+    }
+
+    #[test]
+    fn history_search_navigate_wraps() {
+        let mut app = App::new();
+        app.set_history(vec!["a".into(), "b".into(), "c".into()]);
+        app.open_history_search();
+        app.history_search_navigate(-1);
+        assert_eq!(app.history_search.as_ref().unwrap().selected, 2);
+        app.history_search_navigate(1);
+        assert_eq!(app.history_search.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn history_search_pick_returns_body_for_selected_match() {
+        let mut app = App::new();
+        app.set_history(vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        app.open_history_search();
+        app.history_search_navigate(1); // selects newest-1 == "beta"
+        assert_eq!(app.history_search_pick(), Some("beta".into()));
+    }
+
+    #[test]
+    fn history_search_backspace_re_widens_results() {
+        let mut app = App::new();
+        app.set_history(vec!["alpha".into(), "alphabet".into(), "beta".into()]);
+        app.open_history_search();
+        app.history_search_push_char('a');
+        app.history_search_push_char('l');
+        app.history_search_push_char('p');
+        // Two matches: alphabet (idx 1), alpha (idx 0).
+        assert_eq!(
+            app.history_search.as_ref().unwrap().matches,
+            vec![1, 0]
+        );
+        app.history_search_backspace();
+        app.history_search_backspace();
+        app.history_search_backspace();
+        // Empty query → all entries newest-first.
+        assert_eq!(
+            app.history_search.as_ref().unwrap().matches,
+            vec![2, 1, 0]
+        );
     }
 
     #[test]

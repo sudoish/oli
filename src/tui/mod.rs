@@ -279,6 +279,10 @@ fn on_key(
         app.close_inline_help();
         return;
     }
+    if app.history_search.is_some() {
+        handle_history_search_key(app, key);
+        return;
+    }
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
@@ -299,6 +303,16 @@ fn on_key(
             // Shutdown after the loop exits.
             if !app.is_busy() {
                 app.request_quit();
+            }
+            return;
+        }
+        KeyCode::Char('r') if ctrl => {
+            // Ctrl+R: history search. Open the overlay; while
+            // it's up the dedicated handler eats every keystroke
+            // (typed query / arrows / Enter / Esc) until the
+            // user picks or cancels.
+            if !app.is_busy() {
+                app.open_history_search();
             }
             return;
         }
@@ -633,6 +647,25 @@ fn handle_sessions_picker_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 app.close_sessions_picker();
             }
         }
+        _ => {}
+    }
+}
+
+fn handle_history_search_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Esc => app.close_history_search(),
+        KeyCode::Up => app.history_search_navigate(-1),
+        KeyCode::Down => app.history_search_navigate(1),
+        KeyCode::Char('r') if ctrl => app.history_search_navigate(1),
+        KeyCode::Enter => {
+            if let Some(body) = app.history_search_pick() {
+                app.set_input_text_pub(&body);
+            }
+            app.close_history_search();
+        }
+        KeyCode::Backspace => app.history_search_backspace(),
+        KeyCode::Char(c) if !ctrl => app.history_search_push_char(c),
         _ => {}
     }
 }
