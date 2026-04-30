@@ -13,9 +13,12 @@ use crate::providers::Provider;
 
 pub mod linear;
 pub mod persisted;
+pub mod rag;
 
 pub use linear::LinearWithCompact;
 pub use persisted::{PersistedMemory, SessionEntry, list_sessions, new_session_id, sessions_dir};
+#[allow(unused_imports)]
+pub use rag::{Embedder, EmbeddingRagMemory, OllamaEmbedder};
 
 #[async_trait]
 pub trait Memory: Send + Sync {
