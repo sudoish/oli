@@ -4,7 +4,7 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::hooks::{HookPayload, HookRegistry};
+use crate::hooks::{HookRegistry, PreToolDecision};
 use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
 use crate::providers::{ChatRequest, ContentSink, Provider, Usage};
 use crate::tools::{Registry, ToolContext};
@@ -253,11 +253,7 @@ impl Agent {
             if let Some(cap) = self.max_turns {
                 if turn >= cap {
                     let msg = format!("(max_turns reached: {})", cap);
-                    self.hooks
-                        .dispatch(HookPayload::Stop {
-                            final_content: &msg,
-                        })
-                        .await;
+                    let msg = self.hooks.dispatch_stop(msg).await;
                     return Ok(msg);
                 }
             }
@@ -317,11 +313,7 @@ impl Agent {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.hooks
-                    .dispatch(HookPayload::Stop {
-                        final_content: &content,
-                    })
-                    .await;
+                let content = self.hooks.dispatch_stop(content).await;
                 return Ok(content);
             }
 
@@ -339,21 +331,22 @@ impl Agent {
                     .unwrap_or("{}");
                 let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
 
-                self.hooks
-                    .dispatch(HookPayload::PreToolUse {
-                        tool: name,
-                        args: &args,
-                    })
-                    .await;
-
-                let result = self.dispatch_with_policy(name, args.clone()).await;
-
-                self.hooks
-                    .dispatch(HookPayload::PostToolUse {
-                        tool: name,
-                        args: &args,
-                        result: &result,
-                    })
+                // Pre-hooks compose: `Replace` mutates the args the
+                // policy + tool will see; the first `Skip` short-circuits
+                // dispatch with a synthetic result. Post-hooks still
+                // fire afterwards so observers and redactors run on
+                // whatever the model is about to see.
+                let decision = self.hooks.dispatch_pre_tool_use(name, args).await;
+                let (final_args, raw_result) = match decision {
+                    PreToolDecision::Continue { args } => {
+                        let r = self.dispatch_with_policy(name, args.clone()).await;
+                        (args, r)
+                    }
+                    PreToolDecision::Skip { args, result } => (args, result),
+                };
+                let result = self
+                    .hooks
+                    .dispatch_post_tool_use(name, &final_args, raw_result)
                     .await;
 
                 self.memory
@@ -635,7 +628,7 @@ mod tests {
 
     #[tokio::test]
     async fn hooks_fire_around_tool_use_and_on_stop() {
-        use crate::hooks::{Hook, HookPayload, HookRegistry};
+        use crate::hooks::{Hook, HookOutcome, HookPayload, HookRegistry};
         use std::sync::{Arc, Mutex};
 
         struct TraceHook(Arc<Mutex<Vec<String>>>);
@@ -644,7 +637,7 @@ mod tests {
             fn name(&self) -> &str {
                 "trace"
             }
-            async fn handle(&self, payload: &HookPayload<'_>) {
+            async fn handle(&self, payload: &HookPayload<'_>) -> HookOutcome {
                 let line = match payload {
                     HookPayload::PreToolUse { tool, .. } => format!("pre:{}", tool),
                     HookPayload::PostToolUse { tool, result, .. } => {
@@ -653,6 +646,7 @@ mod tests {
                     HookPayload::Stop { final_content } => format!("stop:{}", final_content),
                 };
                 self.0.lock().unwrap().push(line);
+                HookOutcome::Continue
             }
         }
 
@@ -683,7 +677,7 @@ mod tests {
 
     #[tokio::test]
     async fn pre_hook_fires_even_when_policy_denies() {
-        use crate::hooks::{Hook, HookPayload, HookRegistry};
+        use crate::hooks::{Hook, HookOutcome, HookPayload, HookRegistry};
         use std::sync::{Arc, Mutex};
 
         struct TraceHook(Arc<Mutex<Vec<String>>>);
@@ -692,13 +686,14 @@ mod tests {
             fn name(&self) -> &str {
                 "trace"
             }
-            async fn handle(&self, payload: &HookPayload<'_>) {
+            async fn handle(&self, payload: &HookPayload<'_>) -> HookOutcome {
                 let line = match payload {
                     HookPayload::PreToolUse { tool, .. } => format!("pre:{}", tool),
                     HookPayload::PostToolUse { result, .. } => format!("post:{}", result),
                     HookPayload::Stop { .. } => "stop".into(),
                 };
                 self.0.lock().unwrap().push(line);
+                HookOutcome::Continue
             }
         }
 
@@ -972,6 +967,230 @@ mod tests {
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
         agent.run("hi").await.unwrap();
         assert_eq!(agent.last_usage, None);
+    }
+
+    #[tokio::test]
+    async fn pre_hook_skip_short_circuits_dispatch_and_post_hook_still_runs() {
+        use crate::hooks::{Hook, HookOutcome, HookPayload, HookRegistry};
+        use std::sync::{Arc, Mutex};
+
+        struct Skipper;
+        #[async_trait]
+        impl Hook for Skipper {
+            fn name(&self) -> &str {
+                "skipper"
+            }
+            async fn handle(&self, p: &HookPayload<'_>) -> HookOutcome {
+                if matches!(p, HookPayload::PreToolUse { .. }) {
+                    HookOutcome::Skip("blocked by hook".into())
+                } else {
+                    HookOutcome::Continue
+                }
+            }
+        }
+        struct PostObserver(Arc<Mutex<Vec<String>>>);
+        #[async_trait]
+        impl Hook for PostObserver {
+            fn name(&self) -> &str {
+                "post"
+            }
+            async fn handle(&self, p: &HookPayload<'_>) -> HookOutcome {
+                if let HookPayload::PostToolUse { result, .. } = p {
+                    self.0.lock().unwrap().push((*result).into());
+                }
+                HookOutcome::Continue
+            }
+        }
+
+        struct ExplodingTool;
+        #[async_trait]
+        impl Tool for ExplodingTool {
+            fn name(&self) -> &str {
+                "Explode"
+            }
+            fn description(&self) -> &str {
+                "must not run"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object","properties":{}})
+            }
+            async fn run(&self, _: Value, _: &ToolContext) -> Result<String> {
+                panic!("tool dispatched despite Skip outcome");
+            }
+        }
+
+        let provider = FakeProvider::new(vec![
+            assistant_with_tool_calls(vec![tool_call("c1", "Explode", json!({}))]),
+            assistant_text("recovered"),
+        ]);
+        let raw = std::sync::Arc::new(provider);
+        let provider_ref = raw.clone();
+
+        let mut tools = Registry::new();
+        tools.register(ExplodingTool);
+
+        let post_log = Arc::new(Mutex::new(Vec::new()));
+        let mut hooks = HookRegistry::new();
+        hooks.register(Skipper);
+        hooks.register(PostObserver(post_log.clone()));
+
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(provider_ref.clone())),
+            tools,
+            "m".into(),
+        )
+        .with_hooks(hooks);
+        let out = agent.run("hi").await.unwrap();
+        assert_eq!(out, "recovered");
+
+        // Tool message the model saw on its second turn carries the
+        // synthetic result, not a real dispatch.
+        let seen = provider_ref.requests();
+        assert_eq!(seen[1].messages[2]["content"], "blocked by hook");
+
+        // Post-hook still observed the synthetic result.
+        let post = post_log.lock().unwrap().clone();
+        assert_eq!(post, vec!["blocked by hook"]);
+    }
+
+    #[tokio::test]
+    async fn pre_hook_replace_mutates_args_seen_by_tool() {
+        use crate::hooks::{Hook, HookOutcome, HookPayload, HookRegistry};
+        use std::sync::{Arc, Mutex};
+
+        struct Injector;
+        #[async_trait]
+        impl Hook for Injector {
+            fn name(&self) -> &str {
+                "injector"
+            }
+            async fn handle(&self, p: &HookPayload<'_>) -> HookOutcome {
+                if let HookPayload::PreToolUse { args, .. } = p {
+                    let mut new_args: Value = (*args).clone();
+                    if let Some(o) = new_args.as_object_mut() {
+                        o.insert("x".into(), json!(99));
+                    }
+                    HookOutcome::Replace(new_args)
+                } else {
+                    HookOutcome::Continue
+                }
+            }
+        }
+
+        struct RecordingTool(Arc<Mutex<Option<Value>>>);
+        #[async_trait]
+        impl Tool for RecordingTool {
+            fn name(&self) -> &str {
+                "Record"
+            }
+            fn description(&self) -> &str {
+                "records its args"
+            }
+            fn parameters(&self) -> Value {
+                json!({"type":"object","properties":{}})
+            }
+            async fn run(&self, args: Value, _: &ToolContext) -> Result<String> {
+                *self.0.lock().unwrap() = Some(args);
+                Ok("ok".into())
+            }
+        }
+
+        let seen_args = Arc::new(Mutex::new(None));
+        let provider = FakeProvider::new(vec![
+            assistant_with_tool_calls(vec![tool_call("c1", "Record", json!({"orig": 1}))]),
+            assistant_text("done"),
+        ]);
+        let mut tools = Registry::new();
+        tools.register(RecordingTool(seen_args.clone()));
+
+        let mut hooks = HookRegistry::new();
+        hooks.register(Injector);
+
+        let mut agent =
+            Agent::new(Box::new(provider), tools, "m".into()).with_hooks(hooks);
+        agent.run("hi").await.unwrap();
+
+        let saw = seen_args.lock().unwrap().clone().expect("tool ran");
+        assert_eq!(saw["orig"], json!(1));
+        assert_eq!(saw["x"], json!(99));
+    }
+
+    #[tokio::test]
+    async fn post_hook_replace_redacts_result_seen_by_model() {
+        use crate::hooks::{Hook, HookOutcome, HookPayload, HookRegistry};
+
+        struct Redactor;
+        #[async_trait]
+        impl Hook for Redactor {
+            fn name(&self) -> &str {
+                "redactor"
+            }
+            async fn handle(&self, p: &HookPayload<'_>) -> HookOutcome {
+                if matches!(p, HookPayload::PostToolUse { .. }) {
+                    HookOutcome::Replace(Value::String("[redacted]".into()))
+                } else {
+                    HookOutcome::Continue
+                }
+            }
+        }
+
+        let provider = FakeProvider::new(vec![
+            assistant_with_tool_calls(vec![tool_call("c1", "Echo", json!({}))]),
+            assistant_text("done"),
+        ]);
+        let raw = std::sync::Arc::new(provider);
+        let provider_ref = raw.clone();
+
+        let mut tools = Registry::new();
+        tools.register(StaticTool {
+            name: "Echo",
+            out: "secret-token-abc",
+        });
+
+        let mut hooks = HookRegistry::new();
+        hooks.register(Redactor);
+
+        let mut agent = Agent::new(
+            Box::new(ScriptedProviderHandle(provider_ref.clone())),
+            tools,
+            "m".into(),
+        )
+        .with_hooks(hooks);
+        agent.run("hi").await.unwrap();
+
+        let seen = provider_ref.requests();
+        assert_eq!(seen[1].messages[2]["content"], "[redacted]");
+    }
+
+    #[tokio::test]
+    async fn stop_hook_replace_substitutes_final_content_returned_to_caller() {
+        use crate::hooks::{Hook, HookOutcome, HookPayload, HookRegistry};
+
+        struct Auditor;
+        #[async_trait]
+        impl Hook for Auditor {
+            fn name(&self) -> &str {
+                "auditor"
+            }
+            async fn handle(&self, p: &HookPayload<'_>) -> HookOutcome {
+                if let HookPayload::Stop { final_content } = p {
+                    HookOutcome::Replace(Value::String(format!(
+                        "[audited] {}",
+                        final_content
+                    )))
+                } else {
+                    HookOutcome::Continue
+                }
+            }
+        }
+
+        let provider = FakeProvider::new(vec![assistant_text("done")]);
+        let mut hooks = HookRegistry::new();
+        hooks.register(Auditor);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
+            .with_hooks(hooks);
+        let out = agent.run("hi").await.unwrap();
+        assert_eq!(out, "[audited] done");
     }
 
     /// Newtype around `Arc<FakeProvider>` so we can both feed the agent and

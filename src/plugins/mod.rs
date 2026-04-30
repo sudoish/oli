@@ -66,7 +66,7 @@ use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
 use crate::error::{AgentError, Result};
-use crate::hooks::{Hook, HookPayload};
+use crate::hooks::{Hook, HookOutcome, HookPayload};
 use crate::repl::slash::{SlashCommand, SlashOutcome};
 use crate::tools::task::SubagentSpawner;
 use crate::tools::{Tool, ToolContext};
@@ -594,7 +594,7 @@ impl Hook for LuaHook {
     fn name(&self) -> &str {
         &self.plugin_id
     }
-    async fn handle(&self, payload: &HookPayload<'_>) {
+    async fn handle(&self, payload: &HookPayload<'_>) -> HookOutcome {
         // Filter: each LuaHook is bound to a specific event name when
         // we built it. Skip if this payload isn't ours.
         let payload_event = match payload {
@@ -603,25 +603,25 @@ impl Hook for LuaHook {
             HookPayload::Stop { .. } => "stop",
         };
         if payload_event != self.event {
-            return;
+            return HookOutcome::Continue;
         }
         let f = match fetch_function(&self.lua, self.exec_idx) {
             Ok(f) => f,
             Err(e) => {
                 eprintln!("[plugin:{}] hook fetch failed: {}", self.plugin_id, e);
-                return;
+                return HookOutcome::Continue;
             }
         };
         let ctx_table = match build_ctx(&self.lua, self.host.clone()) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("[plugin:{}] hook ctx build failed: {}", self.plugin_id, e);
-                return;
+                return HookOutcome::Continue;
             }
         };
         let event_table = match self.lua.create_table() {
             Ok(t) => t,
-            Err(_) => return,
+            Err(_) => return HookOutcome::Continue,
         };
         match payload {
             HookPayload::PreToolUse { tool, args } => {
@@ -637,10 +637,41 @@ impl Hook for LuaHook {
                 let _ = event_table.set("final_content", *final_content);
             }
         }
-        if let Err(e) = f.call_async::<LuaValue>((event_table, ctx_table)).await {
-            eprintln!("[plugin:{}] hook error: {}", self.plugin_id, e);
+        match f.call_async::<LuaValue>((event_table, ctx_table)).await {
+            Ok(v) => lua_value_to_hook_outcome(&self.lua, v),
+            Err(e) => {
+                eprintln!("[plugin:{}] hook error: {}", self.plugin_id, e);
+                HookOutcome::Continue
+            }
         }
     }
+}
+
+/// Map a hook handler's Lua return value to a `HookOutcome`. The
+/// contract for plugin authors:
+///
+/// - `nil` / `false` / nothing → `Continue` (the common case).
+/// - `{ skip = "..." }` → `Skip(string)` on `pre_tool_use`. Other
+///   events ignore `skip`.
+/// - `{ replace = ... }` → `Replace(value)` carrying any JSON value.
+///   Strings are unwrapped on the harness side so the common
+///   `{ replace = "[redacted]" }` lands as the string, not as a
+///   JSON-quoted string.
+/// - Anything else → `Continue`. A plugin returning a stray string
+///   doesn't accidentally short-circuit; explicit intent only.
+fn lua_value_to_hook_outcome(lua: &Lua, v: LuaValue) -> HookOutcome {
+    let LuaValue::Table(t) = v else {
+        return HookOutcome::Continue;
+    };
+    if let Ok(Some(s)) = t.get::<Option<String>>("skip") {
+        return HookOutcome::Skip(s);
+    }
+    if let Ok(Some(replacement)) = t.get::<Option<LuaValue>>("replace") {
+        if let Ok(json) = lua.from_value::<Value>(replacement) {
+            return HookOutcome::Replace(json);
+        }
+    }
+    HookOutcome::Continue
 }
 
 fn lua_err(e: mlua::Error) -> AgentError {
@@ -860,5 +891,135 @@ return p
         load_dir(dir.path(), empty_registry(), None, &mut out).await;
         assert_eq!(out.hooks.len(), 3);
         assert_eq!(out.manifest[0].hook_events.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn lua_pre_hook_can_skip_dispatch_via_skip_table() {
+        // Plugin pre-hook returns `{ skip = "blocked" }` — the harness
+        // should short-circuit and not dispatch the tool.
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("skipper.lua"),
+            r#"
+local p = { name = "skipper" }
+p.hooks = {
+  pre_tool_use = function(event, ctx)
+    if event.tool == "Bash" then
+      return { skip = "blocked by plugin" }
+    end
+  end,
+}
+return p
+            "#,
+        )
+        .unwrap();
+        let mut out = LoadedPlugins::default();
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
+        assert_eq!(out.hooks.len(), 1);
+
+        let payload = HookPayload::PreToolUse {
+            tool: "Bash",
+            args: &json!({"command": "rm -rf /"}),
+        };
+        match out.hooks[0].handle(&payload).await {
+            HookOutcome::Skip(s) => assert_eq!(s, "blocked by plugin"),
+            other => panic!("expected Skip, got {:?}", other),
+        }
+
+        // Other tools fall through to Continue (the function returns
+        // implicit nil for non-Bash).
+        let payload2 = HookPayload::PreToolUse {
+            tool: "Read",
+            args: &json!({}),
+        };
+        assert!(matches!(
+            out.hooks[0].handle(&payload2).await,
+            HookOutcome::Continue
+        ));
+    }
+
+    #[tokio::test]
+    async fn lua_post_hook_can_replace_result_via_replace_table() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("redactor.lua"),
+            r#"
+local p = { name = "redactor" }
+p.hooks = {
+  post_tool_use = function(event, ctx)
+    return { replace = "[redacted]" }
+  end,
+}
+return p
+            "#,
+        )
+        .unwrap();
+        let mut out = LoadedPlugins::default();
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
+
+        let payload = HookPayload::PostToolUse {
+            tool: "Bash",
+            args: &json!({}),
+            result: "secret token: abc",
+        };
+        match out.hooks[0].handle(&payload).await {
+            HookOutcome::Replace(v) => assert_eq!(v, json!("[redacted]")),
+            other => panic!("expected Replace, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn lua_hook_returning_nil_or_unrelated_table_is_continue() {
+        // Three return shapes that should all map to Continue:
+        // - explicit nil
+        // - a table that doesn't carry `skip` or `replace`
+        // - a non-table value (e.g. a number)
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("noisy.lua"),
+            r#"
+local p = { name = "noisy" }
+p.hooks = {
+  pre_tool_use = function(event, ctx)
+    -- explicit nil; same as no return
+    return nil
+  end,
+  post_tool_use = function(event, ctx)
+    return { unrelated = "field" }
+  end,
+  stop = function(event, ctx)
+    return 42
+  end,
+}
+return p
+            "#,
+        )
+        .unwrap();
+        let mut out = LoadedPlugins::default();
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
+        assert_eq!(out.hooks.len(), 3);
+
+        let pre = HookPayload::PreToolUse {
+            tool: "X",
+            args: &json!({}),
+        };
+        let post = HookPayload::PostToolUse {
+            tool: "X",
+            args: &json!({}),
+            result: "r",
+        };
+        let stop = HookPayload::Stop { final_content: "c" };
+
+        // Each LuaHook is filtered to its own event; ask the right one.
+        let pre_hook = out.hooks.iter().find(|_| true).unwrap();
+        let _ = pre_hook;
+        // Instead of poking by index, rely on the filter: every hook
+        // returns Continue for its own event when the Lua handler
+        // returns something we don't recognize as skip/replace.
+        for h in &out.hooks {
+            assert!(matches!(h.handle(&pre).await, HookOutcome::Continue));
+            assert!(matches!(h.handle(&post).await, HookOutcome::Continue));
+            assert!(matches!(h.handle(&stop).await, HookOutcome::Continue));
+        }
     }
 }

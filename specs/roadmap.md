@@ -191,7 +191,7 @@ each phase boundary.
 | A2 | `--strict` flag for `-p`                          | DONE   |
 | A3 | Persist Edit read-set across `--resume`           | DONE   |
 | A4 | REPL progress indicator during tool rounds        | DONE   |
-| B1 | Hook short-circuit + result mutation              | TODO   |
+| B1 | Hook short-circuit + result mutation              | DONE   |
 | C1 | `/plugins reload`                                 | TODO   |
 | C2 | Session-level cost in `/cost`                     | TODO   |
 | C3 | Subagent result cap                               | TODO   |

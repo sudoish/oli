@@ -9,7 +9,7 @@ use std::io::Write;
 
 use crate::agent::Agent;
 use crate::error::{AgentError, Result};
-use crate::hooks::{Hook, HookPayload};
+use crate::hooks::{Hook, HookOutcome, HookPayload};
 
 pub mod slash;
 
@@ -135,7 +135,7 @@ impl Hook for ProgressHook {
         "progress"
     }
 
-    async fn handle(&self, payload: &HookPayload<'_>) {
+    async fn handle(&self, payload: &HookPayload<'_>) -> HookOutcome {
         if let HookPayload::PreToolUse { tool, args } = payload {
             let preview = preview_args(args, 60);
             let line = if preview.is_empty() {
@@ -147,6 +147,7 @@ impl Hook for ProgressHook {
             let _ = err.write_all(line.as_bytes());
             let _ = err.flush();
         }
+        HookOutcome::Continue
     }
 }
 
