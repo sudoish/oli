@@ -100,7 +100,9 @@ async fn run_bash(command: &str, cwd: Option<&Path>, timeout: Duration) -> Strin
     // and running in the background.
     #[cfg(unix)]
     {
-        use std::os::unix::process::CommandExt;
+        // tokio::process::Command's pre_exec is a direct method
+        // under cfg(unix); no `use std::os::unix::process::CommandExt`
+        // needed.
         unsafe {
             cmd.pre_exec(|| {
                 // setpgid(0, 0) makes this process a new

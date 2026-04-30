@@ -36,7 +36,13 @@ use super::{CompactContext, Memory};
 pub struct PersistedMemory {
     inner: Box<dyn Memory>,
     file: Arc<Mutex<File>>,
+    /// Public read accessors below — kept on the struct as part of
+    /// the contract so callers (REPL, future `/sessions` UX) can
+    /// surface where the session lives. Currently the binary
+    /// doesn't print them, hence the `#[allow(dead_code)]`.
+    #[allow(dead_code)]
     path: PathBuf,
+    #[allow(dead_code)]
     id: String,
     /// Canonicalized paths replayed from the session file's `read` ops.
     /// Drained by the binary at startup into the live `ToolContext` so
@@ -83,10 +89,16 @@ impl PersistedMemory {
         })
     }
 
+    /// Session id this struct is bound to. Public so the REPL or
+    /// future tooling can display it. Not currently called by the
+    /// binary; tests may exercise it.
+    #[allow(dead_code)]
     pub fn id(&self) -> &str {
         &self.id
     }
 
+    /// On-disk path the JSONL transcript appends to.
+    #[allow(dead_code)]
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -288,9 +300,13 @@ pub fn list_sessions_in(dir: &Path) -> Vec<SessionEntry> {
     out
 }
 
-/// One session row in `list_sessions`.
+/// One session row in `list_sessions`. The picker UI currently
+/// only reads `id` and `mtime`; `path` rides along so future
+/// callers (e.g. an "open in editor" action) don't need a
+/// second `sessions_dir().join(...)` round-trip.
 pub struct SessionEntry {
     pub id: String,
+    #[allow(dead_code)]
     pub path: PathBuf,
     pub mtime: Option<std::time::SystemTime>,
 }

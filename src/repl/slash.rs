@@ -132,10 +132,11 @@ impl SlashRegistry {
         Some(cmd.run(rest, agent).await)
     }
 
-    /// Default REPL command set. Order is the order they show up in
-    /// `/help`. `Plugins` is constructed without a reloader — call
-    /// `default_set_with_reloader` instead to get `/plugins reload`
-    /// support, which is the wiring the binary uses at startup.
+    /// Default REPL command set without a `/plugins` reloader.
+    /// Tests reach for this since they don't exercise plugin
+    /// reloading; the binary calls `default_set_with_reloader`.
+    /// Order is the order they show up in `/help`.
+    #[cfg(test)]
     pub fn default_set() -> Self {
         Self::default_set_with_reloader(None)
     }

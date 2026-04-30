@@ -33,17 +33,14 @@ pub struct CompletionMenu {
     pub kind: CompletionKind,
     pub candidates: Vec<String>,
     pub selected: usize,
-    /// What we'll replace in the buffer when the user accepts.
-    /// `query` is the substring under the cursor (e.g. `cos` for
-    /// `/cos<TAB>`); `replace_start_byte` is the byte offset on
-    /// the active line where the trigger char (`/` or `@`) lives.
-    pub query: String,
+    /// Byte offset on the active line where the trigger char
+    /// (`/` or `@`) lives. The substring from there to the
+    /// cursor is what gets replaced when the user accepts.
     pub replace_start_byte: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct ApprovalState {
-    pub id: u64,
     pub tool: String,
     pub reason: String,
     pub preview: String,
@@ -118,7 +115,6 @@ pub enum TranscriptItem {
         body: String,
     },
     ToolCard {
-        id: u64,
         tool: String,
         args_preview: String,
         state: ToolCardState,
@@ -279,11 +275,6 @@ impl App {
                 .into(),
         });
         app
-    }
-
-    pub fn set_slash_names(&mut self, mut names: Vec<String>) {
-        names.sort();
-        self.slash_names = names;
     }
 
     /// Replace the (name, description) lookup. Updates
@@ -467,15 +458,6 @@ impl App {
 
     pub fn hint_is_unseen(&self, id: &str) -> bool {
         !self.shown_hints.contains(id)
-    }
-
-    /// Any overlay open? Used by the keypress router so input
-    /// keys don't reach the TextArea while a modal is up.
-    pub fn has_overlay(&self) -> bool {
-        self.approval.is_some()
-            || self.sessions_picker.is_some()
-            || self.help_browser.is_some()
-            || self.inline_help.is_some()
     }
 
     pub fn set_status(&mut self, status: StatusModel) {
@@ -789,7 +771,6 @@ impl App {
             kind: ctx.kind,
             candidates,
             selected: prior_selected,
-            query: ctx.query,
             replace_start_byte: ctx.replace_start_byte,
         });
     }
@@ -895,7 +876,6 @@ impl App {
             }
         }
         self.transcript.push(TranscriptItem::ToolCard {
-            id,
             tool,
             args_preview,
             state: ToolCardState::Running {
@@ -999,13 +979,11 @@ impl App {
 
     pub fn on_approval_requested(
         &mut self,
-        id: u64,
         tool: String,
         args: Value,
         reason: String,
     ) {
         self.approval = Some(ApprovalState {
-            id,
             preview: crate::policy::preview_for(&tool, &args),
             tool,
             reason,
@@ -1319,9 +1297,8 @@ mod tests {
     fn approval_request_populates_modal_with_preview() {
         let mut app = App::new();
         let args = serde_json::json!({"file_path": "src/x.rs"});
-        app.on_approval_requested(7, "Edit".into(), args, "edit src/x.rs".into());
+        app.on_approval_requested("Edit".into(), args, "edit src/x.rs".into());
         let approval = app.approval.expect("modal should be set");
-        assert_eq!(approval.id, 7);
         assert_eq!(approval.tool, "Edit");
         assert!(approval.preview.contains("file: src/x.rs"));
     }
@@ -1330,7 +1307,6 @@ mod tests {
     fn close_approval_drops_the_modal() {
         let mut app = App::new();
         app.on_approval_requested(
-            1,
             "Edit".into(),
             serde_json::json!({"file_path":"x"}),
             "r".into(),

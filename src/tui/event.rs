@@ -88,7 +88,6 @@ pub enum UiEvent {
     /// keyed implicitly (single-slot — only one approval pending
     /// at a time).
     ApprovalRequested {
-        id: u64,
         tool: String,
         args: Value,
         reason: String,

@@ -95,10 +95,16 @@ impl HookRegistry {
         self.hooks.push(hook);
     }
 
+    /// Hook count. Useful for diagnostics / `/plugins` output;
+    /// not on the agent's hot path, hence the dead-code allow.
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.hooks.len()
     }
 
+    /// Iterate registered hooks. Public so the binary or future
+    /// debug commands can introspect the registry.
+    #[allow(dead_code)]
     pub fn iter(&self) -> impl Iterator<Item = &dyn Hook> {
         self.hooks.iter().map(|b| b.as_ref())
     }

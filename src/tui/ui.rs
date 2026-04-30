@@ -458,7 +458,7 @@ fn draw_history_search(f: &mut Frame, full_area: Rect, search: &HistorySearchSta
 
 /// First-run setup wizard overlay. Multi-step modal:
 /// Welcome → PickProvider → (EnterApiKey if applicable) →
-/// Confirm → Saved/Cancelled. Esc cancels at any point.
+/// Confirm → Saved. Esc closes the wizard at any point.
 fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState) {
     let modal = centered_rect(full_area, 80, 70).intersection(full_area);
     f.render_widget(Clear, modal);
@@ -469,7 +469,6 @@ fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState) {
         WizardStep::EnterApiKey => " Setup (3/4)  API key ",
         WizardStep::Confirm => " Setup (4/4)  Confirm ",
         WizardStep::Saved { .. } => " Setup  Saved ",
-        WizardStep::Cancelled => " Setup  Cancelled ",
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -516,13 +515,6 @@ fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState) {
                     Style::default().fg(Color::White),
                 )),
             ],
-            "  press any key to dismiss",
-        ),
-        WizardStep::Cancelled => (
-            vec![Line::from(Span::styled(
-                "  Setup cancelled.".to_string(),
-                Style::default().fg(Color::DarkGray),
-            ))],
             "  press any key to dismiss",
         ),
     };
@@ -1212,7 +1204,6 @@ mod tests {
     fn mode_indicator_overrides_to_awaiting_when_modal_is_up() {
         let mut app = app_with_status(StatusModel::default());
         app.on_approval_requested(
-            1,
             "Edit".into(),
             serde_json::json!({"file_path":"x"}),
             "edit".into(),

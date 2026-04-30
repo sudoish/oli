@@ -210,11 +210,10 @@ fn handle_event(
             ok,
         } => app.on_tool_done(id, duration, summary, ok),
         UiEvent::ApprovalRequested {
-            id,
             tool,
             args,
             reason,
-        } => app.on_approval_requested(id, tool, args, reason),
+        } => app.on_approval_requested(tool, args, reason),
         UiEvent::UsageUpdate { last, session } => app.update_usage(last, session),
         UiEvent::UndoApplied {
             prompt_body,
@@ -713,10 +712,10 @@ fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
             }
             _ => {}
         },
-        WizardStep::Saved { .. } | WizardStep::Cancelled => {
+        WizardStep::Saved { .. } => {
             // Any key dismisses the post-state. Surfaces the
             // appropriate hint as a SystemNote (already done at
-            // save-time / cancel-time).
+            // save-time).
             app.close_wizard();
         }
     }

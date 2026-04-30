@@ -19,7 +19,6 @@ use futures::StreamExt;
 use reqwest::Client;
 use serde_json::{Value, json};
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Mutex;
 
@@ -231,6 +230,7 @@ fn extract_jsonrpc_result(body: &Value, expected_id: i64, method: &str) -> Resul
 mod tests {
     use super::*;
     use std::net::SocketAddr;
+    use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 

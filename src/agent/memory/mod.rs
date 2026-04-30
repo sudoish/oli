@@ -16,7 +16,7 @@ pub mod persisted;
 pub mod rag;
 
 pub use linear::LinearWithCompact;
-pub use persisted::{PersistedMemory, SessionEntry, list_sessions, new_session_id, sessions_dir};
+pub use persisted::{PersistedMemory, SessionEntry, list_sessions, new_session_id};
 #[allow(unused_imports)]
 pub use rag::{Embedder, EmbeddingRagMemory, OllamaEmbedder};
 

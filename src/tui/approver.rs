@@ -14,7 +14,6 @@
 
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -38,7 +37,6 @@ pub struct TuiApprover {
     allow: Arc<Mutex<HashSet<String>>>,
     /// Counterpart for "always deny this session."
     deny: Arc<Mutex<HashSet<String>>>,
-    next_id: AtomicU64,
 }
 
 impl TuiApprover {
@@ -48,7 +46,6 @@ impl TuiApprover {
             pending,
             allow: Arc::new(Mutex::new(HashSet::new())),
             deny: Arc::new(Mutex::new(HashSet::new())),
-            next_id: AtomicU64::new(1),
         }
     }
 
@@ -68,7 +65,6 @@ impl Approver for TuiApprover {
             return false;
         }
 
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         // Stash the sender so the render task can find it on
         // user keystroke. If a previous approval was somehow
@@ -80,7 +76,6 @@ impl Approver for TuiApprover {
         *self.pending.lock().unwrap() = Some(tx);
 
         let _ = self.ui_tx.send(UiEvent::ApprovalRequested {
-            id,
             tool: tool.to_string(),
             args: args.clone(),
             reason: reason.to_string(),

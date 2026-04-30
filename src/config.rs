@@ -130,6 +130,11 @@ impl Config {
         toml::from_str(s).map_err(|e| AgentError::Config(e.to_string()))
     }
 
+    /// Read + parse a single TOML file. The binary uses
+    /// `load_or_default` (which layers global + project), but
+    /// this single-file form stays public for tooling/tests that
+    /// want to point at a specific file.
+    #[allow(dead_code)]
     pub fn from_file(path: &Path) -> Result<Self> {
         let body = std::fs::read_to_string(path)?;
         Self::from_str(&body)

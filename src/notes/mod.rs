@@ -52,5 +52,8 @@ pub trait NotesStore: Send + Sync {
     async fn list(&self, tag: Option<&str>) -> Result<Vec<Note>>;
 
     /// Delete a note by id. Returns true if a note was removed.
+    /// Trait method kept for the contract: future REPL surface
+    /// (`/notes rm`) will call it. Tests exercise concrete impls.
+    #[allow(dead_code)]
     async fn delete(&self, id: &str) -> Result<bool>;
 }

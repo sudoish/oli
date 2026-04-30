@@ -32,11 +32,14 @@ pub struct ToolMeta {
 }
 
 /// Negotiated capability flags from `initialize`. v1 only consumes
-/// `tools` — `resources` and `prompts` are reserved for phase 5c.
+/// `tools` — `resources` and `prompts` are reserved for phase 5c
+/// and parsed today so the struct mirrors the wire protocol.
 #[derive(Clone, Debug, Default)]
 pub struct ServerCapabilities {
     pub tools: bool,
+    #[allow(dead_code)]
     pub resources: bool,
+    #[allow(dead_code)]
     pub prompts: bool,
 }
 

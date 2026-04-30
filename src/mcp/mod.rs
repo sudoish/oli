@@ -166,7 +166,10 @@ mod tests {
 /// can update the harness `Registry` in place.
 #[derive(Default)]
 pub struct ToolListDelta {
-    /// Server id (matches `McpHandle::name`).
+    /// Server id (matches `McpHandle::name`). Surfaced for
+    /// logging / `/diagnostics`; the agent's apply loop only
+    /// touches `removed` + `added`, so it's not read today.
+    #[allow(dead_code)]
     pub server: String,
     /// Tool names (post-`<server>__` namespacing) that should be
     /// removed from the harness registry.

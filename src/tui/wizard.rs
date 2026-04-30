@@ -18,7 +18,6 @@ pub enum WizardStep {
     EnterApiKey,
     Confirm,
     Saved { path: PathBuf },
-    Cancelled,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,7 +127,7 @@ impl WizardState {
             }
             WizardStep::EnterApiKey => WizardStep::Confirm,
             WizardStep::Confirm => self.step.clone(),
-            WizardStep::Saved { .. } | WizardStep::Cancelled => self.step.clone(),
+            WizardStep::Saved { .. } => self.step.clone(),
         };
     }
 
@@ -145,12 +144,8 @@ impl WizardState {
                     WizardStep::PickProvider
                 }
             }
-            WizardStep::Saved { .. } | WizardStep::Cancelled => self.step.clone(),
+            WizardStep::Saved { .. } => self.step.clone(),
         };
-    }
-
-    pub fn cancel(&mut self) {
-        self.step = WizardStep::Cancelled;
     }
 
     /// Render a TOML config string for the current selections.

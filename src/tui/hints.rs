@@ -18,9 +18,6 @@ pub mod ids {
     /// for the rest of the session." Faded after the user
     /// presses `a` once.
     pub const APPROVAL_ALLOW: &str = "approval-allow";
-    /// Footnote on the input: "Shift+Enter for a newline."
-    /// Faded after the first multi-line submit.
-    pub const MULTI_LINE: &str = "multi-line";
 }
 
 pub fn hints_path() -> Option<PathBuf> {
@@ -74,7 +71,7 @@ mod tests {
         let path = dir.path().join("hints.json");
         let mut set = HashSet::new();
         set.insert(ids::APPROVAL_ALLOW.to_string());
-        set.insert(ids::MULTI_LINE.to_string());
+        set.insert("another-id".to_string());
         save_to(&path, &set);
         let loaded = load_from(&path);
         assert_eq!(loaded, set);
