@@ -14,7 +14,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
+
+use transcript::TRANSCRIPT_H_PAD;
 
 use crate::tui::app::{App, Mode};
 
@@ -99,9 +101,8 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     )];
 
     let fields = build_status_fields(app);
-    let mut budget = area
-        .width
-        .saturating_sub(visible_width(&Line::from(left.clone())) as u16);
+    let inner_width = area.width.saturating_sub(TRANSCRIPT_H_PAD * 2);
+    let mut budget = inner_width.saturating_sub(visible_width(&Line::from(left.clone())) as u16);
 
     // Drop fields right-to-left until we fit. Each field is "  • <body>".
     let mut visible: Vec<Vec<Span<'static>>> = Vec::new();
@@ -121,7 +122,9 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         left.extend(field);
     }
 
-    let bar = Paragraph::new(Line::from(left)).style(Style::default().bg(Color::Reset));
+    let bar = Paragraph::new(Line::from(left))
+        .block(Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD)))
+        .style(Style::default().bg(Color::Reset));
     f.render_widget(bar, area);
 }
 
@@ -237,13 +240,15 @@ fn draw_activity_strip(f: &mut Frame, area: Rect, app: &App) {
     let right = render_activity_strip_right(app);
     let left_w = spans_width(&left) as u16;
     let right_w = spans_width(&right) as u16;
+    let inner_width = area.width.saturating_sub(TRANSCRIPT_H_PAD * 2);
     let mut spans = left;
-    let pad = area.width.saturating_sub(left_w + right_w);
+    let pad = inner_width.saturating_sub(left_w + right_w);
     if pad > 0 {
         spans.push(Span::raw(" ".repeat(pad as usize)));
     }
     spans.extend(right);
-    let strip = Paragraph::new(Line::from(spans));
+    let strip = Paragraph::new(Line::from(spans))
+        .block(Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD)));
     f.render_widget(strip, area);
 }
 
