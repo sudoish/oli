@@ -7,6 +7,27 @@ and stay small enough to read in one sitting.
 This document is the high-level spec. Per-phase or per-feature design notes
 will land alongside it as `specs/<topic>.md`.
 
+## Where to start reading
+
+| Doc                                 | What's there                                                                                                                |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| **[`specs/README.md`](README.md)** (you are here) | High-level mission, principles, in/out of scope, architecture sketch, configuration shape, plugin contract, roadmap, success criteria. |
+| [`specs/progress.md`](progress.md)  | Live status: what's shipped, what's mid-flight, what's blocked. Phase commit SHAs land here at each phase boundary.        |
+| [`specs/roadmap.md`](roadmap.md)    | Post-MCP follow-ups (phases A–E): daily-driver safety, hooks, plugin reload, caching/parity, plugin caps, RAG, MCP refresh. All DONE. |
+| [`specs/tui.md`](tui.md)            | TUI architecture roadmap (phases F–O). Layout, render loop, completion, history, wizard, undo, recoverability. All DONE.   |
+| [`specs/review-2.md`](review-2.md)  | Deep review #2 (rated 9/10). Strengths + persistent weaknesses that drove the polish plan.                                  |
+| [`specs/polish.md`](polish.md)      | The 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, packaging.                              |
+| [`specs/memory.md`](memory.md)      | `Memory` trait design — pluggable strategies (linear+compact default, RAG, graph, hierarchical).                            |
+| [`specs/mcp.md`](mcp.md)            | MCP client design (phase 5). stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.          |
+| [`specs/ui.md`](ui.md)              | Historical line-mode UX plan (predecessor to `tui.md`). Kept for reference.                                                  |
+| [`docs/cheatsheet.md`](../docs/cheatsheet.md) | Every keybind, slash command, file path, and feature flag in one page.                                              |
+
+If you want to **use** oli, start with [`docs/cheatsheet.md`](../docs/cheatsheet.md) and `oli init`.
+If you want to **understand** oli, read this README → `progress.md` → whichever
+phase doc matches what you're poking at.
+If you want to **extend** oli, the public API surface is in [`src/lib.rs`](../src/lib.rs);
+`cargo doc --no-deps --open` renders the per-module overviews.
+
 ## Mission
 
 Build a coding agent that:

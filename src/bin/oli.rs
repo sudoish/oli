@@ -23,7 +23,14 @@ use oli::tui;
 use oli::{hooks, mcp, notes, plugins, providers, repl};
 
 #[derive(Parser)]
-#[command(author, version, about)]
+#[command(
+    author,
+    version,
+    about,
+    long_about = "A minimal, hackable, single-binary terminal coding agent.\n\n\
+                  Keyboard cheatsheet: docs/cheatsheet.md (in the repo) — \
+                  every shortcut, slash command, file path, and feature flag in one place."
+)]
 struct Args {
     /// Single-shot prompt. If omitted, the binary enters an interactive REPL.
     #[arg(short = 'p', long)]
