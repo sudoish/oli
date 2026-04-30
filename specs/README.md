@@ -19,7 +19,8 @@ will land alongside it as `specs/<topic>.md`.
 | [`specs/polish.md`](polish.md)      | The 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, packaging.                              |
 | [`specs/memory.md`](memory.md)      | `Memory` trait design — pluggable strategies (linear+compact default, RAG, graph, hierarchical).                            |
 | [`specs/mcp.md`](mcp.md)            | MCP client design (phase 5). stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.          |
-| [`specs/ui.md`](ui.md)              | Historical line-mode UX plan (predecessor to `tui.md`). Kept for reference.                                                  |
+| [`specs/formatting.md`](formatting.md) | Pretty output plan: ANSI strip, tables, HTML, wrapped code, inline code, `--plain` markdown rendering. |
+| [`specs/ui.md`](ui.md)                | Historical line-mode UX plan (predecessor to `tui.md`). Kept for reference.                                |
 | [`docs/cheatsheet.md`](../docs/cheatsheet.md) | Every keybind, slash command, file path, and feature flag in one page.                                              |
 
 If you want to **use** oli, start with [`docs/cheatsheet.md`](../docs/cheatsheet.md) and `oli init`.
