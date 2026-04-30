@@ -5,7 +5,7 @@
 //! by deliberately keeping non-clone state (oneshot senders) out
 //! of the variants and in side-channel slots instead.
 
-use crossterm::event::KeyEvent;
+use crossterm::event::{KeyEvent, MouseEvent};
 use serde_json::Value;
 
 #[derive(Debug, Clone)]
@@ -16,6 +16,9 @@ pub enum UiEvent {
     /// Terminal was resized. The render loop redraws on the next
     /// frame; nothing further to do at the App level.
     Resize,
+    /// Mouse event (we currently only act on wheel-up/wheel-down
+    /// to scroll the transcript; everything else is dropped).
+    Mouse(MouseEvent),
 
     // ----- Driver-side events (Phase G) -----
     /// The agent task has started a new turn. The UI flips to

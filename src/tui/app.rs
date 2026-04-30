@@ -119,6 +119,24 @@ pub struct App {
     /// Saved-on-first-Up draft so Down past the end can restore
     /// what the user was typing.
     pub history_draft: Option<String>,
+
+    /// Transcript scroll position. `None` means "stick to bottom"
+    /// (the default). The render layer pins to the latest line on
+    /// each frame. PgUp / Home / mouse-wheel-up detach into
+    /// `Some(offset)`. PgDn / End / mouse-wheel-down re-attach
+    /// once we reach the bottom again.
+    pub scroll_manual: Option<u16>,
+    /// Lines that arrived while we were detached (`scroll_manual`
+    /// is `Some`). Reset on re-attach. The status bar / footer
+    /// shows this so a user scrolled away knows new content is
+    /// queued behind them.
+    pub unread_lines: u16,
+    /// Cached on each render so key handlers know the bottom-
+    /// limit (max valid offset) without recomputing the
+    /// transcript layout. Updated by `ui::draw`.
+    pub scroll_max: u16,
+    /// Cached transcript-pane height for PgUp/PgDn step size.
+    pub scroll_viewport_height: u16,
 }
 
 impl Default for App {
@@ -137,6 +155,10 @@ impl Default for App {
             history: Vec::new(),
             history_cursor: None,
             history_draft: None,
+            scroll_manual: None,
+            unread_lines: 0,
+            scroll_max: 0,
+            scroll_viewport_height: 0,
         }
     }
 }
@@ -188,6 +210,34 @@ impl App {
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        // Transcript scroll keys. PgUp/PgDn always work; the
+        // single-key vim shortcuts (`g`, `G`) and Home/End only
+        // when the input box is empty so a user typing won't
+        // accidentally scroll.
+        match key.code {
+            KeyCode::PageUp => {
+                self.scroll_page_up();
+                return SubmitAction::None;
+            }
+            KeyCode::PageDown => {
+                self.scroll_page_down();
+                return SubmitAction::None;
+            }
+            KeyCode::Home if ctrl => {
+                self.scroll_to_top();
+                return SubmitAction::None;
+            }
+            KeyCode::End if ctrl => {
+                self.scroll_to_bottom();
+                return SubmitAction::None;
+            }
+            _ => {}
+        }
+        // Bare `g` / `G` would conflict with typing those letters
+        // as the first character of a prompt; bare Home / End
+        // are useful at the start of a line for cursor movement.
+        // Stick to PgUp/PgDn + Ctrl+Home/Ctrl+End — same surface
+        // as `less`/most pagers.
         match key.code {
             KeyCode::Enter if shift || alt => {
                 self.input.insert_newline();
@@ -231,6 +281,16 @@ impl App {
             }
         }
         SubmitAction::None
+    }
+
+    /// True when the user hasn't typed anything in the input box.
+    /// Reserved for future first-keystroke detection (e.g. `?`
+    /// hint) — currently unused; the bare-letter scroll
+    /// shortcuts that needed it were dropped in favor of
+    /// Ctrl+Home/Ctrl+End.
+    #[allow(dead_code)]
+    fn is_input_empty(&self) -> bool {
+        self.input.lines().iter().all(|l| l.is_empty())
     }
 
     /// Keypress while the completion menu is open. `tui::run`
@@ -494,6 +554,7 @@ impl App {
             done: false,
         });
         self.active_assistant = Some(self.transcript.len() - 1);
+        self.note_arrival(2);
     }
 
     pub fn on_content_chunk(&mut self, chunk: &str) {
@@ -512,6 +573,10 @@ impl App {
                 body.push_str(chunk);
             }
         }
+        // Approximate by counting newlines in the chunk + 1 — a
+        // single-token stream rarely carries multiple newlines.
+        let n = chunk.matches('\n').count() as u16 + 1;
+        self.note_arrival(n);
     }
 
     pub fn on_tool_start(&mut self, id: u64, tool: String, args_preview: String) {
@@ -533,6 +598,7 @@ impl App {
             },
         });
         self.active_tools.insert(id, self.transcript.len() - 1);
+        self.note_arrival(2);
     }
 
     pub fn on_tool_done(&mut self, id: u64, duration: Duration, summary: String, ok: bool) {
@@ -594,7 +660,9 @@ impl App {
     }
 
     pub fn on_system_note(&mut self, body: String) {
+        let lines = body.lines().count() as u16 + 1;
         self.transcript.push(TranscriptItem::System { body });
+        self.note_arrival(lines);
     }
 
     pub fn on_approval_requested(
@@ -627,6 +695,87 @@ impl App {
         if let Some(a) = self.approval.as_mut() {
             a.scroll = a.scroll.saturating_add(5);
         }
+    }
+
+    // ---------- transcript scroll ----------
+
+    /// Called by `ui::draw` once per frame with the just-computed
+    /// max-valid-offset and viewport height. Lets PgUp / PgDn
+    /// step by a sensible amount and keeps `scroll_manual`
+    /// clamped after a resize.
+    pub fn note_scroll_metrics(&mut self, max: u16, viewport_height: u16) {
+        self.scroll_max = max;
+        self.scroll_viewport_height = viewport_height;
+        if let Some(off) = self.scroll_manual.as_mut() {
+            if *off > max {
+                *off = max;
+            }
+        }
+    }
+
+    /// True when scrolling is detached from the bottom — i.e. the
+    /// user has paged up and isn't seeing new content arrive.
+    /// Drives the `↓ N new` indicator.
+    pub fn is_scroll_detached(&self) -> bool {
+        self.scroll_manual.is_some()
+    }
+
+    /// Account for newly-arrived content while detached. Called
+    /// from the streaming/tool/system event handlers below.
+    fn note_arrival(&mut self, lines_added: u16) {
+        if self.scroll_manual.is_some() {
+            self.unread_lines = self.unread_lines.saturating_add(lines_added);
+        }
+    }
+
+    pub fn scroll_page_up(&mut self) {
+        let step = self.scroll_viewport_height.saturating_sub(2).max(1);
+        let current = self.scroll_manual.unwrap_or(self.scroll_max);
+        let next = current.saturating_sub(step);
+        self.scroll_manual = Some(next);
+    }
+
+    pub fn scroll_page_down(&mut self) {
+        let step = self.scroll_viewport_height.saturating_sub(2).max(1);
+        let current = self.scroll_manual.unwrap_or(self.scroll_max);
+        let next = current.saturating_add(step);
+        if next >= self.scroll_max {
+            // Reached / passed the bottom — reattach so future
+            // chunks auto-scroll.
+            self.scroll_manual = None;
+            self.unread_lines = 0;
+        } else {
+            self.scroll_manual = Some(next);
+        }
+    }
+
+    /// Mouse wheel ticks scroll a few lines at a time — the
+    /// terminal-native scroll feel.
+    pub fn scroll_wheel_up(&mut self, lines: u16) {
+        let current = self.scroll_manual.unwrap_or(self.scroll_max);
+        self.scroll_manual = Some(current.saturating_sub(lines));
+    }
+
+    pub fn scroll_wheel_down(&mut self, lines: u16) {
+        let current = self.scroll_manual.unwrap_or(self.scroll_max);
+        let next = current.saturating_add(lines);
+        if next >= self.scroll_max {
+            self.scroll_manual = None;
+            self.unread_lines = 0;
+        } else {
+            self.scroll_manual = Some(next);
+        }
+    }
+
+    /// Jump to the very top of the transcript.
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_manual = Some(0);
+    }
+
+    /// Jump to the bottom and reattach.
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_manual = None;
+        self.unread_lines = 0;
     }
 
     pub fn take_cancel_sender(&mut self) -> Option<oneshot::Sender<()>> {
@@ -921,5 +1070,88 @@ mod tests {
         type_str(&mut app, "hi");
         let action = app.on_key(key(KeyCode::Enter));
         assert!(matches!(action, SubmitAction::None));
+    }
+
+    // ---------- transcript scroll ----------
+
+    #[test]
+    fn page_up_detaches_from_bottom_and_decrements_offset() {
+        let mut app = App::new();
+        // Pretend the viewport is 10 rows tall and there are 100
+        // logical lines — max valid offset = 90.
+        app.note_scroll_metrics(90, 10);
+        app.scroll_page_up();
+        // After PgUp from "stuck": detached, offset = 90 - (10-2) = 82.
+        assert_eq!(app.scroll_manual, Some(82));
+        assert!(app.is_scroll_detached());
+    }
+
+    #[test]
+    fn page_down_reattaches_when_reaching_bottom() {
+        let mut app = App::new();
+        app.note_scroll_metrics(20, 10);
+        // Detach at offset 5, then PgDn until we hit max — should
+        // re-attach (None) and zero unread.
+        app.scroll_manual = Some(5);
+        app.unread_lines = 7;
+        app.scroll_page_down(); // 5 + 8 = 13 (still detached)
+        assert_eq!(app.scroll_manual, Some(13));
+        app.scroll_page_down(); // 13 + 8 = 21 >= 20 → reattach
+        assert_eq!(app.scroll_manual, None);
+        assert_eq!(app.unread_lines, 0);
+    }
+
+    #[test]
+    fn ctrl_home_and_ctrl_end_navigate_to_top_and_bottom() {
+        let mut app = App::new();
+        app.note_scroll_metrics(40, 10);
+        let ctrl_home = KeyEvent::new(KeyCode::Home, KeyModifiers::CONTROL);
+        let ctrl_end = KeyEvent::new(KeyCode::End, KeyModifiers::CONTROL);
+        app.on_key(ctrl_home);
+        assert_eq!(app.scroll_manual, Some(0));
+        app.on_key(ctrl_end);
+        assert_eq!(app.scroll_manual, None);
+    }
+
+    #[test]
+    fn typing_g_or_uppercase_g_lands_in_buffer_not_scroll() {
+        // We deliberately don't bind bare `g`/`G` — they have to
+        // be available as the first letter of a prompt.
+        let mut app = App::new();
+        app.note_scroll_metrics(40, 10);
+        type_str(&mut app, "g");
+        assert_eq!(input_string(&app), "g");
+        assert_eq!(app.scroll_manual, None);
+    }
+
+    #[test]
+    fn unread_counter_grows_while_detached_and_resets_on_reattach() {
+        let mut app = App::new();
+        app.note_scroll_metrics(50, 10);
+        app.scroll_manual = Some(10);
+        // Simulate streaming arrival.
+        app.on_content_chunk("hello world\nsecond line");
+        assert!(app.unread_lines > 0);
+        app.scroll_to_bottom();
+        assert_eq!(app.unread_lines, 0);
+    }
+
+    #[test]
+    fn note_scroll_metrics_clamps_offset_when_max_shrinks() {
+        // A resize that reduces total lines should clamp the
+        // user's offset to the new max.
+        let mut app = App::new();
+        app.scroll_manual = Some(80);
+        app.note_scroll_metrics(50, 10);
+        assert_eq!(app.scroll_manual, Some(50));
+    }
+
+    #[test]
+    fn wheel_down_reattaches_at_bottom() {
+        let mut app = App::new();
+        app.note_scroll_metrics(30, 10);
+        app.scroll_manual = Some(28);
+        app.scroll_wheel_down(3);
+        assert_eq!(app.scroll_manual, None);
     }
 }

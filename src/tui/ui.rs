@@ -20,19 +20,14 @@ use crate::tui::app::{App, ApprovalState, Mode, ToolCardState, TranscriptItem};
 
 const TITLE: &str = "oli";
 
-pub fn draw(f: &mut Frame, app: &App) {
+pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
-    // Input box grows from 3 rows (1 line + borders) up to 10
-    // rows for an 8-line buffer. tui-textarea handles internal
-    // scroll past that. Caps so the transcript pane keeps a
-    // reasonable visible area on tall multi-line drafts.
     let input_lines = app.input.lines().len().max(1).min(8) as u16;
     let input_height = input_lines + 2; // borders
     let chunks = Layout::vertical([
-        Constraint::Length(1),                      // status bar
-        Constraint::Min(3),                         // transcript
-        Constraint::Length(input_height),           // input
-        Constraint::Length(if app.completion.is_some() { 1 } else { 0 }), // completion popup band
+        Constraint::Length(1),               // status bar
+        Constraint::Min(3),                  // transcript
+        Constraint::Length(input_height),    // input
     ])
     .split(area);
 
@@ -40,13 +35,9 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_transcript(f, chunks[1], app);
     draw_input(f, chunks[2], app);
 
-    // Completion popup is drawn ABOVE the input box (overlapping
-    // the bottom of the transcript) so it sits between what the
-    // user sees and where they're typing — fish/zsh-style.
     if app.completion.is_some() {
         draw_completion_popup(f, chunks[1], chunks[2], app);
     }
-
     if let Some(approval) = &app.approval {
         draw_approval_modal(f, area, approval);
     }
@@ -223,7 +214,23 @@ fn spinner_glyph(secs: f32) -> char {
     FRAMES[idx]
 }
 
-fn draw_transcript(f: &mut Frame, area: Rect, app: &App) {
+fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
+    // Pre-pass: count logical lines so we can update scroll
+    // metrics on `app` before we hold any borrow into
+    // `app.transcript`. The render builds Lines that may carry
+    // borrows back into the transcript items (tool card name /
+    // args preview), so we need to settle the &mut work first.
+    let total = transcript_line_count(&app.transcript) as u16;
+    let height = area.height;
+    let max = total.saturating_sub(height);
+    app.note_scroll_metrics(max, height);
+    let offset = match app.scroll_manual {
+        None => max,
+        Some(o) => o.min(max),
+    };
+    let detached = app.is_scroll_detached();
+    let unread = app.unread_lines;
+
     let mut lines: Vec<Line> = Vec::new();
     for (i, item) in app.transcript.iter().enumerate() {
         let is_active = app.active_assistant == Some(i);
@@ -311,8 +318,33 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &App) {
 
     let para = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
-        .scroll((scroll_offset(area, app), 0));
+        .scroll((offset, 0));
     f.render_widget(para, area);
+
+    // Floating "↓ N new" indicator on the bottom-right of the
+    // transcript pane while scrolled away from the bottom and
+    // new content has arrived.
+    if detached && unread > 0 && area.height >= 1 {
+        let label = format!(" ↓ {} new — End to catch up ", unread);
+        let label_w = label.chars().count() as u16;
+        if label_w + 2 < area.width {
+            let badge_area = Rect {
+                x: area.x + area.width - label_w - 1,
+                y: area.y + area.height - 1,
+                width: label_w,
+                height: 1,
+            };
+            f.render_widget(Clear, badge_area);
+            let badge = Paragraph::new(Line::from(Span::styled(
+                label,
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            f.render_widget(badge, badge_area);
+        }
+    }
 }
 
 /// Header line of a tool card:
@@ -389,20 +421,22 @@ fn render_tool_card_detail<'a>(state: &'a ToolCardState) -> Option<Line<'a>> {
     }
 }
 
-/// Pin the last logical line to the bottom of the viewport. Crude
-/// in Phase F — counts logical lines without accounting for wrap;
-/// good enough until Phase L's proper line-aware scroll model.
-fn scroll_offset(area: Rect, app: &App) -> u16 {
+/// Count the logical lines a transcript item set produces, in the
+/// same shape `draw_transcript` uses to fill its `Vec<Line>`.
+/// Slight under-count when a body wraps because of narrow
+/// terminals, but close enough for scroll math; the user gets a
+/// PgDn-of-1 mismatch rather than wrong content.
+fn transcript_line_count(items: &[TranscriptItem]) -> usize {
     let mut total: usize = 0;
-    for item in &app.transcript {
+    for item in items {
         match item {
             TranscriptItem::UserPrompt { body } => {
-                total += 1; // header
+                total += 1; // ▌ you header
                 total += body.lines().count().max(1);
                 total += 1; // blank
             }
             TranscriptItem::Assistant { body, .. } => {
-                total += 1; // header
+                total += 1; // ▌ oli header
                 total += body.lines().count().max(1);
                 total += 1; // blank
             }
@@ -419,12 +453,7 @@ fn scroll_offset(area: Rect, app: &App) -> u16 {
             }
         }
     }
-    let height = area.height as usize;
-    if total > height {
-        (total - height) as u16
-    } else {
-        0
-    }
+    total
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {

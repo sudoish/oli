@@ -35,7 +35,10 @@ pub use app::App;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent,
+    MouseEventKind,
+};
 use futures::StreamExt;
 use tokio::sync::{mpsc, oneshot};
 
@@ -97,6 +100,11 @@ pub async fn run(
                         break;
                     }
                 }
+                CtEvent::Mouse(m) => {
+                    if input_tx.send(UiEvent::Mouse(m)).is_err() {
+                        break;
+                    }
+                }
                 _ => {}
             }
         }
@@ -121,7 +129,10 @@ pub async fn run(
     app.set_history(history::load());
     app.set_slash_names(initial_slash_names);
 
-    guard.terminal_mut().draw(|f| ui::draw(f, &app)).map_err(io_err)?;
+    guard
+            .terminal_mut()
+            .draw(|f| ui::draw(f, &mut app))
+            .map_err(io_err)?;
 
     let frame_budget = Duration::from_millis(16); // ~60fps ceiling
     loop {
@@ -139,7 +150,10 @@ pub async fn run(
         if app.should_quit {
             break;
         }
-        guard.terminal_mut().draw(|f| ui::draw(f, &app)).map_err(io_err)?;
+        guard
+            .terminal_mut()
+            .draw(|f| ui::draw(f, &mut app))
+            .map_err(io_err)?;
     }
 
     input_handle.abort();
@@ -157,6 +171,7 @@ fn handle_event(
     match ev {
         UiEvent::Key(key) => on_key(app, key, cmd_tx, pending_approval),
         UiEvent::Resize => {}
+        UiEvent::Mouse(m) => on_mouse(app, m),
         UiEvent::TurnStarted => app.on_turn_started(),
         UiEvent::ContentChunk(s) => app.on_content_chunk(&s),
         UiEvent::TurnFinished { final_content } => app.on_turn_finished(&final_content),
@@ -256,6 +271,14 @@ fn on_key(
             });
         }
         SubmitAction::Slash(line) => {
+            // `/copy N` is TUI-local: the transcript lives in
+            // App, not in the driver, so we handle it here
+            // before forwarding to the slash registry.
+            if let Some(rest) = line.strip_prefix("copy") {
+                let arg = rest.trim();
+                handle_copy_slash(app, arg);
+                return;
+            }
             let (cancel_tx, cancel_rx) = oneshot::channel();
             app.set_cancel_sender(cancel_tx);
             let _ = cmd_tx.send(AgentCommand::Slash {
@@ -290,6 +313,142 @@ fn collect_slash_names(plugin_slashes: &[Box<dyn SlashCommand>]) -> Vec<String> 
     names.sort();
     names.dedup();
     names
+}
+
+/// `/copy [N]` — copy the N-th-most-recent assistant message to
+/// the system clipboard via OSC52. `N` defaults to 1 (the most
+/// recent). OSC52 lands in iTerm2, kitty, WezTerm, Alacritty
+/// (with `clipboard.osc52: true`), and tmux (with
+/// `set-clipboard on`). Terminals that don't support it silently
+/// drop the escape; we surface a hint either way.
+fn handle_copy_slash(app: &mut App, arg: &str) {
+    let n: usize = if arg.is_empty() {
+        1
+    } else {
+        match arg.parse() {
+            Ok(n) if n >= 1 => n,
+            _ => {
+                app.on_system_note(
+                    "usage: /copy [N]   (copy N-th-most-recent assistant message; default N=1)"
+                        .into(),
+                );
+                return;
+            }
+        }
+    };
+
+    let target_body = app
+        .transcript
+        .iter()
+        .rev()
+        .filter_map(|item| match item {
+            crate::tui::app::TranscriptItem::Assistant { body, .. } if !body.is_empty() => {
+                Some(body.clone())
+            }
+            _ => None,
+        })
+        .nth(n - 1);
+
+    let Some(body) = target_body else {
+        app.on_system_note(format!(
+            "no assistant message at position {} (history has fewer entries)",
+            n
+        ));
+        return;
+    };
+
+    write_osc52_clipboard(&body);
+    app.on_system_note(format!(
+        "copied {} bytes to clipboard via OSC52 (terminal must support it; tmux needs `set -g set-clipboard on`)",
+        body.len()
+    ));
+}
+
+/// Write `payload` to the user's clipboard via the OSC52 escape
+/// sequence. Format: `ESC ] 5 2 ; c ; <base64-of-payload> BEL`.
+/// We hand-roll base64 to avoid an extra dep — it's a few lines.
+fn write_osc52_clipboard(payload: &str) {
+    let encoded = base64_encode(payload.as_bytes());
+    let escape = format!("\x1b]52;c;{}\x07", encoded);
+    use std::io::Write;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(escape.as_bytes());
+    let _ = out.flush();
+}
+
+/// Standard base64 encoding (alphabet `A-Za-z0-9+/`, `=` padding)
+/// of the input bytes. Hand-rolled to avoid pulling in `base64`
+/// for a 30-line function.
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut chunks = bytes.chunks_exact(3);
+    for ch in chunks.by_ref() {
+        let n = ((ch[0] as u32) << 16) | ((ch[1] as u32) << 8) | ch[2] as u32;
+        out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+        out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+        out.push(ALPHABET[(n & 0x3f) as usize] as char);
+    }
+    let rem = chunks.remainder();
+    match rem.len() {
+        1 => {
+            let n = (rem[0] as u32) << 16;
+            out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+            out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let n = ((rem[0] as u32) << 16) | ((rem[1] as u32) << 8);
+            out.push(ALPHABET[((n >> 18) & 0x3f) as usize] as char);
+            out.push(ALPHABET[((n >> 12) & 0x3f) as usize] as char);
+            out.push(ALPHABET[((n >> 6) & 0x3f) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn base64_encode_handles_full_blocks() {
+        assert_eq!(base64_encode(b"Man"), "TWFu");
+        assert_eq!(base64_encode(b"Many hands make light work."), "TWFueSBoYW5kcyBtYWtlIGxpZ2h0IHdvcmsu");
+    }
+
+    #[test]
+    fn base64_encode_handles_padding() {
+        // 1-byte tail.
+        assert_eq!(base64_encode(b"M"), "TQ==");
+        // 2-byte tail.
+        assert_eq!(base64_encode(b"Ma"), "TWE=");
+        // empty.
+        assert_eq!(base64_encode(b""), "");
+    }
+
+    #[test]
+    fn base64_encode_handles_unicode_bytes() {
+        // Emoji is 4 UTF-8 bytes (one block + one byte tail).
+        assert_eq!(base64_encode("✓".as_bytes()), "4pyT");
+    }
+}
+
+fn on_mouse(app: &mut App, m: MouseEvent) {
+    // Wheel ticks scroll the transcript ~3 lines per notch.
+    // Other mouse events (clicks, drag, motion) are intentionally
+    // dropped — we don't have a reason to act on them yet, and
+    // the alt-screen mode swallows native terminal selection
+    // anyway.
+    match m.kind {
+        MouseEventKind::ScrollUp => app.scroll_wheel_up(3),
+        MouseEventKind::ScrollDown => app.scroll_wheel_down(3),
+        _ => {}
+    }
 }
 
 fn handle_approval_key(

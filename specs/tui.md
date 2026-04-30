@@ -487,10 +487,10 @@ line-oriented plan; this doc supersedes it.
 | K3 | `@path` file autocomplete                         | DONE   |
 | K4 | Up/Down + Ctrl-R history                          | PART   |
 | K5 | Persistent history file                           | DONE   |
-| L1 | Scrollable transcript (Pg/wheel)                  | TODO   |
-| L2 | Stick-to-bottom + "↓ N new" hint                  | TODO   |
-| L3 | g/G + Home/End shortcuts                          | TODO   |
-| L4 | `/copy N` via OSC52                               | TODO   |
+| L1 | Scrollable transcript (Pg/wheel)                  | DONE   |
+| L2 | Stick-to-bottom + "↓ N new" hint                  | DONE   |
+| L3 | Ctrl+Home / Ctrl+End shortcuts (g/G dropped)      | DONE   |
+| L4 | `/copy N` via OSC52                               | DONE   |
 | M1 | Always-on status line                             | TODO   |
 | M2 | Token-gauge color thresholds                      | TODO   |
 | M3 | Mode indicator (spinner / arrow / pause / dot)    | TODO   |
