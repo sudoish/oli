@@ -345,7 +345,7 @@ boundary.
 | S1 | Persisted approval allow-list                     | DONE   |
 | S2 | Subagent inherits parent's ToolContext            | DONE   |
 | S3 | Tool-result `ShowFull`                            | DONE   |
-| T1 | `oli init` headless CLI                           | TODO   |
+| T1 | `oli init` headless CLI                           | DONE   |
 | T2 | `/config reload`                                  | TODO   |
 | T3 | Syntect (and TUI) feature flags                   | TODO   |
 | T4 | TUI cheatsheet doc                                | TODO   |

@@ -48,6 +48,7 @@ pub mod providers;
 pub mod repl;
 pub mod tools;
 pub mod tui;
+pub mod wizard_init;
 
 // ----- Public re-exports (the most-used types for embedders) -----
 

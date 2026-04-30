@@ -4,7 +4,7 @@
 //! library at `oli::*` for everything substantive — this file
 //! is intentionally a wiring shim, not where logic lives.
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::process;
 use std::sync::Arc;
 
@@ -57,15 +57,147 @@ struct Args {
     /// terminal-native scrollback / mouse selection matter.
     #[arg(long)]
     plain: bool,
+
+    #[command(subcommand)]
+    cmd: Option<Cmd>,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Write a starter `~/.config/oli/config.toml`. Mirrors the
+    /// TUI's first-run wizard but works headlessly — useful in
+    /// Dockerfiles, CI, or any setup where you can't pop a TUI.
+    Init {
+        /// Provider template: ollama (local), openrouter, or
+        /// anthropic. Without this flag, prompts on stdin.
+        #[arg(long)]
+        provider: Option<String>,
+
+        /// API key for paid providers. Without this flag and on
+        /// a paid provider, prompts on stdin (echoing input —
+        /// pipe in or use --provider ollama if that matters).
+        #[arg(long)]
+        api_key: Option<String>,
+
+        /// Overwrite an existing config file instead of refusing.
+        #[arg(long)]
+        force: bool,
+    },
 }
 
 #[tokio::main]
 async fn main() {
     let args = Args::parse();
-    if let Err(e) = run(args).await {
+    let result = match args.cmd {
+        Some(Cmd::Init {
+            provider,
+            api_key,
+            force,
+        }) => init_command(provider, api_key, force),
+        None => run(args).await,
+    };
+    if let Err(e) = result {
         eprintln!("{}", e);
         process::exit(1);
     }
+}
+
+/// Headless `oli init`. Writes the same config the TUI wizard
+/// produces, falling back to stdin prompts for fields not given
+/// on the CLI. Refuses to clobber an existing file unless
+/// `--force` is set.
+fn init_command(provider: Option<String>, api_key: Option<String>, force: bool) -> Result<()> {
+    use oli::wizard_init::{WizardProvider, config_path, render_toml, save};
+    use std::io::Write;
+
+    let path = config_path().ok_or_else(|| {
+        oli::error::AgentError::Config(
+            "could not resolve config path (no $HOME or $XDG_CONFIG_HOME)".into(),
+        )
+    })?;
+
+    // Resolve provider — flag if given, prompt otherwise.
+    let provider = match provider.as_deref() {
+        Some(name) => WizardProvider::from_name(name).ok_or_else(|| {
+            oli::error::AgentError::Config(format!(
+                "unknown --provider `{}` (try ollama, openrouter, anthropic)",
+                name
+            ))
+        })?,
+        None => prompt_provider()?,
+    };
+
+    // Resolve API key — flag if given, prompt for paid providers.
+    let api_key = if provider.needs_api_key() {
+        match api_key {
+            Some(k) if !k.trim().is_empty() => k,
+            _ => prompt_api_key(provider)?,
+        }
+    } else {
+        String::new()
+    };
+
+    let body = render_toml(provider, &api_key);
+    save(&path, &body, force).map_err(oli::error::AgentError::Config)?;
+
+    let mut stdout = std::io::stdout();
+    let _ = writeln!(stdout, "wrote {}", path.display());
+    let _ = writeln!(stdout, "  provider:      {}", provider.label());
+    let _ = writeln!(stdout, "  default_model: {}", provider.default_model());
+    if !provider.needs_api_key() {
+        let _ = writeln!(stdout, "  (Ollama: api_key field is a placeholder)");
+    }
+    let _ = writeln!(stdout, "Run `oli` to start.");
+    Ok(())
+}
+
+fn prompt_provider() -> Result<oli::wizard_init::WizardProvider> {
+    use oli::wizard_init::WizardProvider;
+    use std::io::{BufRead, Write};
+
+    let mut stdout = std::io::stdout();
+    let _ = writeln!(stdout, "Pick a provider:");
+    for (i, p) in WizardProvider::all().iter().enumerate() {
+        let _ = writeln!(stdout, "  [{}] {}", i + 1, p.label());
+    }
+    let _ = write!(stdout, "Choice [1-3]: ");
+    let _ = stdout.flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| oli::error::AgentError::Config(format!("stdin read failed: {}", e)))?;
+    let idx: usize = line.trim().parse().map_err(|_| {
+        oli::error::AgentError::Config(format!("`{}` is not 1-3", line.trim()))
+    })?;
+    WizardProvider::all()
+        .get(idx.wrapping_sub(1))
+        .copied()
+        .ok_or_else(|| {
+            oli::error::AgentError::Config(format!(
+                "choice {} out of range (1-3)",
+                idx
+            ))
+        })
+}
+
+fn prompt_api_key(provider: oli::wizard_init::WizardProvider) -> Result<String> {
+    use std::io::{BufRead, Write};
+    let mut stdout = std::io::stdout();
+    let _ = write!(stdout, "API key for {}: ", provider.label());
+    let _ = stdout.flush();
+    let mut line = String::new();
+    std::io::stdin()
+        .lock()
+        .read_line(&mut line)
+        .map_err(|e| oli::error::AgentError::Config(format!("stdin read failed: {}", e)))?;
+    let key = line.trim().to_string();
+    if key.is_empty() {
+        return Err(oli::error::AgentError::Config(
+            "api key is required for paid providers".into(),
+        ));
+    }
+    Ok(key)
 }
 
 async fn run(args: Args) -> Result<()> {

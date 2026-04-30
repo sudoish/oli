@@ -8,8 +8,14 @@
 //! restart. That's the price of a config-driven harness — the
 //! alternative would be a much bigger refactor to swap the
 //! provider mid-session.
+//!
+//! Provider templates, TOML rendering, and the file-system
+//! save path live in `crate::wizard_init` so the headless
+//! `oli init` subcommand produces byte-identical output.
 
 use std::path::PathBuf;
+
+pub use crate::wizard_init::{WizardProvider, config_path};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WizardStep {
@@ -18,66 +24,6 @@ pub enum WizardStep {
     EnterApiKey,
     Confirm,
     Saved { path: PathBuf },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum WizardProvider {
-    Ollama,
-    OpenRouter,
-    Anthropic,
-}
-
-impl WizardProvider {
-    pub fn label(self) -> &'static str {
-        match self {
-            WizardProvider::Ollama => "Ollama (local — no API key required)",
-            WizardProvider::OpenRouter => "OpenRouter (Claude / GPT / etc — paid)",
-            WizardProvider::Anthropic => "Anthropic (native Claude API — paid)",
-        }
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            WizardProvider::Ollama => "ollama",
-            WizardProvider::OpenRouter => "openrouter",
-            WizardProvider::Anthropic => "anthropic",
-        }
-    }
-
-    pub fn needs_api_key(self) -> bool {
-        !matches!(self, WizardProvider::Ollama)
-    }
-
-    pub fn default_model(self) -> &'static str {
-        match self {
-            WizardProvider::Ollama => "qwen2.5-coder:7b",
-            WizardProvider::OpenRouter => "anthropic/claude-haiku-4.5",
-            WizardProvider::Anthropic => "claude-haiku-4-5",
-        }
-    }
-
-    pub fn base_url(self) -> &'static str {
-        match self {
-            WizardProvider::Ollama => "http://localhost:11434/v1",
-            WizardProvider::OpenRouter => "https://openrouter.ai/api/v1",
-            WizardProvider::Anthropic => "https://api.anthropic.com",
-        }
-    }
-
-    pub fn config_kind(self) -> &'static str {
-        match self {
-            WizardProvider::Ollama | WizardProvider::OpenRouter => "openai-compat",
-            WizardProvider::Anthropic => "anthropic",
-        }
-    }
-
-    pub fn all() -> [WizardProvider; 3] {
-        [
-            WizardProvider::Ollama,
-            WizardProvider::OpenRouter,
-            WizardProvider::Anthropic,
-        ]
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -149,57 +95,19 @@ impl WizardState {
     }
 
     /// Render a TOML config string for the current selections.
-    /// The format mirrors `specs/README.md`'s minimal example so
-    /// users can compare against the spec and edit by hand later.
+    /// Delegates to `wizard_init::render_toml` so the TUI and
+    /// the headless `oli init` produce byte-identical output.
     pub fn render_toml(&self) -> String {
-        let p = self.current_provider();
-        let mut out = String::new();
-        out.push_str(&format!("default_provider = \"{}\"\n\n", p.name()));
-        out.push_str(&format!("[providers.{}]\n", p.name()));
-        out.push_str(&format!("kind          = \"{}\"\n", p.config_kind()));
-        out.push_str(&format!("base_url      = \"{}\"\n", p.base_url()));
-        let key = if p.needs_api_key() {
-            self.api_key.as_str()
-        } else {
-            // Ollama ignores the value but our schema currently
-            // requires *something*. Use a recognizable
-            // placeholder.
-            "ollama"
-        };
-        out.push_str(&format!("api_key       = \"{}\"\n", key));
-        out.push_str(&format!("default_model = \"{}\"\n", p.default_model()));
-        out
+        crate::wizard_init::render_toml(self.current_provider(), &self.api_key)
     }
 }
 
-/// Where the config gets saved. Same path the rest of the
-/// harness reads from.
-pub fn config_path() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
-    Some(base.join("oli").join("config.toml"))
-}
-
-/// Write the rendered TOML to `path` (creating parent dirs).
-/// Returns the actual path on success so the caller can show it
-/// in the SystemNote. If the file already exists we *don't*
-/// clobber — refuse and surface a hint. Wizards triggered on
-/// "no config detected" startup won't hit this; the safety net
-/// matters if the user keeps re-opening the wizard.
+/// Wizard-flavored save: refuses to clobber an existing file
+/// (the wizard never gets here on the "no config detected"
+/// startup path; the safety net matters if the user keeps
+/// re-opening the wizard).
 pub fn save(path: &std::path::Path, body: &str) -> Result<(), String> {
-    if path.exists() {
-        return Err(format!(
-            "{} already exists; not overwriting. Edit it by hand instead.",
-            path.display()
-        ));
-    }
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("create {}: {}", parent.display(), e))?;
-    }
-    std::fs::write(path, body).map_err(|e| format!("write {}: {}", path.display(), e))?;
-    Ok(())
+    crate::wizard_init::save(path, body, false)
 }
 
 #[cfg(test)]
