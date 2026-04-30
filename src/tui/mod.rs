@@ -219,6 +219,33 @@ fn handle_event(
             reason,
         } => app.on_approval_requested(id, tool, args, reason),
         UiEvent::UsageUpdate { last, session } => app.update_usage(last, session),
+        UiEvent::UndoApplied {
+            prompt_body,
+            load_into_input,
+        } => {
+            // Trim the transcript in lock-step with the agent's
+            // memory truncation.
+            let trimmed = app.undo_last_user_turn();
+            // Prefer the body the agent reports — it's the
+            // authoritative source. Fall back to the
+            // transcript-side trimmed body if the driver had
+            // nothing (e.g. memory was already empty but we
+            // still had a stray UserPrompt item — shouldn't
+            // happen in practice).
+            let body = prompt_body.or(trimmed);
+            match body {
+                Some(b) if load_into_input => {
+                    app.set_input_text_pub(&b);
+                    app.on_system_note(format!("(undid `{}` — re-edit and submit)", b));
+                }
+                Some(b) => {
+                    app.on_system_note(format!("(undid `{}`)", b));
+                }
+                None => {
+                    app.on_system_note("(nothing to undo)".into());
+                }
+            }
+        }
     }
 }
 
@@ -272,6 +299,19 @@ fn on_key(
             // Shutdown after the loop exits.
             if !app.is_busy() {
                 app.request_quit();
+            }
+            return;
+        }
+        KeyCode::Char('e') if ctrl => {
+            // Ctrl+E: edit-and-rerun. Undo the last user turn
+            // and pre-fill the input with its body. Reject
+            // mid-stream — undoing while the agent is still
+            // mid-flight would leave memory and transcript
+            // out of sync.
+            if !app.is_busy() {
+                let _ = cmd_tx.send(AgentCommand::Undo {
+                    load_into_input: true,
+                });
             }
             return;
         }
@@ -345,6 +385,12 @@ fn on_key(
             if trimmed == "sessions" {
                 let entries = collect_session_picker_rows();
                 app.open_sessions_picker(entries);
+                return;
+            }
+            if trimmed == "undo" {
+                let _ = cmd_tx.send(AgentCommand::Undo {
+                    load_into_input: false,
+                });
                 return;
             }
             let (cancel_tx, cancel_rx) = oneshot::channel();

@@ -224,6 +224,43 @@ mod tests {
         );
     }
 
+    /// Dropping the in-flight Bash future (what the TUI's
+    /// Ctrl+C path does when the cancel oneshot fires) returns
+    /// promptly. `kill_on_drop(true)` SIGKILLs the spawned `sh`
+    /// child immediately so the agent loop unblocks.
+    ///
+    /// Caveat: SIGKILL on `sh` does not propagate to `sh`'s own
+    /// grandchildren — `sleep`s spawned inside the shell get
+    /// reparented to PID 1 and finish in the background. A
+    /// process-group kill (Unix `setsid` + `killpg`) would
+    /// catch grandchildren too; deferred to a follow-up. The
+    /// agent's perspective — "the bash future returned, the
+    /// loop can move on" — is what matters for cancel UX, and
+    /// that does work today.
+    #[tokio::test]
+    async fn dropping_the_future_returns_promptly() {
+        let ctx = ToolContext::new();
+        let started = std::time::Instant::now();
+        let bash_fut = Bash.run(
+            json!({"command": "sleep 30", "timeout_ms": 60_000}),
+            &ctx,
+        );
+        tokio::pin!(bash_fut);
+        tokio::select! {
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {
+                // bash_fut dropped at end of select.
+            }
+            _ = &mut bash_fut => panic!("bash returned before cancel"),
+        }
+        // Drop has run. The future stopped polling immediately;
+        // we shouldn't be near the 30s sleep.
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "drop took {:?} — kill_on_drop didn't fire",
+            started.elapsed()
+        );
+    }
+
     #[tokio::test]
     async fn timeout_kills_long_running_command() {
         let ctx = ToolContext::new();

@@ -867,6 +867,33 @@ impl App {
         self.note_arrival(lines);
     }
 
+    /// Drop the most recent UserPrompt and every transcript item
+    /// that came after it. Returns the body of the popped prompt
+    /// for the caller (e.g. so Ctrl+E edit-and-rerun can re-load
+    /// it into the input box). Active-assistant / active-tool
+    /// indices are reset since the items they pointed at may be
+    /// gone.
+    pub fn undo_last_user_turn(&mut self) -> Option<String> {
+        let last_user_idx = self.transcript.iter().rposition(
+            |i| matches!(i, TranscriptItem::UserPrompt { .. }),
+        )?;
+        let body = match &self.transcript[last_user_idx] {
+            TranscriptItem::UserPrompt { body } => body.clone(),
+            _ => unreachable!(),
+        };
+        self.transcript.truncate(last_user_idx);
+        self.active_assistant = None;
+        self.active_tools.clear();
+        Some(body)
+    }
+
+    /// Replace the input buffer's content. Used by Ctrl+E so the
+    /// user can re-edit a previous prompt after `/undo` removes
+    /// it.
+    pub fn set_input_text_pub(&mut self, text: &str) {
+        self.set_input_text(text);
+    }
+
     pub fn on_approval_requested(
         &mut self,
         id: u64,
@@ -1410,6 +1437,58 @@ mod tests {
         app.open_inline_help("frobnicate");
         let card = app.inline_help.as_ref().unwrap();
         assert!(card.description.contains("no help registered"));
+    }
+
+    #[test]
+    fn undo_pops_the_last_user_prompt_and_returns_its_body() {
+        let mut app = App::new();
+        // Simulate a turn: user prompt + assistant response +
+        // tool card. Undo should drop them all.
+        app.transcript
+            .push(TranscriptItem::UserPrompt { body: "first prompt".into() });
+        app.transcript.push(TranscriptItem::Assistant {
+            body: "first response".into(),
+            done: true,
+        });
+        app.on_turn_started();
+        app.on_content_chunk("...");
+        // Simulate a tool round mid-turn.
+        app.on_tool_start(1, "Read".into(), "x".into());
+        app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true);
+        app.on_content_chunk("more");
+        app.on_turn_finished("");
+
+        // Now run undo: removes the most recent UserPrompt and
+        // every transcript item after it.
+        let popped = app.undo_last_user_turn();
+        // Hmm — `on_turn_started` doesn't push a UserPrompt; only
+        // submit() does. We pushed one manually for the first
+        // turn though, so undo finds it.
+        assert_eq!(popped.as_deref(), Some("first prompt"));
+        // Every transcript item after the user prompt is gone.
+        let any_assistant = app
+            .transcript
+            .iter()
+            .any(|i| matches!(i, TranscriptItem::Assistant { .. }));
+        assert!(!any_assistant, "transcript should be trimmed");
+        assert!(app.active_assistant.is_none());
+        assert!(app.active_tools.is_empty());
+    }
+
+    #[test]
+    fn undo_returns_none_when_no_user_prompt_in_transcript() {
+        let mut app = App::new();
+        // Default new-app transcript is just a System welcome
+        // note.
+        assert!(app.undo_last_user_turn().is_none());
+    }
+
+    #[test]
+    fn set_input_text_pub_replaces_buffer_for_edit_and_rerun() {
+        let mut app = App::new();
+        type_str(&mut app, "draft");
+        app.set_input_text_pub("re-edit me");
+        assert_eq!(input_string(&app), "re-edit me");
     }
 
     #[test]

@@ -213,6 +213,61 @@ impl Agent {
         &self.ctx
     }
 
+    /// Roll back the most recent user turn — drop the user
+    /// message and everything that came after it (assistant
+    /// reply, tool round-trips). Returns the body of the popped
+    /// user prompt so the caller can show it / re-load it for
+    /// editing, or `None` if there was nothing to undo.
+    ///
+    /// Pinned content (the system prompt) and the rolling
+    /// summary are preserved.
+    pub async fn undo_last_user_turn(&mut self) -> Option<String> {
+        let snap = self.memory.snapshot().await;
+        let pinned = self.memory.pinned().await;
+        let pin_count = pinned.len();
+        // Find the index of the last user message in the
+        // snapshot. The snapshot includes pinned + (optional
+        // summary) + live records; we need to translate the
+        // snapshot index back to a logical record position.
+        let last_user_snap = snap
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, m)| m.get("role").and_then(|v| v.as_str()) == Some("user"))
+            .map(|(i, _)| i);
+        let snap_idx = last_user_snap?;
+        // Skip if the match is in the pinned prefix.
+        if snap_idx < pin_count {
+            return None;
+        }
+        let body = snap
+            .get(snap_idx)
+            .and_then(|m| m.get("content"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        // Number of pre-user records (relative to pinned + summary):
+        // snap_idx - pin_count, then subtract any leading summary
+        // entry (LinearWithCompact emits one between pinned and
+        // live). We don't have a direct "is_summary" check, so
+        // approximate: the summary is a system-role message
+        // emitted by `LinearWithCompact::maybe_compact`. If the
+        // first non-pinned snap entry has role==system AND we
+        // *might* have run compact, treat it as a summary slot.
+        let mut record_idx = snap_idx - pin_count;
+        if let Some(first_post_pin) = snap.get(pin_count) {
+            if first_post_pin.get("role").and_then(|v| v.as_str()) == Some("system")
+                && record_idx > 0
+            {
+                record_idx -= 1;
+            }
+        }
+        // Truncate before the user message — i.e. drop the user
+        // message itself and everything after it.
+        self.memory.truncate(record_idx).await;
+        Some(body)
+    }
+
     /// Force a compaction pass regardless of current token usage. Drives
     /// the `/compact` slash command. Returns whatever `maybe_compact`
     /// returns — strategies that decide there's nothing to compact (too
@@ -1060,6 +1115,56 @@ mod tests {
         agent.clear().await;
         assert_eq!(agent.session_usage.total_tokens, 0);
         assert_eq!(agent.last_usage, None);
+    }
+
+    #[tokio::test]
+    async fn undo_last_user_turn_drops_user_and_assistant_pair() {
+        let provider = FakeProvider::new(vec![assistant_text("done")]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
+            .pin_system_prompt("sys")
+            .await;
+        agent.run("hello").await.unwrap();
+        // Snapshot before undo: [system, user, assistant].
+        let pre = agent.memory.snapshot().await;
+        assert_eq!(pre.len(), 3);
+
+        let body = agent.undo_last_user_turn().await;
+        assert_eq!(body.as_deref(), Some("hello"));
+        let post = agent.memory.snapshot().await;
+        // Only the pinned system prompt remains; user + assistant gone.
+        assert_eq!(post.len(), 1);
+        assert_eq!(post[0]["role"], "system");
+    }
+
+    #[tokio::test]
+    async fn undo_last_user_turn_returns_none_when_no_user_message() {
+        let provider = FakeProvider::new(vec![assistant_text("done")]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
+            .pin_system_prompt("sys")
+            .await;
+        // No `run` yet — pinned-only memory.
+        assert!(agent.undo_last_user_turn().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn undo_last_user_turn_walks_back_only_one_pair() {
+        // Two user→assistant round trips. Undo should leave the
+        // earlier one intact.
+        let provider = FakeProvider::new(vec![assistant_text("a1"), assistant_text("a2")]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
+            .pin_system_prompt("sys")
+            .await;
+        agent.run("first").await.unwrap();
+        agent.run("second").await.unwrap();
+        let pre = agent.memory.snapshot().await;
+        assert_eq!(pre.len(), 5); // sys + u1 + a1 + u2 + a2
+
+        let popped = agent.undo_last_user_turn().await;
+        assert_eq!(popped.as_deref(), Some("second"));
+        let post = agent.memory.snapshot().await;
+        assert_eq!(post.len(), 3); // sys + u1 + a1
+        assert_eq!(post[1]["content"], "first");
+        assert_eq!(post[2]["content"], "a1");
     }
 
     #[tokio::test]

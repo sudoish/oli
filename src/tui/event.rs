@@ -44,6 +44,15 @@ pub enum UiEvent {
     /// `/exit` (or equivalent) routed through the driver. The UI
     /// quits cleanly.
     Quit,
+    /// Driver applied an `Undo` command. `prompt_body` is the
+    /// body of the user prompt that was popped (or `None` if
+    /// memory had nothing to undo). The TUI uses it to trim the
+    /// transcript in lock-step and — when triggered by Ctrl+E —
+    /// re-load it into the input box for editing.
+    UndoApplied {
+        prompt_body: Option<String>,
+        load_into_input: bool,
+    },
 
     // ----- Tool-card events (Phase H) -----
     /// Agent dispatched a tool. The render loop pushes a Running

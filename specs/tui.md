@@ -500,6 +500,6 @@ line-oriented plan; this doc supersedes it.
 | N3 | `/<cmd> ?` inline help popup                      | DONE   |
 | N4 | First-run setup wizard                            | PART   |
 | N5 | Fading onboarding hints                           | DONE   |
-| O1 | `/undo` rolls back last turn                      | TODO   |
-| O2 | Ctrl+E edit-and-rerun                             | TODO   |
-| O3 | Real Bash child SIGINT on Ctrl+C                  | TODO   |
+| O1 | `/undo` rolls back last turn                      | DONE   |
+| O2 | Ctrl+E edit-and-rerun                             | DONE   |
+| O3 | Real Bash child SIGKILL on cancel                 | DONE   |

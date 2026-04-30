@@ -43,6 +43,12 @@ pub enum AgentCommand {
         line: String,
         cancel: oneshot::Receiver<()>,
     },
+    /// Roll back the most recent user turn from the agent's
+    /// memory. Driver replies via `UiEvent::UndoApplied` so the
+    /// TUI can trim its transcript in lock-step. `load_into_input`
+    /// is `true` when the trigger was Ctrl+E (edit-and-rerun) so
+    /// the popped prompt is dropped back into the input box.
+    Undo { load_into_input: bool },
     /// Tear-down signal so the driver task exits cleanly.
     Shutdown,
 }
@@ -68,6 +74,13 @@ pub fn spawn(
                 }
                 AgentCommand::Slash { line, cancel } => {
                     handle_slash(&mut agent, &mut registry, line, cancel, &ui_tx).await;
+                }
+                AgentCommand::Undo { load_into_input } => {
+                    let popped = agent.undo_last_user_turn().await;
+                    let _ = ui_tx.send(UiEvent::UndoApplied {
+                        prompt_body: popped,
+                        load_into_input,
+                    });
                 }
             }
         }
