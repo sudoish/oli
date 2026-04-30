@@ -13,9 +13,17 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::error::{Result, ToolError};
+use crate::tools::util::truncate;
 use crate::tools::{Tool, ToolContext};
 
 const DEFAULT_MAX_TURNS: usize = 10;
+/// Default cap on bytes returned to the parent. Subagents that find
+/// 50 KB of relevant context are usually wrong — the parent only
+/// needs the *summary*, and dumping the raw transcript pollutes the
+/// parent's window. 8 KB is enough for a paragraph of prose plus a
+/// list of file paths; the model can always spawn another subagent
+/// for more.
+const DEFAULT_MAX_RESULT_BYTES: usize = 8 * 1024;
 
 /// Spawns a child agent loop and runs `prompt` to completion. The
 /// implementation builds a fresh agent each call, runs it bounded by
@@ -60,6 +68,10 @@ impl Tool for Task {
                 "max_turns": {
                     "type": "integer",
                     "description": "Optional cap on subagent turns (default 10). Increase only when the task genuinely needs more steps."
+                },
+                "max_result_bytes": {
+                    "type": "integer",
+                    "description": "Optional cap on the byte size of the subagent's returned summary (default 8192). Oversized results are truncated with a marker; the parent's context window is the constraint."
                 }
             },
             "required": ["prompt"]
@@ -78,7 +90,13 @@ impl Tool for Task {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_MAX_TURNS);
-        self.spawner.spawn(prompt, max_turns).await
+        let max_result_bytes = args
+            .get("max_result_bytes")
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .unwrap_or(DEFAULT_MAX_RESULT_BYTES);
+        let raw = self.spawner.spawn(prompt, max_turns).await?;
+        Ok(truncate(&raw, max_result_bytes))
     }
 }
 
@@ -154,6 +172,53 @@ mod tests {
         let ctx = ToolContext::new();
         let err = task.run(json!({}), &ctx).await.unwrap_err();
         assert!(err.to_string().contains("missing `prompt`"));
+    }
+
+    #[tokio::test]
+    async fn truncates_oversized_subagent_result_with_marker() {
+        // 50 KB summary; default cap is 8 KB. Result should be capped
+        // and the truncation marker visible.
+        let big = "x".repeat(50_000);
+        let spawner = Arc::new(StubSpawner {
+            seen: Mutex::new(Vec::new()),
+            answer: big,
+        });
+        let task = Task::new(spawner);
+        let ctx = ToolContext::new();
+        let out = task
+            .run(json!({"prompt": "go"}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            out.contains("[... output truncated"),
+            "expected truncation marker, got first 100 chars: {}",
+            &out.chars().take(100).collect::<String>()
+        );
+        assert!(
+            out.len() < 50_000,
+            "expected truncated output, got {} bytes",
+            out.len()
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_max_result_bytes_overrides_default_cap() {
+        let answer = "abcdef".repeat(2000); // ~12 KB
+        let spawner = Arc::new(StubSpawner {
+            seen: Mutex::new(Vec::new()),
+            answer: answer.clone(),
+        });
+        let task = Task::new(spawner);
+        let ctx = ToolContext::new();
+        // Cap above the answer length: nothing truncated.
+        let out = task
+            .run(
+                json!({"prompt": "go", "max_result_bytes": 20_000}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(out, answer);
     }
 
     #[tokio::test]

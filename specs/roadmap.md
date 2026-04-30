@@ -192,9 +192,9 @@ each phase boundary.
 | A3 | Persist Edit read-set across `--resume`           | DONE   |
 | A4 | REPL progress indicator during tool rounds        | DONE   |
 | B1 | Hook short-circuit + result mutation              | DONE   |
-| C1 | `/plugins reload`                                 | TODO   |
-| C2 | Session-level cost in `/cost`                     | TODO   |
-| C3 | Subagent result cap                               | TODO   |
+| C1 | `/plugins reload`                                 | DONE   |
+| C2 | Session-level cost in `/cost`                     | DONE   |
+| C3 | Subagent result cap                               | DONE   |
 | D1 | OpenRouter prompt-cache headers                   | TODO   |
 | D2 | Anthropic `list_models`                           | TODO   |
 | D3 | Unified-diff preview for Edit/Write               | TODO   |

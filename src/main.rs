@@ -120,6 +120,13 @@ async fn run(args: Args) -> Result<()> {
         &cfg,
         notes_store.clone(),
     )));
+    // Reloader keeps a handle on the same host args so `/plugins reload`
+    // can re-scan the plugin dirs at any time without re-plumbing
+    // startup wiring. Only useful in interactive mode.
+    let plugin_reloader = Arc::new(plugins::PluginReloader::new(
+        plugin_host_tools.clone(),
+        Some(spawner.clone()),
+    ));
     let plugins = plugins::load_all(plugin_host_tools, Some(spawner)).await;
     let plugin_manifest = plugins.manifest;
     for t in plugins.tools {
@@ -203,7 +210,7 @@ async fn run(args: Args) -> Result<()> {
                 .with_approver(Box::new(ReadlineApprover))
                 .pin_system_prompt(system_prompt)
                 .await;
-            repl::run(agent, plugin_slashes).await
+            repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
         }
     }
 }

@@ -20,13 +20,16 @@ const PROMPT: &str = "> ";
 /// Drive an interactive session against `agent` until the user exits.
 /// `plugin_slashes` is the bag of Lua-backed slash commands discovered
 /// at startup; the binary threads them in alongside the built-ins.
+/// `reloader`, when supplied, wires `/plugins reload` to a re-scan of
+/// the plugin directories.
 pub async fn run(
     mut agent: Agent,
     plugin_slashes: Vec<Box<dyn slash::SlashCommand>>,
+    reloader: Option<std::sync::Arc<crate::plugins::PluginReloader>>,
 ) -> Result<()> {
     let mut editor =
         DefaultEditor::new().map_err(|e| AgentError::Provider(format!("rustyline: {e}")))?;
-    let mut registry = SlashRegistry::default_set();
+    let mut registry = SlashRegistry::default_set_with_reloader(reloader);
     for s in plugin_slashes {
         registry.register_box(s);
     }
@@ -73,6 +76,19 @@ pub async fn run(
                 Some(SlashOutcome::Continue(Some(msg))) => println!("{msg}"),
                 Some(SlashOutcome::Continue(None)) => {}
                 Some(SlashOutcome::Exit) => return Ok(()),
+                Some(SlashOutcome::Rebuild {
+                    removed_names,
+                    added_slashes,
+                    message,
+                }) => {
+                    for n in removed_names {
+                        registry.remove(&n);
+                    }
+                    for s in added_slashes {
+                        registry.register_box(s);
+                    }
+                    println!("{message}");
+                }
                 None => println!(
                     "unknown command: /{}",
                     rest.split_whitespace().next().unwrap_or("")

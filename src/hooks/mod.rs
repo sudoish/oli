@@ -103,6 +103,18 @@ impl HookRegistry {
         self.hooks.iter().map(|b| b.as_ref())
     }
 
+    /// Drop every hook whose `name()` matches `name`. Used by
+    /// `/plugins reload` to clear stale plugin hooks before
+    /// re-registering. Returns the number of hooks removed.
+    /// Plugin-registered hooks share the plugin id as their name, so a
+    /// single removal call sweeps every event handler that plugin
+    /// installed.
+    pub fn remove_by_name(&mut self, name: &str) -> usize {
+        let before = self.hooks.len();
+        self.hooks.retain(|h| h.name() != name);
+        before - self.hooks.len()
+    }
+
     /// Compose every hook's outcome on a `PreToolUse` event. `Replace`
     /// mutates `args` for the remaining chain; the first `Skip`
     /// terminates the chain (subsequent pre hooks do not fire) and the

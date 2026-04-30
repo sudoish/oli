@@ -14,12 +14,64 @@ pub trait SlashCommand: Send + Sync {
     async fn run(&self, args: &str, agent: &mut Agent) -> SlashOutcome;
 }
 
-#[derive(Debug, PartialEq, Eq)]
 pub enum SlashOutcome {
     /// Continue the REPL. Optional message is printed to stdout.
     Continue(Option<String>),
     /// Tear down the REPL.
     Exit,
+    /// Reload triggered. The slash command has already mutated the
+    /// agent's tool/hook registries in place. The REPL drops every
+    /// slash whose name appears in `removed_names` and registers
+    /// each of `added_slashes` in their place.
+    Rebuild {
+        removed_names: Vec<String>,
+        added_slashes: Vec<Box<dyn SlashCommand>>,
+        message: String,
+    },
+}
+
+// Manual PartialEq for SlashOutcome — Box<dyn SlashCommand> doesn't
+// implement Eq, so we compare the variant + the comparable fields.
+// Tests only care about the `Continue(_)` and `Exit` shapes anyway.
+impl PartialEq for SlashOutcome {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Continue(a), Self::Continue(b)) => a == b,
+            (Self::Exit, Self::Exit) => true,
+            (
+                Self::Rebuild {
+                    removed_names: a,
+                    message: ma,
+                    ..
+                },
+                Self::Rebuild {
+                    removed_names: b,
+                    message: mb,
+                    ..
+                },
+            ) => a == b && ma == mb,
+            _ => false,
+        }
+    }
+}
+
+impl std::fmt::Debug for SlashOutcome {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Continue(s) => write!(f, "Continue({:?})", s),
+            Self::Exit => write!(f, "Exit"),
+            Self::Rebuild {
+                removed_names,
+                added_slashes,
+                message,
+            } => f
+                .debug_struct("Rebuild")
+                .field("removed_names", removed_names)
+                .field("added_slashes_count", &added_slashes.len())
+                .field("message", message)
+                .finish(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -50,6 +102,17 @@ impl SlashRegistry {
         self.commands.get(name).map(|b| b.as_ref())
     }
 
+    /// Drop a registered command by name. Used by `/plugins reload`
+    /// to clear stale plugin slashes before adding the fresh batch.
+    /// Returns `true` if a command with that name was present.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let had = self.commands.remove(name).is_some();
+        if had {
+            self.order.retain(|n| n != name);
+        }
+        had
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &dyn SlashCommand> {
         self.order
             .iter()
@@ -69,8 +132,20 @@ impl SlashRegistry {
         Some(cmd.run(rest, agent).await)
     }
 
-    /// Default REPL command set. Order is the order they show up in `/help`.
+    /// Default REPL command set. Order is the order they show up in
+    /// `/help`. `Plugins` is constructed without a reloader — call
+    /// `default_set_with_reloader` instead to get `/plugins reload`
+    /// support, which is the wiring the binary uses at startup.
     pub fn default_set() -> Self {
+        Self::default_set_with_reloader(None)
+    }
+
+    /// Same as `default_set`, but `Plugins` carries the supplied
+    /// reloader so `/plugins reload` re-scans the plugin dirs and
+    /// swaps registrations in place.
+    pub fn default_set_with_reloader(
+        reloader: Option<std::sync::Arc<crate::plugins::PluginReloader>>,
+    ) -> Self {
         let mut r = Self::new();
         r.register(Clear);
         r.register(Help);
@@ -82,7 +157,7 @@ impl SlashRegistry {
         r.register(Provider);
         r.register(Model);
         r.register(Sessions);
-        r.register(Plugins);
+        r.register(Plugins::new(reloader));
         r.register(Exit);
         r
     }
@@ -131,17 +206,26 @@ impl SlashCommand for Cost {
         "cost"
     }
     fn description(&self) -> &str {
-        "show last call's token usage"
+        "show last call + session-total token usage"
     }
     async fn run(&self, _args: &str, agent: &mut Agent) -> SlashOutcome {
-        let msg = match agent.last_usage {
+        let last = match agent.last_usage {
             Some(u) => format!(
                 "last call: {} prompt + {} completion = {} tokens",
                 u.prompt_tokens, u.completion_tokens, u.total_tokens
             ),
             None => "last call: (no usage yet — provider may not report it)".into(),
         };
-        SlashOutcome::Continue(Some(msg))
+        let s = agent.session_usage;
+        let session = if s.total_tokens == 0 && s.prompt_tokens == 0 && s.completion_tokens == 0 {
+            "session: (no usage recorded yet)".to_string()
+        } else {
+            format!(
+                "session: {} prompt + {} completion = {} tokens",
+                s.prompt_tokens, s.completion_tokens, s.total_tokens
+            )
+        };
+        SlashOutcome::Continue(Some(format!("{}\n{}", last, session)))
     }
 }
 
@@ -451,7 +535,19 @@ impl SlashCommand for Sessions {
     }
 }
 
-pub struct Plugins;
+/// `/plugins` — list loaded Lua plugins. Subcommand:
+///   - (no args) list manifest entries
+///   - `reload`  re-scan plugin dirs, swap registered tools / hooks /
+///               slashes atomically without restarting the session
+pub struct Plugins {
+    reloader: Option<std::sync::Arc<crate::plugins::PluginReloader>>,
+}
+
+impl Plugins {
+    pub fn new(reloader: Option<std::sync::Arc<crate::plugins::PluginReloader>>) -> Self {
+        Self { reloader }
+    }
+}
 
 #[async_trait]
 impl SlashCommand for Plugins {
@@ -459,36 +555,110 @@ impl SlashCommand for Plugins {
         "plugins"
     }
     fn description(&self) -> &str {
-        "list loaded Lua plugins"
+        "list loaded Lua plugins; `reload` re-scans plugin dirs"
     }
-    async fn run(&self, _args: &str, agent: &mut Agent) -> SlashOutcome {
-        if agent.plugin_manifest.is_empty() {
+    async fn run(&self, args: &str, agent: &mut Agent) -> SlashOutcome {
+        match args.trim() {
+            "" => render_listing(agent),
+            "reload" => self.run_reload(agent).await,
+            other => SlashOutcome::Continue(Some(format!(
+                "unknown /plugins subcommand: {} (try `reload` or no args)",
+                other
+            ))),
+        }
+    }
+}
+
+fn render_listing(agent: &mut Agent) -> SlashOutcome {
+    if agent.plugin_manifest.is_empty() {
+        return SlashOutcome::Continue(Some(
+            "(no plugins loaded — drop .lua files into ~/.config/oli/plugins/ \
+             or .oli/plugins/)"
+                .into(),
+        ));
+    }
+    let mut out = format!("Loaded plugins ({}):\n", agent.plugin_manifest.len());
+    for m in &agent.plugin_manifest {
+        let v = m.version.as_deref().unwrap_or("?");
+        out.push_str(&format!(
+            "  {} (v{})  source={}\n",
+            m.name,
+            v,
+            m.source.display()
+        ));
+        if !m.tools.is_empty() {
+            out.push_str(&format!("    tools: {}\n", m.tools.join(", ")));
+        }
+        if !m.slash_commands.is_empty() {
+            out.push_str(&format!("    slash: /{}\n", m.slash_commands.join(", /")));
+        }
+        if !m.hook_events.is_empty() {
+            out.push_str(&format!("    hooks: {}\n", m.hook_events.join(", ")));
+        }
+    }
+    SlashOutcome::Continue(Some(out.trim_end().to_string()))
+}
+
+impl Plugins {
+    async fn run_reload(&self, agent: &mut Agent) -> SlashOutcome {
+        let Some(reloader) = self.reloader.as_ref() else {
             return SlashOutcome::Continue(Some(
-                "(no plugins loaded — drop .lua files into ~/.config/oli/plugins/ \
-                 or .oli/plugins/)"
-                    .into(),
+                "(plugin reload unavailable — no reloader bound at startup)".into(),
             ));
-        }
-        let mut out = format!("Loaded plugins ({}):\n", agent.plugin_manifest.len());
-        for m in &agent.plugin_manifest {
-            let v = m.version.as_deref().unwrap_or("?");
-            out.push_str(&format!(
-                "  {} (v{})  source={}\n",
-                m.name,
-                v,
-                m.source.display()
-            ));
-            if !m.tools.is_empty() {
-                out.push_str(&format!("    tools: {}\n", m.tools.join(", ")));
+        };
+
+        // Sweep the prior plugin contributions out of the agent's
+        // tool / hook / slash registries. Hooks are removed by name
+        // (plugin id); slashes go up the wire as `removed_names` so
+        // the REPL can drop them atomically with the new ones.
+        let prior = std::mem::take(&mut agent.plugin_manifest);
+        let mut removed_slash_names = Vec::new();
+        for m in &prior {
+            for t in &m.tools {
+                agent.tools.remove(t);
             }
-            if !m.slash_commands.is_empty() {
-                out.push_str(&format!("    slash: /{}\n", m.slash_commands.join(", /")));
-            }
-            if !m.hook_events.is_empty() {
-                out.push_str(&format!("    hooks: {}\n", m.hook_events.join(", ")));
+            agent.hooks.remove_by_name(&m.name);
+            for s in &m.slash_commands {
+                removed_slash_names.push(s.clone());
             }
         }
-        SlashOutcome::Continue(Some(out.trim_end().to_string()))
+
+        // Pull a fresh batch off disk and install the contributions
+        // back into the agent. Plugins that fail to load surface as
+        // eprintln lines from the loader; the rest still install.
+        let fresh = reloader.reload().await;
+        for t in fresh.tools {
+            agent.tools.register_box(t);
+        }
+        for h in fresh.hooks {
+            agent.hooks.register_box(h);
+        }
+        agent.plugin_manifest = fresh.manifest;
+
+        let plugin_count = agent.plugin_manifest.len();
+        let tool_count: usize = agent.plugin_manifest.iter().map(|m| m.tools.len()).sum();
+        let hook_count: usize = agent
+            .plugin_manifest
+            .iter()
+            .map(|m| m.hook_events.len())
+            .sum();
+        let added_slash_count = fresh.slash_commands.len();
+
+        SlashOutcome::Rebuild {
+            removed_names: removed_slash_names,
+            added_slashes: fresh.slash_commands,
+            message: format!(
+                "(reloaded {} plugin{}, {} tool{}, {} hook{}, {} slash{})",
+                plugin_count,
+                if plugin_count == 1 { "" } else { "s" },
+                tool_count,
+                if tool_count == 1 { "" } else { "s" },
+                hook_count,
+                if hook_count == 1 { "" } else { "s" },
+                added_slash_count,
+                if added_slash_count == 1 { "" } else { "es" },
+            ),
+        }
     }
 }
 
@@ -795,6 +965,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cost_reports_session_total_alongside_last_call() {
+        // After multiple chat rounds the session total should equal
+        // the sum, not just the last round.
+        let reg = SlashRegistry::default_set();
+        let mut agent = fresh_agent();
+        agent.last_usage = Some(crate::providers::Usage {
+            prompt_tokens: 7,
+            completion_tokens: 3,
+            total_tokens: 10,
+        });
+        agent.session_usage = crate::providers::Usage {
+            prompt_tokens: 22,
+            completion_tokens: 9,
+            total_tokens: 31,
+        };
+        let out = reg.dispatch("cost", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(msg)) => {
+                // last call line
+                assert!(msg.contains("last call:"));
+                assert!(msg.contains("7 prompt"));
+                assert!(msg.contains("10 tokens"));
+                // session line
+                assert!(msg.contains("session:"));
+                assert!(msg.contains("22 prompt"));
+                assert!(msg.contains("31 tokens"));
+            }
+            _ => panic!("expected Continue(Some(_)), got {:?}", out),
+        }
+    }
+
+    #[tokio::test]
+    async fn cost_session_line_says_no_usage_when_zero() {
+        let reg = SlashRegistry::default_set();
+        let mut agent = fresh_agent();
+        let out = reg.dispatch("cost", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(msg)) => {
+                assert!(msg.contains("session:"));
+                assert!(msg.contains("no usage recorded"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[tokio::test]
     async fn tools_lists_registered_tool_names() {
         let reg = SlashRegistry::default_set();
         let mut tools = crate::tools::Registry::new();
@@ -1018,5 +1234,176 @@ default_model = "anthropic/claude-haiku-4.5"
         reg.register(Clear);
         reg.register(Clear);
         assert_eq!(reg.iter().count(), 1);
+    }
+
+    /// End-to-end `/plugins reload`: an empty agent, with a reloader
+    /// pointed at a tempdir containing one plugin, picks up the
+    /// plugin's tool, hook, and slash command after invoking
+    /// `/plugins reload` — without any restart.
+    #[tokio::test]
+    async fn plugins_reload_picks_up_a_freshly_dropped_plugin() {
+        use crate::plugins::PluginReloader;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let plugin_dir = tempdir().unwrap();
+        std::fs::write(
+            plugin_dir.path().join("hello.lua"),
+            r#"
+local p = { name = "hello", version = "0.1" }
+p.tools = {
+  { name = "Greet", description = "say hi",
+    parameters = { type = "object", properties = {} },
+    execute = function(args, ctx) return "hi" end },
+}
+p.slash_commands = {
+  { name = "wave", description = "wave",
+    execute = function(args, ctx) return "🌊" end },
+}
+p.hooks = {
+  pre_tool_use = function(event, ctx) end,
+}
+return p
+            "#,
+        )
+        .unwrap();
+
+        let host_tools = Arc::new(tokio::sync::Mutex::new(Registry::new()));
+        let reloader = Arc::new(PluginReloader::with_dirs(
+            host_tools,
+            None,
+            vec![plugin_dir.path().to_path_buf()],
+        ));
+
+        let mut agent = fresh_agent();
+        // Sanity: nothing plugin-y yet.
+        assert!(agent.plugin_manifest.is_empty());
+        assert_eq!(agent.tools.iter().count(), 0);
+        assert_eq!(agent.hooks.len(), 0);
+
+        let plugins_cmd = Plugins::new(Some(reloader.clone()));
+        let outcome = plugins_cmd.run("reload", &mut agent).await;
+
+        match outcome {
+            SlashOutcome::Rebuild {
+                removed_names,
+                added_slashes,
+                message,
+            } => {
+                // First reload: nothing to remove.
+                assert!(removed_names.is_empty());
+                // The plugin's slash command came back for the REPL
+                // to install.
+                assert_eq!(added_slashes.len(), 1);
+                assert_eq!(added_slashes[0].name(), "wave");
+                assert!(
+                    message.contains("1 plugin"),
+                    "expected reload summary, got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Rebuild, got {:?}", other),
+        }
+
+        // Tool, hook, and manifest are all live without any restart.
+        assert!(agent.tools.get("Greet").is_some());
+        assert_eq!(agent.hooks.len(), 1);
+        assert_eq!(agent.plugin_manifest.len(), 1);
+        assert_eq!(agent.plugin_manifest[0].name, "hello");
+        assert_eq!(agent.plugin_manifest[0].tools, vec!["Greet"]);
+    }
+
+    /// A second reload after a plugin file has been deleted on disk
+    /// removes the prior plugin's contributions cleanly.
+    #[tokio::test]
+    async fn plugins_reload_removes_entries_when_file_disappears() {
+        use crate::plugins::PluginReloader;
+        use std::sync::Arc;
+        use tempfile::tempdir;
+
+        let plugin_dir = tempdir().unwrap();
+        let plugin_path = plugin_dir.path().join("ephemeral.lua");
+        std::fs::write(
+            &plugin_path,
+            r#"
+local p = { name = "ephemeral" }
+p.tools = {
+  { name = "Boop", description = "",
+    parameters = { type = "object", properties = {} },
+    execute = function(args, ctx) return "boop" end },
+}
+p.slash_commands = {
+  { name = "boop", description = "boop",
+    execute = function(args, ctx) return "boop" end },
+}
+return p
+            "#,
+        )
+        .unwrap();
+
+        let host_tools = Arc::new(tokio::sync::Mutex::new(Registry::new()));
+        let reloader = Arc::new(PluginReloader::with_dirs(
+            host_tools,
+            None,
+            vec![plugin_dir.path().to_path_buf()],
+        ));
+        let plugins_cmd = Plugins::new(Some(reloader.clone()));
+        let mut agent = fresh_agent();
+
+        // First reload: plugin loads.
+        let _ = plugins_cmd.run("reload", &mut agent).await;
+        assert!(agent.tools.get("Boop").is_some());
+        assert_eq!(agent.plugin_manifest.len(), 1);
+
+        // Plugin file disappears between sessions.
+        std::fs::remove_file(&plugin_path).unwrap();
+
+        // Second reload: tool + slash names come back as `removed_names`,
+        // nothing new to register.
+        let outcome = plugins_cmd.run("reload", &mut agent).await;
+        match outcome {
+            SlashOutcome::Rebuild {
+                removed_names,
+                added_slashes,
+                ..
+            } => {
+                assert!(
+                    removed_names.contains(&"boop".to_string()),
+                    "expected `boop` in removed_names, got {:?}",
+                    removed_names
+                );
+                assert!(added_slashes.is_empty());
+            }
+            other => panic!("expected Rebuild, got {:?}", other),
+        }
+        assert!(agent.tools.get("Boop").is_none(), "Boop should be gone");
+        assert!(agent.plugin_manifest.is_empty());
+    }
+
+    #[tokio::test]
+    async fn plugins_reload_without_reloader_reports_unavailable() {
+        let plugins_cmd = Plugins::new(None);
+        let mut agent = fresh_agent();
+        let outcome = plugins_cmd.run("reload", &mut agent).await;
+        match outcome {
+            SlashOutcome::Continue(Some(msg)) => {
+                assert!(msg.contains("unavailable"));
+            }
+            other => panic!("expected Continue with unavailable msg, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn plugins_unknown_subcommand_reports_usage() {
+        let plugins_cmd = Plugins::new(None);
+        let mut agent = fresh_agent();
+        let outcome = plugins_cmd.run("frobnicate", &mut agent).await;
+        match outcome {
+            SlashOutcome::Continue(Some(msg)) => {
+                assert!(msg.contains("unknown /plugins subcommand"));
+                assert!(msg.contains("reload"));
+            }
+            other => panic!("expected Continue, got {:?}", other),
+        }
     }
 }

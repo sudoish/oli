@@ -36,9 +36,14 @@ pub struct Agent {
     pub memory: Box<dyn Memory>,
     /// Most recent per-call token accounting reported by the provider.
     /// Populated after every chat round (streaming and non-streaming).
-    /// Drives `Memory::maybe_compact` decisions and is the data source for
-    /// the eventual `/cost` slash command.
+    /// Drives `Memory::maybe_compact` decisions and powers the
+    /// last-call line of the `/cost` slash command.
     pub last_usage: Option<Usage>,
+    /// Running total of every per-call usage since session start (or
+    /// the last `clear`). `/cost` renders this alongside `last_usage`
+    /// so the user can spot a session that's drifting expensive.
+    /// Providers that don't report usage simply don't contribute.
+    pub session_usage: Usage,
     /// Gate every tool call. Default is `ConfigPolicy::defaults()` (Read /
     /// Glob / Grep auto-allow, Edit / Write / Bash ask, common dev shell
     /// commands on the bash allowlist).
@@ -77,6 +82,7 @@ impl Agent {
             caps,
             memory: Box::new(LinearWithCompact::new()),
             last_usage: None,
+            session_usage: Usage::default(),
             policy: Box::new(ConfigPolicy::defaults()),
             approver: Box::new(AlwaysApprove),
             cfg: None,
@@ -176,10 +182,12 @@ impl Agent {
     /// Reset session state — drops conversation history and the per-tool
     /// context (so `Edit`'s read-first invariant resets too). Pinned
     /// content (system prompt) is preserved and re-injected on the next
-    /// turn.
+    /// turn. Usage counters reset so `/cost` reflects the new turn.
     pub async fn clear(&mut self) {
         self.memory.clear().await;
         self.ctx = ToolContext::new();
+        self.last_usage = None;
+        self.session_usage = Usage::default();
     }
 
     /// Borrow the per-session tool context. The binary uses this at
@@ -281,6 +289,14 @@ impl Agent {
             let resp = self.provider.chat_stream(req, sink_dyn).await?;
             if let Some(u) = resp.usage {
                 self.last_usage = Some(u);
+                self.session_usage.prompt_tokens =
+                    self.session_usage.prompt_tokens.saturating_add(u.prompt_tokens);
+                self.session_usage.completion_tokens = self
+                    .session_usage
+                    .completion_tokens
+                    .saturating_add(u.completion_tokens);
+                self.session_usage.total_tokens =
+                    self.session_usage.total_tokens.saturating_add(u.total_tokens);
             }
 
             // Models without native tool-call support sometimes emit calls
@@ -959,6 +975,58 @@ mod tests {
         agent.run("hi").await.unwrap();
         // user + assistant.
         assert_eq!(agent.memory.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn session_usage_accumulates_across_turns() {
+        struct FixedUsageProvider;
+        #[async_trait]
+        impl Provider for FixedUsageProvider {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: assistant_text("ok"),
+                    usage: Some(Usage {
+                        prompt_tokens: 10,
+                        completion_tokens: 3,
+                        total_tokens: 13,
+                    }),
+                })
+            }
+        }
+        let mut agent = Agent::new(Box::new(FixedUsageProvider), Registry::new(), "m".into());
+        agent.run("a").await.unwrap();
+        agent.run("b").await.unwrap();
+        agent.run("c").await.unwrap();
+        // last_usage reflects only the most recent round.
+        assert_eq!(agent.last_usage.unwrap().prompt_tokens, 10);
+        // session_usage sums across all three.
+        assert_eq!(agent.session_usage.prompt_tokens, 30);
+        assert_eq!(agent.session_usage.completion_tokens, 9);
+        assert_eq!(agent.session_usage.total_tokens, 39);
+    }
+
+    #[tokio::test]
+    async fn clear_resets_session_usage() {
+        struct FixedUsageProvider;
+        #[async_trait]
+        impl Provider for FixedUsageProvider {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: assistant_text("ok"),
+                    usage: Some(Usage {
+                        prompt_tokens: 5,
+                        completion_tokens: 2,
+                        total_tokens: 7,
+                    }),
+                })
+            }
+        }
+        let mut agent = Agent::new(Box::new(FixedUsageProvider), Registry::new(), "m".into());
+        agent.run("hi").await.unwrap();
+        assert_eq!(agent.session_usage.total_tokens, 7);
+        agent.clear().await;
+        assert_eq!(agent.session_usage.total_tokens, 0);
+        assert_eq!(agent.last_usage, None);
     }
 
     #[tokio::test]

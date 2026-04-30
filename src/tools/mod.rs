@@ -55,6 +55,18 @@ impl Registry {
         self.tools.get(name).map(|b| b.as_ref())
     }
 
+    /// Drop a registered tool by name. Used by `/plugins reload` so
+    /// stale plugin tools come out of the registry before the
+    /// freshly-loaded ones go back in. Returns `true` if a tool with
+    /// that name was present.
+    pub fn remove(&mut self, name: &str) -> bool {
+        let had = self.tools.remove(name).is_some();
+        if had {
+            self.order.retain(|n| n != name);
+        }
+        had
+    }
+
     /// Iterate over registered tools in registration order. Used by the
     /// `/tools` slash command and by future plugin hooks.
     pub fn iter(&self) -> impl Iterator<Item = &dyn Tool> {

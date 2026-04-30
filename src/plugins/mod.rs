@@ -133,6 +133,62 @@ pub async fn load_all(
     out
 }
 
+/// Re-runnable plugin loader. Stores the host args fixed at startup
+/// (the tool-registry snapshot Lua plugins call back into, and the
+/// SubagentSpawner powering `ctx:prompt`) so `/plugins reload` can
+/// re-scan the discovery dirs at any time without re-plumbing
+/// startup wiring.
+///
+/// Tool/hook removal is the caller's problem — the reloader hands
+/// back a fresh `LoadedPlugins`, and the slash command is
+/// responsible for sweeping the prior plugin entries out of the
+/// agent's tool/hook/slash registries before installing the new
+/// ones.
+pub struct PluginReloader {
+    tools_for_host: Arc<Mutex<crate::tools::Registry>>,
+    spawner: Option<Arc<dyn SubagentSpawner>>,
+    /// Discovery dirs scanned on every `reload`. Defaults to
+    /// `default_plugin_dirs()`; tests can swap in a tempdir via
+    /// `with_dirs`.
+    dirs: Vec<PathBuf>,
+}
+
+impl PluginReloader {
+    pub fn new(
+        tools_for_host: Arc<Mutex<crate::tools::Registry>>,
+        spawner: Option<Arc<dyn SubagentSpawner>>,
+    ) -> Self {
+        Self {
+            tools_for_host,
+            spawner,
+            dirs: default_plugin_dirs(),
+        }
+    }
+
+    /// Test seam: construct a reloader that scans an explicit list of
+    /// dirs instead of the user-config / project-local defaults.
+    #[cfg(test)]
+    pub fn with_dirs(
+        tools_for_host: Arc<Mutex<crate::tools::Registry>>,
+        spawner: Option<Arc<dyn SubagentSpawner>>,
+        dirs: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            tools_for_host,
+            spawner,
+            dirs,
+        }
+    }
+
+    pub async fn reload(&self) -> LoadedPlugins {
+        let mut out = LoadedPlugins::default();
+        for dir in &self.dirs {
+            load_dir(dir, self.tools_for_host.clone(), self.spawner.clone(), &mut out).await;
+        }
+        out
+    }
+}
+
 /// Public for tests: load a specific dir into an existing aggregate.
 pub async fn load_dir(
     dir: &Path,
