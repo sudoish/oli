@@ -23,6 +23,7 @@
 mod app;
 mod driver;
 mod event;
+mod hook;
 mod terminal;
 mod ui;
 
@@ -45,7 +46,7 @@ use crate::tui::event::UiEvent;
 use crate::tui::terminal::TerminalGuard;
 
 pub async fn run(
-    agent: Agent,
+    mut agent: Agent,
     plugin_slashes: Vec<Box<dyn SlashCommand>>,
     reloader: Option<Arc<PluginReloader>>,
 ) -> Result<()> {
@@ -53,6 +54,15 @@ pub async fn run(
         .map_err(|e| AgentError::Provider(format!("tui init: {}", e)))?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<UiEvent>();
+
+    // Register the tool-card hook BEFORE the agent moves into the
+    // driver task. From inside the agent loop the hook fires on
+    // each PreToolUse / PostToolUse and pushes UiEvents the
+    // render task picks up. Registered first means it sits ahead
+    // of any plugin-registered hooks in the dispatch order, so
+    // plugin Replace/Skip outcomes don't suppress the card the
+    // user wants to see.
+    agent.hooks.register(hook::TuiHook::new(tx.clone()));
 
     // Input task: lives until the channel is dropped (i.e. until
     // we drop the last `tx` after the loop exits).
@@ -125,6 +135,17 @@ fn handle_event(
         UiEvent::TurnCancelled => app.on_turn_cancelled(),
         UiEvent::SystemNote(body) => app.on_system_note(body),
         UiEvent::Quit => app.request_quit(),
+        UiEvent::ToolStart {
+            id,
+            tool,
+            args_preview,
+        } => app.on_tool_start(id, tool, args_preview),
+        UiEvent::ToolDone {
+            id,
+            duration,
+            summary,
+            ok,
+        } => app.on_tool_done(id, duration, summary, ok),
     }
 }
 

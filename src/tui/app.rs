@@ -5,7 +5,8 @@
 //! item, plus a cancel-sender slot the UI hands to the driver per
 //! command.
 
-use std::time::Instant;
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tokio::sync::oneshot;
@@ -36,6 +37,10 @@ pub struct App {
     /// Cancel sender for the in-flight driver command. UI uses it
     /// to interrupt on Ctrl+C while busy. None when Idle.
     pub cancel_tx: Option<oneshot::Sender<()>>,
+    /// Maps in-flight tool-call ids → their transcript index so
+    /// `ToolDone` finds the right card to mutate. Cleared as
+    /// cards complete.
+    pub active_tools: HashMap<u64, usize>,
 }
 
 pub enum Mode {
@@ -66,6 +71,26 @@ pub enum TranscriptItem {
     /// errors). Not part of the model's transcript.
     System {
         body: String,
+    },
+    /// Tool dispatch card. Created on `UiEvent::ToolStart`,
+    /// flipped to `ToolCardState::Done` on `UiEvent::ToolDone`.
+    /// Renders inline alongside assistant text so tool-using
+    /// turns read in causal order.
+    ToolCard {
+        id: u64,
+        tool: String,
+        args_preview: String,
+        state: ToolCardState,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub enum ToolCardState {
+    Running { started_at: Instant },
+    Done {
+        duration: Duration,
+        summary: String,
+        ok: bool,
     },
 }
 
@@ -203,9 +228,58 @@ impl App {
         if matches!(self.mode, Mode::Thinking { .. }) {
             self.mode = Mode::Streaming;
         }
+        // Continuation after a tool round: the previous active
+        // assistant was closed on ToolStart so the card could land
+        // between the two assistant messages. Open a fresh slot
+        // and keep streaming.
+        if self.active_assistant.is_none() {
+            self.transcript.push(TranscriptItem::Assistant {
+                body: String::new(),
+                done: false,
+            });
+            self.active_assistant = Some(self.transcript.len() - 1);
+        }
         if let Some(idx) = self.active_assistant {
             if let Some(TranscriptItem::Assistant { body, .. }) = self.transcript.get_mut(idx) {
                 body.push_str(chunk);
+            }
+        }
+    }
+
+    /// Push a Running tool card into the transcript and remember
+    /// its index by id so the matching `on_tool_done` finds it.
+    /// Closes any active assistant message so subsequent chunks
+    /// land in a fresh assistant item *after* the card — the
+    /// transcript reads "thought → tool → continuation."
+    pub fn on_tool_start(&mut self, id: u64, tool: String, args_preview: String) {
+        if let Some(idx) = self.active_assistant.take() {
+            if let Some(TranscriptItem::Assistant { done, body, .. }) =
+                self.transcript.get_mut(idx)
+            {
+                if !body.is_empty() {
+                    *done = true;
+                }
+            }
+        }
+        self.transcript.push(TranscriptItem::ToolCard {
+            id,
+            tool,
+            args_preview,
+            state: ToolCardState::Running {
+                started_at: Instant::now(),
+            },
+        });
+        self.active_tools.insert(id, self.transcript.len() - 1);
+    }
+
+    pub fn on_tool_done(&mut self, id: u64, duration: Duration, summary: String, ok: bool) {
+        if let Some(idx) = self.active_tools.remove(&id) {
+            if let Some(TranscriptItem::ToolCard { state, .. }) = self.transcript.get_mut(idx) {
+                *state = ToolCardState::Done {
+                    duration,
+                    summary,
+                    ok,
+                };
             }
         }
     }
@@ -489,5 +563,118 @@ mod tests {
         assert!(matches!(action, SubmitAction::None));
         // Input was not cleared because submission was rejected.
         assert_eq!(app.input, "hello");
+    }
+
+    #[test]
+    fn tool_start_closes_active_assistant_and_pushes_running_card() {
+        let mut app = App::new();
+        app.on_turn_started();
+        app.on_content_chunk("looking at the file...");
+        let asst_idx = app.active_assistant.expect("active assistant slot");
+
+        app.on_tool_start(1, "Read".into(), "file_path=src/main.rs".into());
+
+        // Active assistant slot is cleared so the next chunk lands
+        // in a fresh item *after* the card.
+        assert!(app.active_assistant.is_none());
+        // Prior assistant message is marked done.
+        match &app.transcript[asst_idx] {
+            TranscriptItem::Assistant { body, done } => {
+                assert_eq!(body, "looking at the file...");
+                assert!(*done);
+            }
+            _ => panic!("expected Assistant item"),
+        }
+        // ToolCard with Running state landed at the tail.
+        match app.transcript.last().unwrap() {
+            TranscriptItem::ToolCard { id, tool, state, .. } => {
+                assert_eq!(*id, 1);
+                assert_eq!(tool, "Read");
+                assert!(matches!(state, ToolCardState::Running { .. }));
+            }
+            other => panic!("expected ToolCard, got {:?}", other),
+        }
+        // Index registered for matching ToolDone.
+        assert!(app.active_tools.contains_key(&1));
+    }
+
+    #[test]
+    fn tool_done_flips_card_to_done_and_clears_index() {
+        let mut app = App::new();
+        app.on_turn_started();
+        app.on_tool_start(1, "Read".into(), "file_path=x.rs".into());
+        app.on_tool_done(1, Duration::from_millis(42), "37 lines".into(), true);
+
+        let card = app
+            .transcript
+            .iter()
+            .rev()
+            .find(|i| matches!(i, TranscriptItem::ToolCard { .. }))
+            .unwrap();
+        match card {
+            TranscriptItem::ToolCard { state, .. } => match state {
+                ToolCardState::Done {
+                    duration,
+                    summary,
+                    ok,
+                } => {
+                    assert_eq!(duration.as_millis(), 42);
+                    assert_eq!(summary, "37 lines");
+                    assert!(*ok);
+                }
+                other => panic!("expected Done state, got {:?}", other),
+            },
+            _ => panic!(),
+        }
+        assert!(!app.active_tools.contains_key(&1));
+    }
+
+    #[test]
+    fn assistant_continuation_after_tool_creates_a_new_item() {
+        // The agent loop pattern is: assistant text → tool round
+        // → more assistant text. Each segment should land in its
+        // own transcript item so the card sits between them.
+        let mut app = App::new();
+        app.on_turn_started();
+        app.on_content_chunk("first segment ");
+        app.on_tool_start(1, "Read".into(), "x".into());
+        app.on_tool_done(1, Duration::from_millis(10), "10 lines".into(), true);
+        app.on_content_chunk("second segment");
+
+        let assistant_bodies: Vec<&str> = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::Assistant { body, .. } => Some(body.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            assistant_bodies,
+            vec!["first segment ", "second segment"],
+            "expected two distinct assistant items, got {:?}",
+            assistant_bodies
+        );
+    }
+
+    #[test]
+    fn multiple_tools_in_one_turn_each_get_their_own_card() {
+        let mut app = App::new();
+        app.on_turn_started();
+        app.on_tool_start(1, "Read".into(), "a".into());
+        app.on_tool_done(1, Duration::from_millis(5), "5 lines".into(), true);
+        app.on_tool_start(2, "Glob".into(), "**/*.rs".into());
+        app.on_tool_done(2, Duration::from_millis(8), "12 files".into(), true);
+
+        let cards: Vec<&str> = app
+            .transcript
+            .iter()
+            .filter_map(|i| match i {
+                TranscriptItem::ToolCard { tool, .. } => Some(tool.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(cards, vec!["Read", "Glob"]);
+        assert!(app.active_tools.is_empty());
     }
 }

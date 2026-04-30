@@ -37,4 +37,23 @@ pub enum UiEvent {
     /// `/exit` (or equivalent) routed through the driver. The UI
     /// quits cleanly.
     Quit,
+
+    // ----- Tool-card events (Phase H) -----
+    /// Agent dispatched a tool. The render loop pushes a Running
+    /// card into the transcript and tracks it by `id` so the
+    /// matching `ToolDone` finds the right slot.
+    ToolStart {
+        id: u64,
+        tool: String,
+        args_preview: String,
+    },
+    /// Agent finished a tool. The render loop flips the card to
+    /// `Done` with timing + summary + ok flag.
+    ToolDone {
+        id: u64,
+        duration: std::time::Duration,
+        summary: String,
+        ok: bool,
+    },
 }
+

@@ -16,7 +16,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
 
-use crate::tui::app::{App, Mode, TranscriptItem};
+use crate::tui::app::{App, Mode, ToolCardState, TranscriptItem};
 
 const TITLE: &str = "oli";
 
@@ -147,6 +147,18 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &App) {
                 }
                 lines.push(Line::raw(""));
             }
+            TranscriptItem::ToolCard {
+                tool,
+                args_preview,
+                state,
+                ..
+            } => {
+                lines.push(render_tool_card_line(tool, args_preview, state));
+                if let Some(detail) = render_tool_card_detail(state) {
+                    lines.push(detail);
+                }
+                lines.push(Line::raw(""));
+            }
         }
     }
 
@@ -154,6 +166,80 @@ fn draw_transcript(f: &mut Frame, area: Rect, app: &App) {
         .wrap(Wrap { trim: false })
         .scroll((scroll_offset(area, app), 0));
     f.render_widget(para, area);
+}
+
+/// Header line of a tool card:
+/// `→ Read   src/main.rs                            0.04s ✓`
+fn render_tool_card_line<'a>(
+    tool: &'a str,
+    args_preview: &'a str,
+    state: &ToolCardState,
+) -> Line<'a> {
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    let arrow_color = match state {
+        ToolCardState::Running { .. } => Color::Yellow,
+        ToolCardState::Done { ok: true, .. } => Color::Green,
+        ToolCardState::Done { ok: false, .. } => Color::Red,
+    };
+    spans.push(Span::styled(
+        "  → ",
+        Style::default()
+            .fg(arrow_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::styled(
+        format!("{:<7}", tool),
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ));
+    spans.push(Span::raw(" "));
+    spans.push(Span::styled(
+        args_preview.to_string(),
+        Style::default().fg(Color::White),
+    ));
+    spans.push(Span::raw("  "));
+    match state {
+        ToolCardState::Running { started_at } => {
+            let elapsed = started_at.elapsed().as_secs_f32();
+            spans.push(Span::styled(
+                format!("{} {:.1}s", spinner_glyph(elapsed), elapsed),
+                Style::default().fg(Color::Yellow),
+            ));
+        }
+        ToolCardState::Done { duration, ok, .. } => {
+            spans.push(Span::styled(
+                format!("{:.2}s", duration.as_secs_f32()),
+                Style::default().fg(Color::DarkGray),
+            ));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                if *ok { "✓" } else { "✗" },
+                Style::default().fg(if *ok { Color::Green } else { Color::Red }),
+            ));
+        }
+    }
+    Line::from(spans)
+}
+
+/// Optional detail line under a card. Running cards show no
+/// detail; done cards show their summary indented under the
+/// header.
+fn render_tool_card_detail<'a>(state: &'a ToolCardState) -> Option<Line<'a>> {
+    match state {
+        ToolCardState::Running { .. } => None,
+        ToolCardState::Done { summary, ok, .. } => {
+            if summary.is_empty() {
+                return None;
+            }
+            Some(Line::from(Span::styled(
+                format!("    {}", summary),
+                Style::default()
+                    .fg(if *ok { Color::DarkGray } else { Color::Red })
+                    .add_modifier(Modifier::ITALIC),
+            )))
+        }
+    }
 }
 
 /// Pin the last logical line to the bottom of the viewport. Crude
@@ -175,6 +261,13 @@ fn scroll_offset(area: Rect, app: &App) -> u16 {
             }
             TranscriptItem::System { body } => {
                 total += body.lines().count().max(1);
+                total += 1; // blank
+            }
+            TranscriptItem::ToolCard { state, .. } => {
+                total += 1; // header
+                if matches!(state, ToolCardState::Done { .. }) {
+                    total += 1; // detail line
+                }
                 total += 1; // blank
             }
         }

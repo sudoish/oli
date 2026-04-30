@@ -470,10 +470,10 @@ line-oriented plan; this doc supersedes it.
 | G3 | Slash command dispatch                            | DONE   |
 | G4 | Cancel mid-stream                                 | DONE   |
 | G5 | `SlashOutcome::Rebuild` plumbed through           | DONE   |
-| H1 | Hook bridge: PreToolUse / PostToolUse → UiEvent   | TODO   |
-| H2 | Tool-card widget with spinner + timing            | TODO   |
-| H3 | Cards interleave with assistant content           | TODO   |
-| H4 | Per-tool result summaries                         | TODO   |
+| H1 | Hook bridge: PreToolUse / PostToolUse → UiEvent   | DONE   |
+| H2 | Tool-card widget with spinner + timing            | DONE   |
+| H3 | Cards interleave with assistant content           | DONE   |
+| H4 | Per-tool result summaries                         | DONE   |
 | I1 | Approval modal layer                              | TODO   |
 | I2 | Single-key approval (y/n/a/d/ESC)                 | TODO   |
 | I3 | Diff preview inside modal                         | TODO   |
