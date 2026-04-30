@@ -450,9 +450,10 @@ impl App {
     // ---------- completion ----------
 
     fn refresh_completion_on_edit(&mut self) {
-        if self.completion.is_none() {
-            return;
-        }
+        // Auto-open as the user types: if the cursor is in a
+        // completion context (`/cmd` at line start, `@path` after
+        // a word boundary), surface the popup without waiting for
+        // Tab. Tab still works for explicit invocation.
         let ctx = self.detect_completion_context();
         match ctx {
             Some(new_ctx) => self.update_completion(new_ctx),

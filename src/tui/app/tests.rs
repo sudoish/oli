@@ -72,6 +72,29 @@ fn empty_or_whitespace_submission_is_a_noop() {
 }
 
 #[test]
+fn typing_slash_auto_opens_completion_popup() {
+    let mut app = App::new();
+    app.set_slash_meta(vec![
+        ("clear".into(), String::new()),
+        ("cost".into(), String::new()),
+        ("model".into(), String::new()),
+    ]);
+    type_str(&mut app, "/c");
+    let menu = app.completion.as_ref().expect("popup should auto-open");
+    assert_eq!(menu.candidates, vec!["clear".to_string(), "cost".to_string()]);
+}
+
+#[test]
+fn typing_past_slash_args_closes_completion_popup() {
+    let mut app = App::new();
+    app.set_slash_meta(vec![("model".into(), String::new())]);
+    type_str(&mut app, "/model");
+    assert!(app.completion.is_some());
+    type_str(&mut app, " arg");
+    assert!(app.completion.is_none());
+}
+
+#[test]
 fn esc_clears_input_when_no_completion_open() {
     let mut app = App::new();
     type_str(&mut app, "draft");
