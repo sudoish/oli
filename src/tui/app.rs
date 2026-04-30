@@ -5,7 +5,7 @@
 //! navigation, and a completion-menu slot for slash and `@path`
 //! popups.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -48,6 +48,37 @@ pub struct ApprovalState {
     pub reason: String,
     pub preview: String,
     pub scroll: u16,
+}
+
+/// `/sessions` modal. Lists session entries, newest first.
+/// Selection is by index in `entries`. Enter triggers a copy of
+/// the resume command + a system-note hint; Esc closes.
+#[derive(Debug, Clone)]
+pub struct SessionsPickerState {
+    pub entries: Vec<SessionPickerRow>,
+    pub selected: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionPickerRow {
+    pub id: String,
+    pub label: String,
+}
+
+/// `/help` browser. Two-pane: list on the left, full description
+/// of the highlighted command on the right. Esc / Enter closes.
+#[derive(Debug, Clone)]
+pub struct HelpBrowserState {
+    pub entries: Vec<(String, String)>,
+    pub selected: usize,
+}
+
+/// `/<cmd> ?` one-shot card. Lifetime is "until the next
+/// keystroke" — any key dismisses, except modifier-only events.
+#[derive(Debug, Clone)]
+pub struct InlineHelpState {
+    pub name: String,
+    pub description: String,
 }
 
 pub enum Mode {
@@ -110,6 +141,25 @@ pub struct App {
     /// Open completion popup, if any. `None` when the user isn't
     /// currently completing.
     pub completion: Option<CompletionMenu>,
+
+    /// `name → description` lookup mirroring the live slash
+    /// registry. Lets `/help` and `/<cmd> ?` overlays render
+    /// rich descriptions without round-tripping to the driver.
+    pub slash_descriptions: HashMap<String, String>,
+
+    /// `/sessions` interactive picker. `Some(_)` while the modal
+    /// is open. Sessions list is loaded once on open.
+    pub sessions_picker: Option<SessionsPickerState>,
+    /// `/help` interactive browser.
+    pub help_browser: Option<HelpBrowserState>,
+    /// `/<cmd> ?` one-shot inline help card. Closes on any
+    /// keypress or on Esc.
+    pub inline_help: Option<InlineHelpState>,
+    /// Set of hint ids the user has already dismissed. Persisted
+    /// across sessions in `~/.config/oli/tui-hints.json` so
+    /// onboarding tips fade once the user has used the feature
+    /// they describe.
+    pub shown_hints: HashSet<String>,
 
     /// History of submitted prompts, oldest first. Persisted to
     /// `~/.config/oli/tui-history.jsonl` between sessions.
@@ -184,6 +234,11 @@ impl Default for App {
             scroll_viewport_height: 0,
             theme: Theme::Dark,
             status: StatusModel::default(),
+            slash_descriptions: HashMap::new(),
+            sessions_picker: None,
+            help_browser: None,
+            inline_help: None,
+            shown_hints: HashSet::new(),
         }
     }
 }
@@ -210,6 +265,114 @@ impl App {
     pub fn set_slash_names(&mut self, mut names: Vec<String>) {
         names.sort();
         self.slash_names = names;
+    }
+
+    /// Replace the (name, description) lookup. Updates
+    /// `slash_names` too so completion still works without an
+    /// extra call.
+    pub fn set_slash_meta(&mut self, mut meta: Vec<(String, String)>) {
+        meta.sort_by(|a, b| a.0.cmp(&b.0));
+        self.slash_names = meta.iter().map(|(n, _)| n.clone()).collect();
+        self.slash_descriptions = meta.into_iter().collect();
+    }
+
+    pub fn set_shown_hints(&mut self, hints: HashSet<String>) {
+        self.shown_hints = hints;
+    }
+
+    /// `/help` browser opener. Snapshots the current slash list
+    /// so the modal doesn't churn when the registry changes.
+    pub fn open_help_browser(&mut self) {
+        let mut entries: Vec<(String, String)> =
+            self.slash_descriptions.clone().into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        self.help_browser = Some(HelpBrowserState {
+            entries,
+            selected: 0,
+        });
+    }
+
+    pub fn close_help_browser(&mut self) {
+        self.help_browser = None;
+    }
+
+    pub fn help_browser_navigate(&mut self, delta: i32) {
+        if let Some(b) = self.help_browser.as_mut() {
+            if b.entries.is_empty() {
+                return;
+            }
+            let n = b.entries.len() as i32;
+            let next = (b.selected as i32 + delta).rem_euclid(n);
+            b.selected = next as usize;
+        }
+    }
+
+    /// `/sessions` picker opener. `entries` is what the binary
+    /// has already gathered via `list_sessions()` — we don't
+    /// reach into the filesystem from App.
+    pub fn open_sessions_picker(&mut self, entries: Vec<SessionPickerRow>) {
+        self.sessions_picker = Some(SessionsPickerState {
+            entries,
+            selected: 0,
+        });
+    }
+
+    pub fn close_sessions_picker(&mut self) {
+        self.sessions_picker = None;
+    }
+
+    pub fn sessions_picker_navigate(&mut self, delta: i32) {
+        if let Some(p) = self.sessions_picker.as_mut() {
+            if p.entries.is_empty() {
+                return;
+            }
+            let n = p.entries.len() as i32;
+            let next = (p.selected as i32 + delta).rem_euclid(n);
+            p.selected = next as usize;
+        }
+    }
+
+    /// Pull the highlighted session id out of the picker (or
+    /// `None` if the picker is empty / closed).
+    pub fn sessions_picker_pick(&self) -> Option<String> {
+        let p = self.sessions_picker.as_ref()?;
+        p.entries.get(p.selected).map(|r| r.id.clone())
+    }
+
+    pub fn open_inline_help(&mut self, name: &str) {
+        let description = self
+            .slash_descriptions
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| format!("(no help registered for /{})", name));
+        self.inline_help = Some(InlineHelpState {
+            name: name.to_string(),
+            description,
+        });
+    }
+
+    pub fn close_inline_help(&mut self) {
+        self.inline_help = None;
+    }
+
+    /// Mark a hint id as shown — fading the corresponding tip
+    /// from future renders. Caller persists the updated set to
+    /// disk (the App stays pure).
+    pub fn mark_hint_shown(&mut self, id: &str) {
+        self.shown_hints.insert(id.to_string());
+    }
+
+    pub fn hint_is_unseen(&self, id: &str) -> bool {
+        !self.shown_hints.contains(id)
+    }
+
+    /// Any overlay open? Used by the keypress router so input
+    /// keys don't reach the TextArea while a modal is up.
+    pub fn has_overlay(&self) -> bool {
+        self.approval.is_some()
+            || self.sessions_picker.is_some()
+            || self.help_browser.is_some()
+            || self.inline_help.is_some()
     }
 
     pub fn set_status(&mut self, status: StatusModel) {
@@ -1183,6 +1346,78 @@ mod tests {
         app.scroll_manual = Some(80);
         app.note_scroll_metrics(50, 10);
         assert_eq!(app.scroll_manual, Some(50));
+    }
+
+    #[test]
+    fn help_browser_opens_with_slash_meta_sorted() {
+        let mut app = App::new();
+        app.set_slash_meta(vec![
+            ("model".into(), "swap models".into()),
+            ("clear".into(), "clear memory".into()),
+        ]);
+        app.open_help_browser();
+        let b = app.help_browser.as_ref().expect("browser open");
+        let names: Vec<&str> = b.entries.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, vec!["clear", "model"]);
+        assert_eq!(b.selected, 0);
+    }
+
+    #[test]
+    fn help_browser_navigate_wraps_around() {
+        let mut app = App::new();
+        app.set_slash_meta(vec![
+            ("a".into(), "".into()),
+            ("b".into(), "".into()),
+            ("c".into(), "".into()),
+        ]);
+        app.open_help_browser();
+        app.help_browser_navigate(-1);
+        assert_eq!(app.help_browser.as_ref().unwrap().selected, 2);
+        app.help_browser_navigate(1);
+        assert_eq!(app.help_browser.as_ref().unwrap().selected, 0);
+    }
+
+    #[test]
+    fn sessions_picker_pick_returns_selected_id() {
+        let mut app = App::new();
+        app.open_sessions_picker(vec![
+            SessionPickerRow {
+                id: "111".into(),
+                label: "111 (3m ago)".into(),
+            },
+            SessionPickerRow {
+                id: "222".into(),
+                label: "222 (1h ago)".into(),
+            },
+        ]);
+        app.sessions_picker_navigate(1);
+        assert_eq!(app.sessions_picker_pick(), Some("222".into()));
+    }
+
+    #[test]
+    fn inline_help_pulls_description_from_slash_meta() {
+        let mut app = App::new();
+        app.set_slash_meta(vec![("cost".into(), "show token usage".into())]);
+        app.open_inline_help("cost");
+        let card = app.inline_help.as_ref().expect("card open");
+        assert_eq!(card.name, "cost");
+        assert_eq!(card.description, "show token usage");
+    }
+
+    #[test]
+    fn inline_help_falls_back_when_command_unknown() {
+        let mut app = App::new();
+        app.open_inline_help("frobnicate");
+        let card = app.inline_help.as_ref().unwrap();
+        assert!(card.description.contains("no help registered"));
+    }
+
+    #[test]
+    fn hint_seen_state_round_trips_through_mark() {
+        let mut app = App::new();
+        assert!(app.hint_is_unseen("approval-allow"));
+        app.mark_hint_shown("approval-allow");
+        assert!(!app.hint_is_unseen("approval-allow"));
     }
 
     #[test]

@@ -16,7 +16,11 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::tui::app::{App, ApprovalState, Mode, ToolCardState, TranscriptItem};
+use crate::tui::app::{
+    App, ApprovalState, HelpBrowserState, InlineHelpState, Mode, SessionsPickerState,
+    ToolCardState, TranscriptItem,
+};
+use crate::tui::hints;
 use crate::tui::markdown;
 
 const TITLE: &str = "oli";
@@ -40,7 +44,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         draw_completion_popup(f, chunks[1], chunks[2], app);
     }
     if let Some(approval) = &app.approval {
-        draw_approval_modal(f, area, approval);
+        draw_approval_modal(f, area, approval, app);
+    }
+    if let Some(picker) = &app.sessions_picker {
+        draw_sessions_picker(f, area, picker);
+    }
+    if let Some(browser) = &app.help_browser {
+        draw_help_browser(f, area, browser);
+    }
+    if let Some(card) = &app.inline_help {
+        draw_inline_help(f, area, card);
     }
 }
 
@@ -49,7 +62,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 /// terminal (clamped to [10, 40] rows). `Clear` blanks the area
 /// underneath so the transcript bleed-through doesn't make the
 /// modal hard to read.
-fn draw_approval_modal(f: &mut Frame, full_area: Rect, approval: &ApprovalState) {
+fn draw_approval_modal(f: &mut Frame, full_area: Rect, approval: &ApprovalState, app: &App) {
     let modal = centered_rect(full_area, 80, 60).intersection(full_area);
     f.render_widget(Clear, modal);
 
@@ -114,14 +127,23 @@ fn draw_approval_modal(f: &mut Frame, full_area: Rect, approval: &ApprovalState)
     f.render_widget(preview, parts[1]);
 
     // Legend / single-key affordances.
-    let legend = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "  [y]es  [n]o  [a]llow this session  [d]eny session  [PgUp/Dn] scroll  [Esc] cancel",
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        ),
-    ]));
+    let mut legend_spans: Vec<Span<'static>> = vec![Span::styled(
+        "  [y]es  [n]o  [a]llow this session  [d]eny session  [PgUp/Dn] scroll  [Esc] cancel",
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )];
+    // Fading hint: highlight `a` and `d` for first-time users.
+    if app.hint_is_unseen(hints::ids::APPROVAL_ALLOW) {
+        legend_spans.insert(
+            0,
+            Span::styled(
+                "  💡 ".to_string(),
+                Style::default().fg(Color::Yellow),
+            ),
+        );
+    }
+    let legend = Paragraph::new(Line::from(legend_spans));
     f.render_widget(legend, parts[2]);
 }
 
@@ -153,6 +175,184 @@ fn diff_line_to_styled(line: &str) -> Line<'_> {
             Style::default().fg(Color::White),
         ))
     }
+}
+
+/// `/sessions` picker overlay. Centered modal with a single
+/// list pane; arrow keys navigate, Enter copies the resume
+/// command, Esc closes.
+fn draw_sessions_picker(f: &mut Frame, full_area: Rect, picker: &SessionsPickerState) {
+    let modal = centered_rect(full_area, 70, 60).intersection(full_area);
+    f.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title(Line::from(Span::styled(
+            " /sessions  (↑↓ select · Enter copy `--resume` cmd · Esc close) ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    if picker.entries.is_empty() {
+        let p = Paragraph::new(Line::from(Span::styled(
+            "  (no prior sessions yet)",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )));
+        f.render_widget(p, inner);
+        return;
+    }
+
+    // Scroll the visible window so the selection stays in view.
+    let visible = inner.height as usize;
+    let start = picker
+        .selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(picker.entries.len().saturating_sub(visible));
+    let lines: Vec<Line<'static>> = picker
+        .entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(i, row)| {
+            let selected = i == picker.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(
+                if selected {
+                    format!("▌ {}", row.label)
+                } else {
+                    format!("  {}", row.label)
+                },
+                style,
+            ))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// `/help` browser overlay. Two-pane: command list left, full
+/// description right. Arrow keys cycle, Esc / Enter closes.
+fn draw_help_browser(f: &mut Frame, full_area: Rect, browser: &HelpBrowserState) {
+    let modal = centered_rect(full_area, 80, 70).intersection(full_area);
+    f.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .title(Line::from(Span::styled(
+            " /help  (↑↓ select · Esc close) ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    if browser.entries.is_empty() {
+        let p = Paragraph::new(Line::from(Span::raw("  (no commands registered)")));
+        f.render_widget(p, inner);
+        return;
+    }
+
+    let split = Layout::horizontal([Constraint::Length(20), Constraint::Min(20)]).split(inner);
+    let list_area = split[0];
+    let detail_area = split[1];
+
+    let visible = list_area.height as usize;
+    let start = browser
+        .selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(browser.entries.len().saturating_sub(visible));
+    let list_lines: Vec<Line<'static>> = browser
+        .entries
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(i, (name, _))| {
+            let selected = i == browser.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(
+                if selected {
+                    format!("▌ /{}", name)
+                } else {
+                    format!("  /{}", name)
+                },
+                style,
+            ))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(list_lines), list_area);
+
+    if let Some((name, desc)) = browser.entries.get(browser.selected) {
+        let mut detail_lines: Vec<Line<'static>> = Vec::new();
+        detail_lines.push(Line::from(Span::styled(
+            format!("/{}", name),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+        detail_lines.push(Line::raw(""));
+        for body_line in desc.lines() {
+            detail_lines.push(Line::from(Span::styled(
+                body_line.to_string(),
+                Style::default().fg(Color::White),
+            )));
+        }
+        let p = Paragraph::new(detail_lines).wrap(Wrap { trim: false });
+        f.render_widget(p, detail_area);
+    }
+}
+
+/// `/<cmd> ?` one-shot help card. Smaller modal than the full
+/// browser; fades on the next keystroke.
+fn draw_inline_help(f: &mut Frame, full_area: Rect, card: &InlineHelpState) {
+    let modal = centered_rect(full_area, 60, 30).intersection(full_area);
+    f.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Line::from(Span::styled(
+            format!(" /{} ", card.name),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    for body_line in card.description.lines() {
+        lines.push(Line::from(Span::styled(
+            body_line.to_string(),
+            Style::default().fg(Color::White),
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "(press any key to close)".to_string(),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )));
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
 /// Centered rectangle within `r`, sized as a percentage. Clamped

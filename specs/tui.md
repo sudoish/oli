@@ -495,11 +495,11 @@ line-oriented plan; this doc supersedes it.
 | M2 | Token-gauge color thresholds                      | DONE   |
 | M3 | Mode indicator (spinner / arrow / pause / dot)    | DONE   |
 | M4 | Width-aware status collapse                       | DONE   |
-| N1 | Interactive `/sessions` picker                    | TODO   |
-| N2 | Interactive `/help` browser                       | TODO   |
-| N3 | `/<cmd> ?` inline help popup                      | TODO   |
-| N4 | First-run setup wizard                            | TODO   |
-| N5 | Fading onboarding hints                           | TODO   |
+| N1 | Interactive `/sessions` picker                    | DONE   |
+| N2 | Interactive `/help` browser                       | DONE   |
+| N3 | `/<cmd> ?` inline help popup                      | DONE   |
+| N4 | First-run setup wizard                            | PART   |
+| N5 | Fading onboarding hints                           | DONE   |
 | O1 | `/undo` rolls back last turn                      | TODO   |
 | O2 | Ctrl+E edit-and-rerun                             | TODO   |
 | O3 | Real Bash child SIGINT on Ctrl+C                  | TODO   |

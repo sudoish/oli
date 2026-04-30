@@ -25,6 +25,7 @@ mod approver;
 mod completion;
 mod driver;
 mod event;
+mod hints;
 mod history;
 mod hook;
 mod markdown;
@@ -125,13 +126,10 @@ pub async fn run(
         }
     });
 
-    // Snapshot slash names BEFORE the slashes move into the
-    // driver. The default registry's set is fixed at compile
-    // time; plugin slashes contribute their names dynamically.
-    // The TUI's completion popup uses this list. `/plugins
-    // reload` updates it via the driver-emitted SlashNamesChanged
-    // event.
-    let initial_slash_names = collect_slash_names(&plugin_slashes);
+    // Snapshot slash (name, description) pairs BEFORE the
+    // slashes move into the driver. Used by the completion
+    // popup, the `/help` browser, and `/<cmd> ?` inline help.
+    let initial_slash_meta = collect_slash_meta(&plugin_slashes);
 
     // Agent driver task: owns the agent + slash registry. Talks
     // back through the same UiEvent channel.
@@ -142,8 +140,16 @@ pub async fn run(
     // submit. Failures are silently ignored — the user gets a
     // working session even if the history file is corrupt.
     app.set_history(history::load());
-    app.set_slash_names(initial_slash_names);
+    app.set_slash_meta(initial_slash_meta);
     app.set_status(initial_status);
+    app.set_shown_hints(hints::load());
+    if !has_user_config() {
+        app.on_system_note(
+            "💡 no config found at ~/.config/oli/config.toml — create one (see specs/README.md) \
+             or `oli` will fall back to env vars."
+                .into(),
+        );
+    }
 
     guard
             .terminal_mut()
@@ -222,11 +228,28 @@ fn on_key(
     cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
     pending_approval: &PendingApproval,
 ) {
-    // Approval modal short-circuits everything else: while it's
-    // up, the user's keystrokes go to y/n/a/d/Esc and modal
-    // scroll, not to the input box.
+    // Overlay short-circuits. While any modal is up, the user's
+    // keystrokes route to it, not to the input box. Order
+    // matters: approval is the safety-critical one (a stray
+    // 'y' must not slip through to a freshly-typed prompt).
     if app.approval.is_some() {
         handle_approval_key(app, key, pending_approval);
+        return;
+    }
+    if app.sessions_picker.is_some() {
+        handle_sessions_picker_key(app, key);
+        return;
+    }
+    if app.help_browser.is_some() {
+        handle_help_browser_key(app, key);
+        return;
+    }
+    if app.inline_help.is_some() {
+        // Any keypress dismisses the card. Modifier-only events
+        // (KeyCode::Modifier) shouldn't, but crossterm collapses
+        // those into nothing on most terminals so we don't have
+        // to filter explicitly.
+        app.close_inline_help();
         return;
     }
 
@@ -296,6 +319,34 @@ fn on_key(
                 handle_copy_slash(app, arg);
                 return;
             }
+            // Trailing `?` opens the inline help overlay rather
+            // than dispatching: `/cost ?` shows the description
+            // for `/cost` without running it.
+            let trimmed = line.trim();
+            if let Some(name) = trimmed.strip_suffix(" ?") {
+                app.open_inline_help(name.trim());
+                return;
+            }
+            if let Some(name) = trimmed.strip_suffix("?") {
+                let n = name.trim();
+                if !n.is_empty() && !n.contains(char::is_whitespace) {
+                    app.open_inline_help(n);
+                    return;
+                }
+            }
+            // `/help` and `/sessions` open interactive overlays
+            // when called without args. With args they fall
+            // through to the slash registry (e.g. `/help foo`
+            // is rejected by the registry — same as today).
+            if trimmed == "help" {
+                app.open_help_browser();
+                return;
+            }
+            if trimmed == "sessions" {
+                let entries = collect_session_picker_rows();
+                app.open_sessions_picker(entries);
+                return;
+            }
             let (cancel_tx, cancel_rx) = oneshot::channel();
             app.set_cancel_sender(cancel_tx);
             let _ = cmd_tx.send(AgentCommand::Slash {
@@ -315,21 +366,71 @@ fn on_key(
     }
 }
 
-/// Names of all slash commands the driver will know about: the
-/// default set + any plugin-registered ones the binary passed in.
-/// Used to seed the completion popup's slash list.
-fn collect_slash_names(plugin_slashes: &[Box<dyn SlashCommand>]) -> Vec<String> {
-    let mut names: Vec<String> =
+/// (name, description) for every slash command the driver will
+/// know about. Used by the completion popup (names) and the
+/// `/help` / `/<cmd> ?` overlays (descriptions).
+fn collect_slash_meta(plugin_slashes: &[Box<dyn SlashCommand>]) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> =
         crate::repl::slash::SlashRegistry::default_set_with_reloader(None)
             .iter()
-            .map(|c| c.name().to_string())
+            .map(|c| (c.name().to_string(), c.description().to_string()))
             .collect();
     for s in plugin_slashes {
-        names.push(s.name().to_string());
+        out.push((s.name().to_string(), s.description().to_string()));
     }
-    names.sort();
-    names.dedup();
-    names
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.dedup_by(|a, b| a.0 == b.0);
+    out
+}
+
+/// Build the session-picker rows from disk. Newest-first by
+/// mtime; the label includes the id and a coarse age. Bound to
+/// the most recent 50 sessions so the picker doesn't paint
+/// thousands of rows on a long-running config dir.
+fn collect_session_picker_rows() -> Vec<app::SessionPickerRow> {
+    use crate::agent::memory::list_sessions;
+    let mut out: Vec<app::SessionPickerRow> = list_sessions()
+        .into_iter()
+        .map(|e| app::SessionPickerRow {
+            label: format_session_label(&e),
+            id: e.id,
+        })
+        .collect();
+    out.truncate(50);
+    out
+}
+
+fn format_session_label(e: &crate::agent::memory::SessionEntry) -> String {
+    let age = e
+        .mtime
+        .and_then(|t| t.elapsed().ok())
+        .map(|d| humanize_age(d.as_secs()))
+        .unwrap_or_else(|| "?".into());
+    format!("{}   ({} ago)", e.id, age)
+}
+
+fn humanize_age(secs: u64) -> String {
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3_600 {
+        format!("{}m", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h", secs / 3_600)
+    } else {
+        format!("{}d", secs / 86_400)
+    }
+}
+
+/// True if the user has a config file at the conventional
+/// location. Drives the first-run hint card.
+fn has_user_config() -> bool {
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")));
+    let Some(base) = base else {
+        return false;
+    };
+    base.join("oli").join("config.toml").exists()
 }
 
 /// `/copy [N]` — copy the N-th-most-recent assistant message to
@@ -468,6 +569,37 @@ fn on_mouse(app: &mut App, m: MouseEvent) {
     }
 }
 
+fn handle_sessions_picker_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    match key.code {
+        KeyCode::Up => app.sessions_picker_navigate(-1),
+        KeyCode::Down => app.sessions_picker_navigate(1),
+        KeyCode::Esc => app.close_sessions_picker(),
+        KeyCode::Enter => {
+            if let Some(id) = app.sessions_picker_pick() {
+                let cmd = format!("oli --resume {}", id);
+                write_osc52_clipboard(&cmd);
+                app.close_sessions_picker();
+                app.on_system_note(format!(
+                    "copied `{}` to clipboard — paste in a new shell to resume that session",
+                    cmd
+                ));
+            } else {
+                app.close_sessions_picker();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn handle_help_browser_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    match key.code {
+        KeyCode::Up => app.help_browser_navigate(-1),
+        KeyCode::Down => app.help_browser_navigate(1),
+        KeyCode::Esc | KeyCode::Enter => app.close_help_browser(),
+        _ => {}
+    }
+}
+
 fn handle_approval_key(
     app: &mut App,
     key: crossterm::event::KeyEvent,
@@ -496,6 +628,18 @@ fn handle_approval_key(
             let _ = tx.send(resp);
         }
         app.close_approval();
+        // Once the user has used `a` (or `d`) at least once, fade
+        // the "Press [a] to allow this session" hint from future
+        // approval modals. Persist the change so the next session
+        // doesn't keep nagging them.
+        if matches!(
+            resp,
+            ApprovalResponse::AlwaysAllow | ApprovalResponse::AlwaysDeny
+        ) && app.hint_is_unseen(hints::ids::APPROVAL_ALLOW)
+        {
+            app.mark_hint_shown(hints::ids::APPROVAL_ALLOW);
+            hints::save(&app.shown_hints);
+        }
     }
 }
 
