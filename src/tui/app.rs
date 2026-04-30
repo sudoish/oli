@@ -96,6 +96,21 @@ pub enum Mode {
     Streaming,
 }
 
+/// The exclusive set of modal overlays the TUI can have open.
+/// Only one is up at a time — pressing Esc / Enter / etc. on any
+/// of them closes that overlay before the next one can open.
+/// Completion is *not* in here: it's an in-input affordance, not
+/// modal, and lives on its own field.
+#[derive(Debug, Clone)]
+pub enum Overlay {
+    Approval(ApprovalState),
+    SessionsPicker(SessionsPickerState),
+    HelpBrowser(HelpBrowserState),
+    InlineHelp(InlineHelpState),
+    HistorySearch(HistorySearchState),
+    Wizard(crate::tui::wizard::WizardState),
+}
+
 impl Default for Mode {
     fn default() -> Self {
         Mode::Idle
@@ -139,7 +154,11 @@ pub struct App {
     pub active_assistant: Option<usize>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
     pub active_tools: HashMap<u64, usize>,
-    pub approval: Option<ApprovalState>,
+    /// The active modal overlay, if any. Mutually exclusive
+    /// across approval, sessions picker, help browser, inline
+    /// help, history search and wizard. Completion stays
+    /// separate (it's an inline affordance, not modal).
+    pub overlay: Option<Overlay>,
 
     /// Slash command names, sorted, mirroring the live registry
     /// in the driver. Updated at startup and on `/plugins reload`
@@ -154,20 +173,6 @@ pub struct App {
     /// registry. Lets `/help` and `/<cmd> ?` overlays render
     /// rich descriptions without round-tripping to the driver.
     pub slash_descriptions: HashMap<String, String>,
-
-    /// `/sessions` interactive picker. `Some(_)` while the modal
-    /// is open. Sessions list is loaded once on open.
-    pub sessions_picker: Option<SessionsPickerState>,
-    /// `/help` interactive browser.
-    pub help_browser: Option<HelpBrowserState>,
-    /// `/<cmd> ?` one-shot inline help card. Closes on any
-    /// keypress or on Esc.
-    pub inline_help: Option<InlineHelpState>,
-    /// Ctrl-R history search overlay. `Some(_)` while open.
-    pub history_search: Option<HistorySearchState>,
-    /// First-run setup wizard. `Some(_)` while the user is being
-    /// walked through provider / api-key / model selection.
-    pub wizard: Option<crate::tui::wizard::WizardState>,
     /// Set of hint ids the user has already dismissed. Persisted
     /// across sessions in `~/.config/oli/tui-hints.json` so
     /// onboarding tips fade once the user has used the feature
@@ -235,7 +240,7 @@ impl Default for App {
             active_assistant: None,
             cancel_tx: None,
             active_tools: HashMap::new(),
-            approval: None,
+            overlay: None,
             slash_names: Vec::new(),
             completion: None,
             history: Vec::new(),
@@ -248,11 +253,6 @@ impl Default for App {
             theme: Theme::Dark,
             status: StatusModel::default(),
             slash_descriptions: HashMap::new(),
-            sessions_picker: None,
-            help_browser: None,
-            inline_help: None,
-            history_search: None,
-            wizard: None,
             shown_hints: HashSet::new(),
         }
     }
@@ -290,24 +290,95 @@ impl App {
         self.shown_hints = hints;
     }
 
+    // ---------- overlay accessors ----------
+    //
+    // The overlay enum centralizes all six modal states. These
+    // typed accessors keep call sites ergonomic — most existing
+    // call sites just rename `app.approval.is_some()` to
+    // `app.approval().is_some()` and similar.
+
+    pub fn approval(&self) -> Option<&ApprovalState> {
+        match &self.overlay {
+            Some(Overlay::Approval(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn approval_mut(&mut self) -> Option<&mut ApprovalState> {
+        match &mut self.overlay {
+            Some(Overlay::Approval(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn sessions_picker(&self) -> Option<&SessionsPickerState> {
+        match &self.overlay {
+            Some(Overlay::SessionsPicker(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Read-only accessor for the active `/help` browser, if
+    /// any. Tests reach for this directly; production code uses
+    /// the render-time `match &app.overlay` instead.
+    #[cfg(test)]
+    pub fn help_browser(&self) -> Option<&HelpBrowserState> {
+        match &self.overlay {
+            Some(Overlay::HelpBrowser(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    /// Test-only accessor for the active inline-help card.
+    #[cfg(test)]
+    pub fn inline_help(&self) -> Option<&InlineHelpState> {
+        match &self.overlay {
+            Some(Overlay::InlineHelp(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn history_search(&self) -> Option<&HistorySearchState> {
+        match &self.overlay {
+            Some(Overlay::HistorySearch(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn wizard(&self) -> Option<&crate::tui::wizard::WizardState> {
+        match &self.overlay {
+            Some(Overlay::Wizard(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn wizard_mut(&mut self) -> Option<&mut crate::tui::wizard::WizardState> {
+        match &mut self.overlay {
+            Some(Overlay::Wizard(s)) => Some(s),
+            _ => None,
+        }
+    }
+
     /// `/help` browser opener. Snapshots the current slash list
     /// so the modal doesn't churn when the registry changes.
     pub fn open_help_browser(&mut self) {
         let mut entries: Vec<(String, String)> =
             self.slash_descriptions.clone().into_iter().collect();
         entries.sort_by(|a, b| a.0.cmp(&b.0));
-        self.help_browser = Some(HelpBrowserState {
+        self.overlay = Some(Overlay::HelpBrowser(HelpBrowserState {
             entries,
             selected: 0,
-        });
+        }));
     }
 
     pub fn close_help_browser(&mut self) {
-        self.help_browser = None;
+        if matches!(self.overlay, Some(Overlay::HelpBrowser(_))) {
+            self.overlay = None;
+        }
     }
 
     pub fn help_browser_navigate(&mut self, delta: i32) {
-        if let Some(b) = self.help_browser.as_mut() {
+        if let Some(Overlay::HelpBrowser(b)) = &mut self.overlay {
             if b.entries.is_empty() {
                 return;
             }
@@ -321,18 +392,20 @@ impl App {
     /// has already gathered via `list_sessions()` — we don't
     /// reach into the filesystem from App.
     pub fn open_sessions_picker(&mut self, entries: Vec<SessionPickerRow>) {
-        self.sessions_picker = Some(SessionsPickerState {
+        self.overlay = Some(Overlay::SessionsPicker(SessionsPickerState {
             entries,
             selected: 0,
-        });
+        }));
     }
 
     pub fn close_sessions_picker(&mut self) {
-        self.sessions_picker = None;
+        if matches!(self.overlay, Some(Overlay::SessionsPicker(_))) {
+            self.overlay = None;
+        }
     }
 
     pub fn sessions_picker_navigate(&mut self, delta: i32) {
-        if let Some(p) = self.sessions_picker.as_mut() {
+        if let Some(Overlay::SessionsPicker(p)) = &mut self.overlay {
             if p.entries.is_empty() {
                 return;
             }
@@ -345,64 +418,62 @@ impl App {
     /// Pull the highlighted session id out of the picker (or
     /// `None` if the picker is empty / closed).
     pub fn sessions_picker_pick(&self) -> Option<String> {
-        let p = self.sessions_picker.as_ref()?;
+        let p = self.sessions_picker()?;
         p.entries.get(p.selected).map(|r| r.id.clone())
     }
 
     pub fn open_wizard(&mut self) {
-        self.wizard = Some(crate::tui::wizard::WizardState::new());
+        self.overlay = Some(Overlay::Wizard(crate::tui::wizard::WizardState::new()));
     }
 
     pub fn close_wizard(&mut self) {
-        self.wizard = None;
+        if matches!(self.overlay, Some(Overlay::Wizard(_))) {
+            self.overlay = None;
+        }
     }
 
     pub fn open_history_search(&mut self) {
         let mut state = HistorySearchState::default();
         state.matches = self.history_search_compute_matches("");
-        self.history_search = Some(state);
+        self.overlay = Some(Overlay::HistorySearch(state));
     }
 
     pub fn close_history_search(&mut self) {
-        self.history_search = None;
+        if matches!(self.overlay, Some(Overlay::HistorySearch(_))) {
+            self.overlay = None;
+        }
     }
 
     pub fn history_search_push_char(&mut self, c: char) {
-        if self.history_search.is_none() {
+        let Some(Overlay::HistorySearch(s)) = &self.overlay else {
             return;
-        }
-        let new_query = {
-            let s = self.history_search.as_ref().unwrap();
-            let mut q = s.query.clone();
-            q.push(c);
-            q
         };
+        let mut new_query = s.query.clone();
+        new_query.push(c);
         let matches = self.history_search_compute_matches(&new_query);
-        let s = self.history_search.as_mut().unwrap();
-        s.query = new_query;
-        s.matches = matches;
-        s.selected = 0;
+        if let Some(Overlay::HistorySearch(s)) = &mut self.overlay {
+            s.query = new_query;
+            s.matches = matches;
+            s.selected = 0;
+        }
     }
 
     pub fn history_search_backspace(&mut self) {
-        if self.history_search.is_none() {
+        let Some(Overlay::HistorySearch(s)) = &self.overlay else {
             return;
-        }
-        let new_query = {
-            let s = self.history_search.as_ref().unwrap();
-            let mut q = s.query.clone();
-            q.pop();
-            q
         };
+        let mut new_query = s.query.clone();
+        new_query.pop();
         let matches = self.history_search_compute_matches(&new_query);
-        let s = self.history_search.as_mut().unwrap();
-        s.query = new_query;
-        s.matches = matches;
-        s.selected = 0;
+        if let Some(Overlay::HistorySearch(s)) = &mut self.overlay {
+            s.query = new_query;
+            s.matches = matches;
+            s.selected = 0;
+        }
     }
 
     pub fn history_search_navigate(&mut self, delta: i32) {
-        if let Some(s) = self.history_search.as_mut() {
+        if let Some(Overlay::HistorySearch(s)) = &mut self.overlay {
             if s.matches.is_empty() {
                 return;
             }
@@ -416,7 +487,7 @@ impl App {
     /// matches). Used by the Enter handler in `tui::mod` to
     /// load it into the input box.
     pub fn history_search_pick(&self) -> Option<String> {
-        let s = self.history_search.as_ref()?;
+        let s = self.history_search()?;
         let idx = *s.matches.get(s.selected)?;
         self.history.get(idx).cloned()
     }
@@ -439,14 +510,16 @@ impl App {
             .get(name)
             .cloned()
             .unwrap_or_else(|| format!("(no help registered for /{})", name));
-        self.inline_help = Some(InlineHelpState {
+        self.overlay = Some(Overlay::InlineHelp(InlineHelpState {
             name: name.to_string(),
             description,
-        });
+        }));
     }
 
     pub fn close_inline_help(&mut self) {
-        self.inline_help = None;
+        if matches!(self.overlay, Some(Overlay::InlineHelp(_))) {
+            self.overlay = None;
+        }
     }
 
     /// Mark a hint id as shown — fading the corresponding tip
@@ -983,26 +1056,28 @@ impl App {
         args: Value,
         reason: String,
     ) {
-        self.approval = Some(ApprovalState {
+        self.overlay = Some(Overlay::Approval(ApprovalState {
             preview: crate::policy::preview_for(&tool, &args),
             tool,
             reason,
             scroll: 0,
-        });
+        }));
     }
 
     pub fn close_approval(&mut self) {
-        self.approval = None;
+        if matches!(self.overlay, Some(Overlay::Approval(_))) {
+            self.overlay = None;
+        }
     }
 
     pub fn approval_scroll_up(&mut self) {
-        if let Some(a) = self.approval.as_mut() {
+        if let Some(a) = self.approval_mut() {
             a.scroll = a.scroll.saturating_sub(5);
         }
     }
 
     pub fn approval_scroll_down(&mut self) {
-        if let Some(a) = self.approval.as_mut() {
+        if let Some(a) = self.approval_mut() {
             a.scroll = a.scroll.saturating_add(5);
         }
     }
@@ -1298,7 +1373,7 @@ mod tests {
         let mut app = App::new();
         let args = serde_json::json!({"file_path": "src/x.rs"});
         app.on_approval_requested("Edit".into(), args, "edit src/x.rs".into());
-        let approval = app.approval.expect("modal should be set");
+        let approval = app.approval().expect("modal should be set");
         assert_eq!(approval.tool, "Edit");
         assert!(approval.preview.contains("file: src/x.rs"));
     }
@@ -1312,7 +1387,7 @@ mod tests {
             "r".into(),
         );
         app.close_approval();
-        assert!(app.approval.is_none());
+        assert!(app.approval().is_none());
     }
 
     #[test]
@@ -1462,7 +1537,7 @@ mod tests {
             ("clear".into(), "clear memory".into()),
         ]);
         app.open_help_browser();
-        let b = app.help_browser.as_ref().expect("browser open");
+        let b = app.help_browser().expect("browser open");
         let names: Vec<&str> = b.entries.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, vec!["clear", "model"]);
         assert_eq!(b.selected, 0);
@@ -1478,9 +1553,9 @@ mod tests {
         ]);
         app.open_help_browser();
         app.help_browser_navigate(-1);
-        assert_eq!(app.help_browser.as_ref().unwrap().selected, 2);
+        assert_eq!(app.help_browser().unwrap().selected, 2);
         app.help_browser_navigate(1);
-        assert_eq!(app.help_browser.as_ref().unwrap().selected, 0);
+        assert_eq!(app.help_browser().unwrap().selected, 0);
     }
 
     #[test]
@@ -1505,7 +1580,7 @@ mod tests {
         let mut app = App::new();
         app.set_slash_meta(vec![("cost".into(), "show token usage".into())]);
         app.open_inline_help("cost");
-        let card = app.inline_help.as_ref().expect("card open");
+        let card = app.inline_help().expect("card open");
         assert_eq!(card.name, "cost");
         assert_eq!(card.description, "show token usage");
     }
@@ -1514,7 +1589,7 @@ mod tests {
     fn inline_help_falls_back_when_command_unknown() {
         let mut app = App::new();
         app.open_inline_help("frobnicate");
-        let card = app.inline_help.as_ref().unwrap();
+        let card = app.inline_help().unwrap();
         assert!(card.description.contains("no help registered"));
     }
 
@@ -1575,7 +1650,7 @@ mod tests {
         let mut app = App::new();
         app.set_history(vec!["one".into(), "two".into(), "three".into()]);
         app.open_history_search();
-        let s = app.history_search.as_ref().unwrap();
+        let s = app.history_search().unwrap();
         // newest-first: indices 2, 1, 0
         assert_eq!(s.matches, vec![2, 1, 0]);
         assert_eq!(s.selected, 0);
@@ -1593,7 +1668,7 @@ mod tests {
         for c in "Cargo".chars() {
             app.history_search_push_char(c);
         }
-        let s = app.history_search.as_ref().unwrap();
+        let s = app.history_search().unwrap();
         // Only the second entry matches `cargo`. Index 1.
         assert_eq!(s.matches, vec![1]);
     }
@@ -1604,9 +1679,9 @@ mod tests {
         app.set_history(vec!["a".into(), "b".into(), "c".into()]);
         app.open_history_search();
         app.history_search_navigate(-1);
-        assert_eq!(app.history_search.as_ref().unwrap().selected, 2);
+        assert_eq!(app.history_search().unwrap().selected, 2);
         app.history_search_navigate(1);
-        assert_eq!(app.history_search.as_ref().unwrap().selected, 0);
+        assert_eq!(app.history_search().unwrap().selected, 0);
     }
 
     #[test]
@@ -1627,18 +1702,12 @@ mod tests {
         app.history_search_push_char('l');
         app.history_search_push_char('p');
         // Two matches: alphabet (idx 1), alpha (idx 0).
-        assert_eq!(
-            app.history_search.as_ref().unwrap().matches,
-            vec![1, 0]
-        );
+        assert_eq!(app.history_search().unwrap().matches, vec![1, 0]);
         app.history_search_backspace();
         app.history_search_backspace();
         app.history_search_backspace();
         // Empty query → all entries newest-first.
-        assert_eq!(
-            app.history_search.as_ref().unwrap().matches,
-            vec![2, 1, 0]
-        );
+        assert_eq!(app.history_search().unwrap().matches, vec![2, 1, 0]);
     }
 
     #[test]

@@ -44,23 +44,15 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     if app.completion.is_some() {
         draw_completion_popup(f, chunks[1], chunks[2], app);
     }
-    if let Some(approval) = &app.approval {
-        draw_approval_modal(f, area, approval, app);
-    }
-    if let Some(picker) = &app.sessions_picker {
-        draw_sessions_picker(f, area, picker);
-    }
-    if let Some(browser) = &app.help_browser {
-        draw_help_browser(f, area, browser);
-    }
-    if let Some(card) = &app.inline_help {
-        draw_inline_help(f, area, card);
-    }
-    if let Some(search) = &app.history_search {
-        draw_history_search(f, area, search, app);
-    }
-    if let Some(w) = &app.wizard {
-        draw_wizard(f, area, w);
+    use crate::tui::app::Overlay;
+    match &app.overlay {
+        Some(Overlay::Approval(s)) => draw_approval_modal(f, area, s, app),
+        Some(Overlay::SessionsPicker(s)) => draw_sessions_picker(f, area, s),
+        Some(Overlay::HelpBrowser(s)) => draw_help_browser(f, area, s),
+        Some(Overlay::InlineHelp(s)) => draw_inline_help(f, area, s),
+        Some(Overlay::HistorySearch(s)) => draw_history_search(f, area, s, app),
+        Some(Overlay::Wizard(s)) => draw_wizard(f, area, s),
+        None => {}
     }
 }
 
@@ -842,7 +834,7 @@ fn format_count(n: u32) -> String {
 /// otherwise renders the agent's mode with a spinner / arrow
 /// / dot / pause glyph.
 fn render_mode_indicator(app: &App) -> Vec<Span<'static>> {
-    if app.approval.is_some() {
+    if app.approval().is_some() {
         return vec![Span::styled(
             " ⏸ awaiting approval ".to_string(),
             Style::default()

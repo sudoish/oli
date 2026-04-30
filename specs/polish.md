@@ -333,7 +333,7 @@ boundary.
 
 | ID | Item                                              | Status |
 | -- | ------------------------------------------------- | ------ |
-| P1 | Zero build warnings                               | TODO   |
+| P1 | Zero build warnings                               | DONE   |
 | P2 | Overlay sum type on App                           | TODO   |
 | P3 | Split tui/app.rs and tui/ui.rs                    | TODO   |
 | Q1 | Extract `lib.rs`                                  | TODO   |

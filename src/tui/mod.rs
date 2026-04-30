@@ -253,35 +253,39 @@ fn on_key(
 ) {
     // Overlay short-circuits. While any modal is up, the user's
     // keystrokes route to it, not to the input box. Order
-    // matters: approval is the safety-critical one (a stray
-    // 'y' must not slip through to a freshly-typed prompt).
-    if app.approval.is_some() {
-        handle_approval_key(app, key, pending_approval);
-        return;
-    }
-    if app.sessions_picker.is_some() {
-        handle_sessions_picker_key(app, key);
-        return;
-    }
-    if app.help_browser.is_some() {
-        handle_help_browser_key(app, key);
-        return;
-    }
-    if app.inline_help.is_some() {
-        // Any keypress dismisses the card. Modifier-only events
-        // (KeyCode::Modifier) shouldn't, but crossterm collapses
-        // those into nothing on most terminals so we don't have
-        // to filter explicitly.
-        app.close_inline_help();
-        return;
-    }
-    if app.history_search.is_some() {
-        handle_history_search_key(app, key);
-        return;
-    }
-    if app.wizard.is_some() {
-        handle_wizard_key(app, key);
-        return;
+    // matters for the safety-critical approval path: a stray
+    // 'y' must not slip through to a freshly-typed prompt.
+    use crate::tui::app::Overlay;
+    match &app.overlay {
+        Some(Overlay::Approval(_)) => {
+            handle_approval_key(app, key, pending_approval);
+            return;
+        }
+        Some(Overlay::SessionsPicker(_)) => {
+            handle_sessions_picker_key(app, key);
+            return;
+        }
+        Some(Overlay::HelpBrowser(_)) => {
+            handle_help_browser_key(app, key);
+            return;
+        }
+        Some(Overlay::InlineHelp(_)) => {
+            // Any keypress dismisses the card. Modifier-only
+            // events (KeyCode::Modifier) shouldn't, but
+            // crossterm collapses those into nothing on most
+            // terminals so we don't have to filter explicitly.
+            app.close_inline_help();
+            return;
+        }
+        Some(Overlay::HistorySearch(_)) => {
+            handle_history_search_key(app, key);
+            return;
+        }
+        Some(Overlay::Wizard(_)) => {
+            handle_wizard_key(app, key);
+            return;
+        }
+        None => {}
     }
 
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -654,7 +658,7 @@ fn handle_sessions_picker_key(app: &mut App, key: crossterm::event::KeyEvent) {
 fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
     use crate::tui::wizard::WizardStep;
 
-    let step = app.wizard.as_ref().map(|w| w.step.clone());
+    let step = app.wizard().map(|w| w.step.clone());
     let Some(step) = step else { return };
 
     match step {
@@ -668,14 +672,14 @@ fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 );
             }
             KeyCode::Enter => {
-                if let Some(w) = app.wizard.as_mut() {
+                if let Some(w) = app.wizard_mut() {
                     w.advance();
                 }
             }
             _ => {}
         },
         WizardStep::PickProvider => {
-            let w = app.wizard.as_mut().unwrap();
+            let w = app.wizard_mut().unwrap();
             match key.code {
                 KeyCode::Esc => app.close_wizard(),
                 KeyCode::Up => w.navigate_provider(-1),
@@ -685,7 +689,7 @@ fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
         WizardStep::EnterApiKey => {
-            let w = app.wizard.as_mut().unwrap();
+            let w = app.wizard_mut().unwrap();
             match key.code {
                 KeyCode::Esc => app.close_wizard(),
                 KeyCode::Backspace => {
@@ -706,7 +710,7 @@ fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
             KeyCode::Esc => app.close_wizard(),
             KeyCode::Enter => save_wizard(app),
             KeyCode::Backspace => {
-                if let Some(w) = app.wizard.as_mut() {
+                if let Some(w) = app.wizard_mut() {
                     w.step_back();
                 }
             }
@@ -722,7 +726,7 @@ fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
 }
 
 fn save_wizard(app: &mut App) {
-    let Some(w) = app.wizard.as_mut() else {
+    let Some(w) = app.wizard_mut() else {
         return;
     };
     let body = w.render_toml();
