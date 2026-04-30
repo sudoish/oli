@@ -1,12 +1,14 @@
 //! `App` — in-memory state of one TUI session.
 //!
-//! Phase F is intentionally small: a transcript of items, an input
-//! buffer, a quit flag. Phase G adds modes (Idle / Thinking /
-//! Streaming / AwaitingApproval) and the active-assistant /
-//! tool-card bookkeeping; Phase K swaps the input for `tui-textarea`.
-//! The shape here is the minimum that makes echo-mode work.
+//! Phase F was echo-only. Phase G introduces real modes (Idle /
+//! Thinking / Streaming) tracked alongside the active assistant
+//! item, plus a cancel-sender slot the UI hands to the driver per
+//! command.
+
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use tokio::sync::oneshot;
 
 #[derive(Default)]
 pub struct App {
@@ -21,21 +23,72 @@ pub struct App {
     /// rustyline.
     pub cursor: usize,
     /// Set true when the user has asked to leave (Ctrl+C / Ctrl+D
-    /// / `:q`). The render loop checks this after every event.
+    /// / `:q` / driver-side `Quit`). The render loop checks this
+    /// after every event.
     pub should_quit: bool,
+    /// What's the loop doing right now. Drives the "ready / thinking
+    /// / streaming" indicator and gates new submissions.
+    pub mode: Mode,
+    /// Index in `transcript` of the assistant message we're
+    /// appending streamed chunks to. None when we're not in a
+    /// streaming turn.
+    pub active_assistant: Option<usize>,
+    /// Cancel sender for the in-flight driver command. UI uses it
+    /// to interrupt on Ctrl+C while busy. None when Idle.
+    pub cancel_tx: Option<oneshot::Sender<()>>,
+}
+
+pub enum Mode {
+    Idle,
+    Thinking { since: Instant },
+    Streaming,
+}
+
+impl Default for Mode {
+    fn default() -> Self {
+        Mode::Idle
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum TranscriptItem {
-    UserPrompt { body: String },
-    System { body: String },
+    UserPrompt {
+        body: String,
+    },
+    /// An assistant message. `done` flips true once the turn
+    /// finishes so the UI can stop rendering the streaming
+    /// indicator next to it.
+    Assistant {
+        body: String,
+        done: bool,
+    },
+    /// System / harness notice (slash output, cancel marker,
+    /// errors). Not part of the model's transcript.
+    System {
+        body: String,
+    },
+}
+
+/// Thing the App wants the outside loop to do for it. Returning
+/// these from `submit()` keeps the App pure — no `tokio::spawn`,
+/// no channels — and the driver-spawn glue lives in `tui::run`.
+#[derive(Debug)]
+pub enum SubmitAction {
+    /// User submitted a prompt; spawn an agent run.
+    Prompt(String),
+    /// User submitted a slash; dispatch through the slash registry.
+    Slash(String),
+    /// Submission was effectively a no-op (whitespace, `:q` already
+    /// handled, etc).
+    None,
 }
 
 impl App {
     pub fn new() -> Self {
         let mut app = Self::default();
         app.transcript.push(TranscriptItem::System {
-            body: "oli ready. type a message and press Enter. Ctrl+D to exit.".into(),
+            body: "oli ready. type a message and press Enter. /help for commands, Ctrl+D to exit."
+                .into(),
         });
         app
     }
@@ -44,16 +97,20 @@ impl App {
         self.should_quit = true;
     }
 
-    /// Apply a keypress to the input area / dispatch helpers.
-    /// Returns nothing; mutations land on `self`. Intentionally a
-    /// flat match so each new key is an obvious one-liner.
-    pub fn on_key(&mut self, key: KeyEvent) {
+    pub fn is_busy(&self) -> bool {
+        !matches!(self.mode, Mode::Idle)
+    }
+
+    /// Reaction to a keypress. Keystrokes that should turn into
+    /// driver commands (Enter on a non-empty line) come back via
+    /// `SubmitAction`; the caller fires the channel.
+    pub fn on_key(&mut self, key: KeyEvent) -> SubmitAction {
         match key.code {
-            KeyCode::Enter => self.submit(),
+            KeyCode::Enter => return self.submit(),
             KeyCode::Esc => {
-                // ESC clears the input box without exiting. A
-                // double-ESC could exit later; for now ESC is just
-                // a "scrub the line" shortcut.
+                // ESC clears the input box without exiting. While
+                // busy, ESC does nothing — the caller handles
+                // cancel via Ctrl+C.
                 self.input.clear();
                 self.cursor = 0;
             }
@@ -83,45 +140,139 @@ impl App {
             KeyCode::Home => self.cursor = 0,
             KeyCode::End => self.cursor = self.input.len(),
             KeyCode::Char(c) => {
-                // Ignore Ctrl+<letter> — those are global shortcuts
-                // handled in `tui::handle_event`. We let plain
-                // Shift through (it's just the uppercase char).
                 if key.modifiers.contains(KeyModifiers::CONTROL) {
-                    return;
+                    return SubmitAction::None;
                 }
                 self.input.insert(self.cursor, c);
                 self.cursor += c.len_utf8();
             }
             _ => {}
         }
+        SubmitAction::None
     }
 
-    /// Take the current input, push it as a `UserPrompt` transcript
-    /// item, and clear the buffer. Phase G: also kicks off an
-    /// agent task. Phase F: pure echo.
-    fn submit(&mut self) {
+    fn submit(&mut self) -> SubmitAction {
+        // Don't accept new submissions while a turn is in flight.
+        // The render layer hides the input cursor in busy modes
+        // anyway; this is a belt-and-suspenders gate.
+        if self.is_busy() {
+            return SubmitAction::None;
+        }
         let trimmed = self.input.trim();
         if trimmed.is_empty() {
-            return;
+            return SubmitAction::None;
         }
         let body = trimmed.to_string();
+        self.input.clear();
+        self.cursor = 0;
+
         // `:q` is a vim-style escape hatch alongside Ctrl+D for
-        // muscle memory. Slash-`/exit` joins the family in Phase G
-        // (it routes through the slash registry).
+        // muscle memory. `/exit` routes through the slash
+        // registry and lands as a SubmitAction::Slash.
         if body == ":q" {
             self.request_quit();
-            return;
+            return SubmitAction::None;
+        }
+        if let Some(rest) = body.strip_prefix('/') {
+            // Don't push a transcript item for slash commands —
+            // their output is what the user wants to see, not the
+            // command itself echoed back.
+            return SubmitAction::Slash(rest.to_string());
         }
         self.transcript
             .push(TranscriptItem::UserPrompt { body: body.clone() });
-        // Phase F echoes; Phase G replaces this with the agent
-        // call. The `(echo)` marker is a placeholder so Phase F
-        // demos visibly.
-        self.transcript.push(TranscriptItem::System {
-            body: format!("(echo) {}", body),
+        SubmitAction::Prompt(body)
+    }
+
+    // ----- Driver-side event handlers -----
+
+    pub fn on_turn_started(&mut self) {
+        self.mode = Mode::Thinking {
+            since: Instant::now(),
+        };
+        // Pre-create the assistant transcript item so the user
+        // sees a slot for the response right away.
+        self.transcript.push(TranscriptItem::Assistant {
+            body: String::new(),
+            done: false,
         });
-        self.input.clear();
-        self.cursor = 0;
+        self.active_assistant = Some(self.transcript.len() - 1);
+    }
+
+    pub fn on_content_chunk(&mut self, chunk: &str) {
+        if matches!(self.mode, Mode::Thinking { .. }) {
+            self.mode = Mode::Streaming;
+        }
+        if let Some(idx) = self.active_assistant {
+            if let Some(TranscriptItem::Assistant { body, .. }) = self.transcript.get_mut(idx) {
+                body.push_str(chunk);
+            }
+        }
+    }
+
+    pub fn on_turn_finished(&mut self, _final_content: &str) {
+        // The chunks already populated the assistant body; we
+        // ignore `final_content` here. (We keep the parameter so
+        // future agents that emit a non-streaming summary at the
+        // end can replace the body if they want.)
+        if let Some(idx) = self.active_assistant.take() {
+            if let Some(TranscriptItem::Assistant { done, .. }) = self.transcript.get_mut(idx) {
+                *done = true;
+            }
+        }
+        self.mode = Mode::Idle;
+        self.cancel_tx = None;
+    }
+
+    pub fn on_turn_error(&mut self, msg: &str) {
+        if let Some(idx) = self.active_assistant.take() {
+            if let Some(TranscriptItem::Assistant { done, body, .. }) =
+                self.transcript.get_mut(idx)
+            {
+                if body.is_empty() {
+                    *body = format!("(error: {})", msg);
+                }
+                *done = true;
+            }
+        }
+        self.transcript.push(TranscriptItem::System {
+            body: format!("error: {}", msg),
+        });
+        self.mode = Mode::Idle;
+        self.cancel_tx = None;
+    }
+
+    pub fn on_turn_cancelled(&mut self) {
+        if let Some(idx) = self.active_assistant.take() {
+            if let Some(TranscriptItem::Assistant { done, body, .. }) =
+                self.transcript.get_mut(idx)
+            {
+                if body.is_empty() {
+                    *body = "(cancelled before any output)".into();
+                }
+                *done = true;
+            }
+        }
+        self.transcript.push(TranscriptItem::System {
+            body: "(cancelled)".into(),
+        });
+        self.mode = Mode::Idle;
+        self.cancel_tx = None;
+    }
+
+    pub fn on_system_note(&mut self, body: String) {
+        self.transcript.push(TranscriptItem::System { body });
+    }
+
+    /// Take the cancel sender out of the App so the caller can
+    /// signal cancel. Subsequent calls return None. Used by Ctrl+C
+    /// while busy.
+    pub fn take_cancel_sender(&mut self) -> Option<oneshot::Sender<()>> {
+        self.cancel_tx.take()
+    }
+
+    pub fn set_cancel_sender(&mut self, tx: oneshot::Sender<()>) {
+        self.cancel_tx = Some(tx);
     }
 }
 
@@ -157,12 +308,16 @@ mod tests {
         KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL)
     }
 
+    fn type_str(app: &mut App, s: &str) {
+        for c in s.chars() {
+            app.on_key(key(KeyCode::Char(c)));
+        }
+    }
+
     #[test]
     fn typing_appends_to_input_and_moves_cursor() {
         let mut app = App::new();
-        for c in "hello".chars() {
-            app.on_key(key(KeyCode::Char(c)));
-        }
+        type_str(&mut app, "hello");
         assert_eq!(app.input, "hello");
         assert_eq!(app.cursor, 5);
     }
@@ -170,9 +325,7 @@ mod tests {
     #[test]
     fn backspace_removes_previous_char() {
         let mut app = App::new();
-        for c in "hi".chars() {
-            app.on_key(key(KeyCode::Char(c)));
-        }
+        type_str(&mut app, "hi");
         app.on_key(key(KeyCode::Backspace));
         assert_eq!(app.input, "h");
         assert_eq!(app.cursor, 1);
@@ -181,9 +334,7 @@ mod tests {
     #[test]
     fn left_right_home_end_navigate_cursor() {
         let mut app = App::new();
-        for c in "abc".chars() {
-            app.on_key(key(KeyCode::Char(c)));
-        }
+        type_str(&mut app, "abc");
         app.on_key(key(KeyCode::Home));
         assert_eq!(app.cursor, 0);
         app.on_key(key(KeyCode::Right));
@@ -195,17 +346,14 @@ mod tests {
     }
 
     #[test]
-    fn enter_submits_into_transcript_and_clears_input() {
+    fn enter_on_plain_text_returns_prompt_action_and_pushes_user_item() {
         let mut app = App::new();
         let starting_items = app.transcript.len();
-        for c in "hello".chars() {
-            app.on_key(key(KeyCode::Char(c)));
-        }
-        app.on_key(key(KeyCode::Enter));
+        type_str(&mut app, "hello");
+        let action = app.on_key(key(KeyCode::Enter));
+        assert!(matches!(action, SubmitAction::Prompt(ref body) if body == "hello"));
         assert!(app.input.is_empty());
-        assert_eq!(app.cursor, 0);
-        // user prompt + echo system item.
-        assert_eq!(app.transcript.len(), starting_items + 2);
+        assert_eq!(app.transcript.len(), starting_items + 1);
         match &app.transcript[starting_items] {
             TranscriptItem::UserPrompt { body } => assert_eq!(body, "hello"),
             other => panic!("expected UserPrompt, got {:?}", other),
@@ -213,22 +361,31 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_slash_returns_slash_action_without_pushing_user_item() {
+        let mut app = App::new();
+        let starting_items = app.transcript.len();
+        type_str(&mut app, "/help");
+        let action = app.on_key(key(KeyCode::Enter));
+        assert!(matches!(action, SubmitAction::Slash(ref body) if body == "help"));
+        // Slash invocations don't get echoed as user prompts; the
+        // command's output (a SystemNote) is what the user sees.
+        assert_eq!(app.transcript.len(), starting_items);
+    }
+
+    #[test]
     fn empty_or_whitespace_submission_is_a_noop() {
         let mut app = App::new();
         let starting_items = app.transcript.len();
-        for c in "   ".chars() {
-            app.on_key(key(KeyCode::Char(c)));
-        }
-        app.on_key(key(KeyCode::Enter));
+        type_str(&mut app, "   ");
+        let action = app.on_key(key(KeyCode::Enter));
+        assert!(matches!(action, SubmitAction::None));
         assert_eq!(app.transcript.len(), starting_items);
     }
 
     #[test]
     fn esc_clears_input_without_quitting() {
         let mut app = App::new();
-        for c in "draft".chars() {
-            app.on_key(key(KeyCode::Char(c)));
-        }
+        type_str(&mut app, "draft");
         app.on_key(key(KeyCode::Esc));
         assert!(app.input.is_empty());
         assert!(!app.should_quit);
@@ -237,17 +394,13 @@ mod tests {
     #[test]
     fn colon_q_submission_quits() {
         let mut app = App::new();
-        for c in ":q".chars() {
-            app.on_key(key(KeyCode::Char(c)));
-        }
+        type_str(&mut app, ":q");
         app.on_key(key(KeyCode::Enter));
         assert!(app.should_quit);
     }
 
     #[test]
     fn ctrl_letters_are_ignored_in_the_input_box() {
-        // Global Ctrl+C / Ctrl+D are handled at the tui::run
-        // level; the App's on_key shouldn't insert their letters.
         let mut app = App::new();
         app.on_key(ctrl('c'));
         app.on_key(ctrl('d'));
@@ -257,14 +410,84 @@ mod tests {
     #[test]
     fn unicode_typing_and_backspace_respect_char_boundaries() {
         let mut app = App::new();
-        for c in "café".chars() {
-            app.on_key(key(KeyCode::Char(c)));
-        }
+        type_str(&mut app, "café");
         assert_eq!(app.input, "café");
-        // `é` is 2 bytes in UTF-8; cursor should be 5.
         assert_eq!(app.cursor, 5);
         app.on_key(key(KeyCode::Backspace));
         assert_eq!(app.input, "caf");
         assert_eq!(app.cursor, 3);
+    }
+
+    #[test]
+    fn streaming_lifecycle_appends_chunks_to_active_assistant_item() {
+        let mut app = App::new();
+        let prior = app.transcript.len();
+        app.on_turn_started();
+        // Created an empty Assistant slot; mode flipped to Thinking.
+        assert_eq!(app.transcript.len(), prior + 1);
+        assert!(matches!(app.mode, Mode::Thinking { .. }));
+        assert!(app.active_assistant.is_some());
+
+        app.on_content_chunk("hello");
+        assert!(matches!(app.mode, Mode::Streaming));
+        match &app.transcript[prior] {
+            TranscriptItem::Assistant { body, done } => {
+                assert_eq!(body, "hello");
+                assert!(!*done);
+            }
+            _ => panic!("expected Assistant item"),
+        }
+        app.on_content_chunk(" world");
+        match &app.transcript[prior] {
+            TranscriptItem::Assistant { body, .. } => assert_eq!(body, "hello world"),
+            _ => panic!(),
+        }
+
+        app.on_turn_finished("hello world");
+        match &app.transcript[prior] {
+            TranscriptItem::Assistant { done, .. } => assert!(*done),
+            _ => panic!(),
+        }
+        assert!(matches!(app.mode, Mode::Idle));
+        assert!(app.active_assistant.is_none());
+    }
+
+    #[test]
+    fn turn_cancelled_marks_assistant_done_and_pushes_marker() {
+        let mut app = App::new();
+        app.on_turn_started();
+        app.on_content_chunk("partial...");
+        app.on_turn_cancelled();
+        assert!(matches!(app.mode, Mode::Idle));
+        // Last item is the cancellation marker.
+        match app.transcript.last().unwrap() {
+            TranscriptItem::System { body } => assert!(body.contains("cancelled")),
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn turn_error_records_message_and_returns_to_idle() {
+        let mut app = App::new();
+        app.on_turn_started();
+        app.on_turn_error("provider exploded");
+        assert!(matches!(app.mode, Mode::Idle));
+        match app.transcript.last().unwrap() {
+            TranscriptItem::System { body } => {
+                assert!(body.contains("provider exploded"));
+            }
+            _ => panic!(),
+        }
+    }
+
+    #[test]
+    fn submitting_while_busy_returns_none_and_keeps_input() {
+        let mut app = App::new();
+        app.on_turn_started(); // simulate "thinking"
+        type_str(&mut app, "hello");
+        let action = app.on_key(key(KeyCode::Enter));
+        assert!(matches!(action, SubmitAction::None));
+        // Input was not cleared because submission was rejected.
+        assert_eq!(app.input, "hello");
     }
 }

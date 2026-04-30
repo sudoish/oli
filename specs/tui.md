@@ -465,11 +465,11 @@ line-oriented plan; this doc supersedes it.
 | F4 | Echo loop (input → transcript)                    | DONE   |
 | F5 | Quit / cancel keybindings                         | DONE   |
 | F6 | `oli --plain` fallback to line REPL               | DONE   |
-| G1 | Streaming sink → UI events                        | TODO   |
-| G2 | Idle / Thinking / Streaming mode transitions     | TODO   |
-| G3 | Slash command dispatch                            | TODO   |
-| G4 | Cancel mid-stream                                 | TODO   |
-| G5 | `SlashOutcome::Rebuild` plumbed through           | TODO   |
+| G1 | Streaming sink → UI events                        | DONE   |
+| G2 | Idle / Thinking / Streaming mode transitions     | DONE   |
+| G3 | Slash command dispatch                            | DONE   |
+| G4 | Cancel mid-stream                                 | DONE   |
+| G5 | `SlashOutcome::Rebuild` plumbed through           | DONE   |
 | H1 | Hook bridge: PreToolUse / PostToolUse → UiEvent   | TODO   |
 | H2 | Tool-card widget with spinner + timing            | TODO   |
 | H3 | Cards interleave with assistant content           | TODO   |

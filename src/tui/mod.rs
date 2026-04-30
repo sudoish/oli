@@ -1,25 +1,27 @@
 //! TUI front-end. Default for `oli` when stdin/stdout are TTYs and
 //! `--plain` is not set. Falls back to `crate::repl::run` (the
 //! rustyline REPL) otherwise. See `specs/tui.md` for the full
-//! roadmap; Phase F is "skeleton + echo loop + plain fallback."
+//! roadmap.
 //!
-//! ## What lives here (Phase F)
+//! Architecture (Phases F–G):
 //!
-//! - `App` — the in-memory state of one TUI session.
-//! - `event::UiEvent` — the single channel feeding the render loop.
-//! - `terminal::TerminalGuard` — alt-screen + raw mode lifecycle,
-//!   restored on Drop so a panic doesn't leave the user's terminal
-//!   in a broken state.
-//! - `ui::draw` — the per-frame render fn.
+//! - The **render task** is `tui::run`'s outer loop. It owns the
+//!   `App` state and the `Terminal` and processes one `UiEvent`
+//!   per iteration, then redraws.
+//! - The **input task** wraps `crossterm::event::EventStream`
+//!   into `UiEvent::Key` / `UiEvent::Resize` and pushes onto the
+//!   shared mpsc channel.
+//! - The **agent driver task** owns the `Agent` and the
+//!   `SlashRegistry`. It receives `AgentCommand`s from the render
+//!   task and pushes `TurnStarted` / `ContentChunk` / `TurnFinished`
+//!   / `SystemNote` / `Quit` back through the same `UiEvent`
+//!   channel.
 //!
-//! ## What's not here yet
-//!
-//! - Agent integration (Phase G): the input box accepts text and
-//!   echoes it into the transcript; nothing reaches `Agent::run`
-//!   yet.
-//! - Tool cards, approval modal, markdown, completion (Phases H–N).
+//! One mpsc channel funnels all events; the driver and input tasks
+//! are independent producers. The render task is the only consumer.
 
 mod app;
+mod driver;
 mod event;
 mod terminal;
 mod ui;
@@ -31,21 +33,17 @@ use std::time::Duration;
 
 use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures::StreamExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::Agent;
 use crate::error::{AgentError, Result};
 use crate::plugins::PluginReloader;
 use crate::repl::slash::SlashCommand;
+use crate::tui::app::{Mode, SubmitAction};
+use crate::tui::driver::AgentCommand;
 use crate::tui::event::UiEvent;
 use crate::tui::terminal::TerminalGuard;
 
-/// Drive a TUI session against `agent` until the user exits.
-///
-/// Phase F is echo-only: the agent argument is taken so the
-/// signature matches `repl::run`, but no agent calls are made yet.
-/// Phase G wires the agent into the event loop.
-#[allow(unused_variables)] // Phase F: agent / slashes / reloader land in Phase G.
 pub async fn run(
     agent: Agent,
     plugin_slashes: Vec<Box<dyn SlashCommand>>,
@@ -56,18 +54,14 @@ pub async fn run(
 
     let (tx, mut rx) = mpsc::unbounded_channel::<UiEvent>();
 
-    // Spawn an input task that translates crossterm events into our
-    // `UiEvent`. Lives until the channel is dropped (i.e. until
-    // `run` returns and `tx` goes out of scope after we drop the
-    // last clone).
+    // Input task: lives until the channel is dropped (i.e. until
+    // we drop the last `tx` after the loop exits).
     let input_tx = tx.clone();
     let input_handle = tokio::spawn(async move {
         let mut events = EventStream::new();
         while let Some(Ok(ev)) = events.next().await {
             match ev {
                 CtEvent::Key(k) => {
-                    // crossterm fires Press AND Release on Windows;
-                    // we only care about Press to avoid double-firing.
                     if k.kind != KeyEventKind::Release
                         && input_tx.send(UiEvent::Key(k)).is_err()
                     {
@@ -84,72 +78,119 @@ pub async fn run(
         }
     });
 
-    let mut app = App::new();
+    // Agent driver task: owns the agent + slash registry. Talks
+    // back through the same UiEvent channel.
+    let (cmd_tx, driver_handle) = driver::spawn(agent, plugin_slashes, reloader, tx.clone());
 
-    // Initial paint so the user sees the shell before the first
-    // event arrives.
+    let mut app = App::new();
     guard.terminal_mut().draw(|f| ui::draw(f, &app)).map_err(io_err)?;
 
-    // The render loop: drain events, mutate state, redraw. We cap
-    // the redraw rate by coalescing — if multiple events arrive
-    // between draws we drain them all before the next paint.
     let frame_budget = Duration::from_millis(16); // ~60fps ceiling
     loop {
-        // Block for the next event, but with a short timeout so a
-        // very chatty stream of resizes / keys doesn't block out
-        // an explicit `should_quit` set elsewhere.
         let first = match tokio::time::timeout(frame_budget, rx.recv()).await {
             Ok(Some(ev)) => Some(ev),
-            Ok(None) => break, // all senders dropped
-            Err(_) => None,    // timeout — fall through to redraw if needed
+            Ok(None) => break, // all senders dropped (shouldn't happen here)
+            Err(_) => None,
         };
-
         if let Some(ev) = first {
-            handle_event(&mut app, ev);
+            handle_event(&mut app, ev, &cmd_tx);
         }
-        // Drain any further events that arrived while we were
-        // handling the first — coalesces bursts so we redraw once.
         while let Ok(ev) = rx.try_recv() {
-            handle_event(&mut app, ev);
+            handle_event(&mut app, ev, &cmd_tx);
         }
-
         if app.should_quit {
             break;
         }
-
         guard.terminal_mut().draw(|f| ui::draw(f, &app)).map_err(io_err)?;
     }
 
     input_handle.abort();
+    let _ = cmd_tx.send(AgentCommand::Shutdown);
+    let _ = driver_handle.await;
     Ok(())
 }
 
-fn handle_event(app: &mut App, ev: UiEvent) {
+fn handle_event(
+    app: &mut App,
+    ev: UiEvent,
+    cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+) {
     match ev {
-        UiEvent::Key(key) => {
-            // Global shortcuts that work in any mode.
-            let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-            match key.code {
-                KeyCode::Char('c') if ctrl => {
-                    // Phase F: Ctrl+C exits when nothing else is
-                    // happening. Phase G refines this to "cancel
-                    // the in-flight turn first, exit only on a
-                    // double-press."
-                    app.request_quit();
-                    return;
+        UiEvent::Key(key) => on_key(app, key, cmd_tx),
+        UiEvent::Resize => {}
+        UiEvent::TurnStarted => app.on_turn_started(),
+        UiEvent::ContentChunk(s) => app.on_content_chunk(&s),
+        UiEvent::TurnFinished { final_content } => app.on_turn_finished(&final_content),
+        UiEvent::TurnError(msg) => app.on_turn_error(&msg),
+        UiEvent::TurnCancelled => app.on_turn_cancelled(),
+        UiEvent::SystemNote(body) => app.on_system_note(body),
+        UiEvent::Quit => app.request_quit(),
+    }
+}
+
+fn on_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Char('c') if ctrl => {
+            // Cancel-or-quit. While busy, fire the cancel signal
+            // and stay in the loop. While idle, exit.
+            if app.is_busy() {
+                if let Some(tx) = app.take_cancel_sender() {
+                    let _ = tx.send(());
                 }
-                KeyCode::Char('d') if ctrl => {
-                    app.request_quit();
-                    return;
-                }
-                _ => {}
+            } else {
+                app.request_quit();
             }
-            app.on_key(key);
+            return;
         }
-        UiEvent::Resize => {
-            // App state is layout-agnostic; the next draw call
-            // picks up the new size. Nothing to do.
+        KeyCode::Char('d') if ctrl => {
+            // Ctrl+D always quits. The driver task gets a
+            // Shutdown after the loop exits.
+            if !app.is_busy() {
+                app.request_quit();
+            }
+            return;
         }
+        _ => {}
+    }
+    let action = app.on_key(key);
+    match action {
+        SubmitAction::Prompt(body) => {
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            app.set_cancel_sender(cancel_tx);
+            // Optimistically transition to Thinking now so the
+            // user sees the indicator immediately, before the
+            // driver picks the command up. The driver fires
+            // TurnStarted moments later — that path also calls
+            // `on_turn_started` but the assistant slot creation
+            // is idempotent in shape if not in identity. Keep the
+            // driver as the source of truth: don't preempt here.
+            let _ = cmd_tx.send(AgentCommand::Prompt {
+                body,
+                cancel: cancel_rx,
+            });
+        }
+        SubmitAction::Slash(line) => {
+            let (cancel_tx, cancel_rx) = oneshot::channel();
+            app.set_cancel_sender(cancel_tx);
+            let _ = cmd_tx.send(AgentCommand::Slash {
+                line,
+                cancel: cancel_rx,
+            });
+        }
+        SubmitAction::None => {}
+    }
+    // After a prompt submission we're effectively waiting for the
+    // driver — flip Mode so the input box visibly disables. The
+    // driver's TurnStarted will overwrite this state shortly.
+    if app.cancel_tx.is_some() && matches!(app.mode, Mode::Idle) {
+        app.mode = Mode::Thinking {
+            since: std::time::Instant::now(),
+        };
     }
 }
 
