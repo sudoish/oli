@@ -68,6 +68,13 @@ pub struct Agent {
     /// Plugin manifest captured at startup (or after `/plugins reload`).
     /// `/plugins` introspects this to render its listing.
     pub plugin_manifest: Vec<crate::plugins::PluginManifest>,
+    /// MCP server handles. The agent loop drains each one's
+    /// `tools_changed` flag per turn and re-syncs the registry so a
+    /// server that pushes `notifications/tools/list_changed` mid-
+    /// session has its new tools become callable on the next
+    /// model turn. Empty by default; the binary populates this at
+    /// startup.
+    pub mcp_handles: Arc<Vec<crate::mcp::McpHandle>>,
     ctx: ToolContext,
 }
 
@@ -89,8 +96,17 @@ impl Agent {
             hooks: HookRegistry::new(),
             max_turns: None,
             plugin_manifest: Vec::new(),
+            mcp_handles: Arc::new(Vec::new()),
             ctx: ToolContext::new(),
         }
+    }
+
+    /// Bind MCP server handles to this agent. The loop drains each
+    /// server's `tools_changed` flag per turn and re-syncs the
+    /// registry. Builder; tests typically don't need this.
+    pub fn with_mcp_handles(mut self, handles: Arc<Vec<crate::mcp::McpHandle>>) -> Self {
+        self.mcp_handles = handles;
+        self
     }
 
     /// Stash plugin metadata for later introspection by `/plugins`.
@@ -266,6 +282,23 @@ impl Agent {
                 }
             }
             turn += 1;
+
+            // Sync MCP tools that have notified `tools/list_changed`
+            // since the last turn. Cost on a quiet turn is one atomic
+            // load per server; on a turn where a server pushed an
+            // update, we refetch its `tools/list` and swap registry
+            // entries so the model can see the deltas on this turn.
+            if !self.mcp_handles.is_empty() {
+                let deltas = crate::mcp::refresh_changed_tools(self.mcp_handles.as_ref()).await;
+                for d in deltas {
+                    for name in d.removed {
+                        self.tools.remove(&name);
+                    }
+                    for tool in d.added {
+                        self.tools.register_box(tool);
+                    }
+                }
+            }
             let current_tokens = self
                 .last_usage
                 .map(|u| u.prompt_tokens as usize)

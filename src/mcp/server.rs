@@ -283,6 +283,45 @@ impl McpServer {
             None => String::new(),
         }
     }
+
+    /// Read-and-clear the transport's `tools_changed` flag. Returns
+    /// `true` once per `notifications/tools/list_changed` arrival.
+    /// `Down` servers and HTTP transports return `false` (the latter
+    /// because HTTP doesn't observe notifications in v1).
+    pub fn take_tools_changed(&self) -> bool {
+        match &self.transport {
+            Some(t) => t.take_tools_changed(),
+            None => false,
+        }
+    }
+
+    /// Re-run `tools/list` against the active transport and replace
+    /// the cached metadata. Pairs with `take_tools_changed`: the
+    /// agent loop drains the flag and calls `refetch_tools` to pick
+    /// up the new schema. Returns the names of the freshly-listed
+    /// tools so the caller can compute add/remove deltas against
+    /// the prior set.
+    pub async fn refetch_tools(&mut self) -> Result<Vec<ToolMeta>> {
+        let transport = self.transport.as_ref().ok_or_else(|| {
+            AgentError::Provider(format!(
+                "mcp `{}` cannot refresh tools: {}",
+                self.name,
+                self.health_reason()
+            ))
+        })?;
+        let dur = Duration::from_millis(self.cfg.init_timeout_ms);
+        let v = timeout(dur, transport.request("tools/list", json!({})))
+            .await
+            .map_err(|_| {
+                AgentError::Provider(format!(
+                    "mcp `{}` tools/list refresh timed out after {}ms",
+                    self.name, self.cfg.init_timeout_ms
+                ))
+            })??;
+        let fresh = parse_tool_list(&v);
+        self.tools = fresh.clone();
+        Ok(fresh)
+    }
 }
 
 fn parse_capabilities(init_result: &Value) -> ServerCapabilities {
@@ -571,6 +610,126 @@ for line in iter(sys.stdin.readline, ''):
             .expect("second call after restart");
         assert_eq!(r2["content"][0]["text"], "pong");
     }
+
+    /// `notifications/tools/list_changed` arriving from a server
+    /// flips the transport's flag; `take_tools_changed` drains it
+    /// (returns `true` once, then `false`); `refetch_tools` brings
+    /// the new schema in. Drives the full chain against a fake
+    /// Python server that pushes the notification out-of-band on
+    /// receiving `tools/list` for the second time, then advertises
+    /// a different tool list.
+    #[tokio::test]
+    async fn list_changed_notification_drives_refetch() {
+        if which("python3").is_none() {
+            eprintln!("skipping: python3 not on PATH");
+            return;
+        }
+        let cfg = McpServerConfig {
+            kind: McpTransportKind::Stdio,
+            command: Some("python3".into()),
+            args: vec!["-u".into(), "-c".into(), FAKE_LIST_CHANGED_SERVER_PY.into()],
+            env: Default::default(),
+            url: None,
+            headers: Default::default(),
+            init_timeout_ms: 5000,
+            call_timeout_ms: 60_000,
+            tools: Default::default(),
+            enabled: true,
+        };
+        let mut server = McpServer::connect("changer", &cfg).await;
+        assert!(matches!(server.health, HealthState::Healthy));
+        // Initial list: just `original`.
+        assert_eq!(server.tools.len(), 1);
+        assert_eq!(server.tools[0].name, "original");
+
+        // Trigger the server to push a list_changed notification.
+        // `nudge` makes it emit the notification then respond.
+        let _ = server
+            .call_tool("nudge", json!({}))
+            .await
+            .expect("nudge");
+
+        // Give the reader task a tick to ingest the notification.
+        // 100ms is generous; it's a single line on a stdio buffer.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        assert!(server.take_tools_changed(), "flag should be set");
+        // Drain consumes the flag; second call returns false.
+        assert!(!server.take_tools_changed(), "flag should be cleared");
+
+        // Refetch: server's tools/list now returns `replacement`.
+        let fresh = server.refetch_tools().await.expect("refetch");
+        assert_eq!(fresh.len(), 1);
+        assert_eq!(fresh[0].name, "replacement");
+        assert_eq!(server.tools[0].name, "replacement");
+    }
+
+    /// Servers that never push the notification stay clear; the
+    /// per-turn drain is cheap and idempotent.
+    #[tokio::test]
+    async fn take_tools_changed_is_false_when_no_notification_arrived() {
+        if which("python3").is_none() {
+            eprintln!("skipping: python3 not on PATH");
+            return;
+        }
+        let cfg = McpServerConfig {
+            kind: McpTransportKind::Stdio,
+            command: Some("python3".into()),
+            args: vec!["-u".into(), "-c".into(), FAKE_PING_SERVER_PY.into()],
+            env: Default::default(),
+            url: None,
+            headers: Default::default(),
+            init_timeout_ms: 5000,
+            call_timeout_ms: 60_000,
+            tools: Default::default(),
+            enabled: true,
+        };
+        let server = McpServer::connect("calm", &cfg).await;
+        assert!(matches!(server.health, HealthState::Healthy));
+        assert!(!server.take_tools_changed());
+        assert!(!server.take_tools_changed());
+    }
+
+    /// Fake server that:
+    /// - On `initialize`: responds normally.
+    /// - On the first `tools/list`: returns `original`.
+    /// - On `tools/call name=nudge`: pushes a
+    ///   `notifications/tools/list_changed` notification, then
+    ///   responds to the call.
+    /// - On the second `tools/list`: returns `replacement`.
+    const FAKE_LIST_CHANGED_SERVER_PY: &str = r#"
+import json, sys
+def respond(req, result=None):
+    sys.stdout.write(json.dumps({"jsonrpc":"2.0","id":req.get("id"),"result":result}) + "\n")
+    sys.stdout.flush()
+def notify(method, params=None):
+    body = {"jsonrpc":"2.0","method":method}
+    if params is not None: body["params"] = params
+    sys.stdout.write(json.dumps(body) + "\n")
+    sys.stdout.flush()
+
+list_calls = 0
+for line in iter(sys.stdin.readline, ''):
+    line = line.strip()
+    if not line: continue
+    msg = json.loads(line)
+    m = msg.get("method")
+    if m == "initialize":
+        respond(msg, {"protocolVersion":"2025-06-18","capabilities":{"tools":{"listChanged":True}},"serverInfo":{"name":"changer","version":"0.0.0"}})
+    elif m == "notifications/initialized":
+        pass
+    elif m == "tools/list":
+        list_calls += 1
+        if list_calls == 1:
+            respond(msg, {"tools":[{"name":"original","description":"first","inputSchema":{"type":"object"}}]})
+        else:
+            respond(msg, {"tools":[{"name":"replacement","description":"second","inputSchema":{"type":"object"}}]})
+    elif m == "tools/call":
+        name = msg.get("params", {}).get("name", "")
+        if name == "nudge":
+            notify("notifications/tools/list_changed", {})
+        respond(msg, {"content":[{"type":"text","text":"ok"}]})
+"#;
 
     /// Restart of a misconfigured server should leave it `Down` with
     /// the new failure reason, not silently succeed or panic.

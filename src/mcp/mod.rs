@@ -96,3 +96,150 @@ pub async fn close_all(handles: Vec<McpHandle>) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mcp::config::{McpServerConfig, McpTransportKind};
+    use crate::mcp::server::ToolMeta;
+    use serde_json::json;
+
+    /// Build a McpHandle wrapping a healthy McpServer with a manual
+    /// tool list. Used for the no-real-process integration tests
+    /// below; we don't need a live transport because the delta
+    /// computation only reads `server.tools` + the (manually flipped)
+    /// `tools_changed` flag.
+    fn handle_with_tools(
+        name: &str,
+        tools: Vec<&'static str>,
+    ) -> (McpHandle, std::sync::Arc<tokio::sync::Mutex<McpServer>>) {
+        let cfg = McpServerConfig {
+            kind: McpTransportKind::Stdio,
+            command: Some("/bin/true".into()),
+            args: vec![],
+            env: Default::default(),
+            url: None,
+            headers: Default::default(),
+            init_timeout_ms: 1000,
+            call_timeout_ms: 1000,
+            tools: Default::default(),
+            enabled: true,
+        };
+        let server = McpServer {
+            name: name.to_string(),
+            cfg,
+            transport: None,
+            capabilities: Default::default(),
+            tools: tools
+                .into_iter()
+                .map(|t| ToolMeta {
+                    name: t.to_string(),
+                    description: String::new(),
+                    input_schema: json!({"type":"object"}),
+                })
+                .collect(),
+            health: HealthState::Healthy,
+            stderr_source: None,
+        };
+        let arc = std::sync::Arc::new(tokio::sync::Mutex::new(server));
+        let handle = McpHandle {
+            name: name.to_string(),
+            server: arc.clone(),
+        };
+        (handle, arc)
+    }
+
+    /// `refresh_changed_tools` skips servers whose flag is clear and
+    /// produces no deltas. The agent loop's per-turn cost on a quiet
+    /// session is just the cheap atomic load.
+    #[tokio::test]
+    async fn refresh_returns_no_deltas_when_flag_is_clear() {
+        // No transport means take_tools_changed is always false.
+        let (h, _arc) = handle_with_tools("s", vec!["a", "b"]);
+        let deltas = refresh_changed_tools(&[h]).await;
+        // We skip clear servers entirely; deltas vec is empty.
+        assert!(deltas.is_empty());
+    }
+}
+
+/// Per-server delta surfaced by `refresh_changed_tools` so the agent
+/// can update the harness `Registry` in place.
+#[derive(Default)]
+pub struct ToolListDelta {
+    /// Server id (matches `McpHandle::name`).
+    pub server: String,
+    /// Tool names (post-`<server>__` namespacing) that should be
+    /// removed from the harness registry.
+    pub removed: Vec<String>,
+    /// Freshly-built `McpTool` adapters for tools the server now
+    /// exposes that we didn't have before.
+    pub added: Vec<Box<dyn crate::tools::Tool>>,
+}
+
+/// Drain `notifications/tools/list_changed` flags across all healthy
+/// servers, refetch their tool lists, and return per-server deltas so
+/// the caller (the agent loop) can swap registry entries atomically.
+/// Servers that aren't dirty are skipped — the cost on a quiet turn
+/// is one atomic load per server.
+pub async fn refresh_changed_tools(handles: &[McpHandle]) -> Vec<ToolListDelta> {
+    let mut out = Vec::new();
+    for h in handles {
+        let mut server = h.server.lock().await;
+        if !matches!(server.health, HealthState::Healthy) {
+            continue;
+        }
+        if !server.take_tools_changed() {
+            continue;
+        }
+        let prior_names: std::collections::HashSet<String> = server
+            .tools
+            .iter()
+            .filter(|m| server.cfg.tools.allows(&m.name))
+            .map(|m| format!("{}__{}", h.name, m.name))
+            .collect();
+
+        // Refetch — if the server is now flaking, log and move on
+        // without disturbing the existing registry entries.
+        let fresh = match server.refetch_tools().await {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("mcp `{}` tools/list refresh failed: {}", h.name, e);
+                continue;
+            }
+        };
+        let fresh_names: std::collections::HashSet<String> = fresh
+            .iter()
+            .filter(|m| server.cfg.tools.allows(&m.name))
+            .map(|m| format!("{}__{}", h.name, m.name))
+            .collect();
+
+        let removed: Vec<String> = prior_names.difference(&fresh_names).cloned().collect();
+        let added: Vec<Box<dyn crate::tools::Tool>> = fresh
+            .iter()
+            .filter(|m| server.cfg.tools.allows(&m.name))
+            .filter(|m| {
+                let namespaced = format!("{}__{}", h.name, m.name);
+                !prior_names.contains(&namespaced)
+            })
+            .map(|m| {
+                Box::new(McpTool::new(h.server.clone(), h.name.clone(), m.clone()))
+                    as Box<dyn crate::tools::Tool>
+            })
+            .collect();
+
+        if !removed.is_empty() || !added.is_empty() {
+            eprintln!(
+                "[mcp] server `{}` tool list changed: -{} +{}",
+                h.name,
+                removed.len(),
+                added.len()
+            );
+        }
+        out.push(ToolListDelta {
+            server: h.name.clone(),
+            removed,
+            added,
+        });
+    }
+    out
+}

@@ -26,4 +26,13 @@ pub trait McpTransport: Send + Sync {
     /// for in-flight calls then close stdin; HTTP impls drop the
     /// connection.
     async fn close(&self) -> Result<()>;
+
+    /// Read-and-clear the `notifications/tools/list_changed` flag.
+    /// Returns `true` once per notification arrival; subsequent calls
+    /// without a fresh notification return `false`. Default `false`
+    /// for transports that don't implement notification capture
+    /// (currently HTTP).
+    fn take_tools_changed(&self) -> bool {
+        false
+    }
 }

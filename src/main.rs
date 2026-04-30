@@ -167,6 +167,7 @@ async fn run(args: Args) -> Result<()> {
         .with_memory(memory)
         .with_hooks(hooks)
         .with_plugin_manifest(plugin_manifest)
+        .with_mcp_handles(mcp_handles.clone())
         .with_max_turns(max_turns);
 
     // Wire up read-set persistence: drained replay paths repopulate the

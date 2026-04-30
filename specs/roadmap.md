@@ -201,4 +201,4 @@ each phase boundary.
 | D4 | File-watch invalidation for Edit                  | DONE   |
 | E1 | Plugin resource caps via mlua instruction hook    | DONE   |
 | E2 | EmbeddingRAG memory strategy                      | DONE   |
-| E3 | MCP `notifications/tools/list_changed`            | TODO   |
+| E3 | MCP `notifications/tools/list_changed`            | DONE   |

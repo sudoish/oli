@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Mutex, oneshot};
@@ -56,6 +56,11 @@ pub struct StdioTransport {
     stderr: Arc<Mutex<Vec<u8>>>,
     /// Best-effort handle on the spawned child. Dropped on `close`.
     child: Arc<Mutex<Option<Child>>>,
+    /// Set by the background reader when the server pushes a
+    /// `notifications/tools/list_changed`. Drained-and-cleared by the
+    /// agent loop's per-turn refresh, which then re-fetches
+    /// `tools/list` and updates the harness registry.
+    tools_changed: Arc<AtomicBool>,
 }
 
 impl StdioTransport {
@@ -104,12 +109,15 @@ impl StdioTransport {
 
         let pending: Arc<Mutex<HashMap<i64, Waiter>>> = Arc::new(Mutex::new(HashMap::new()));
         let stderr_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+        let tools_changed: Arc<AtomicBool> = Arc::new(AtomicBool::new(false));
 
         // Reader task: parse each line as JSON-RPC, route responses by
-        // id. Notifications without an id are dropped (v1 ignores
-        // sampling / resources/subscribe / progress).
+        // id. Notifications without an id are mostly ignored, except
+        // `notifications/tools/list_changed` which flips the flag the
+        // agent loop drains on each turn to refresh tool registrations.
         {
             let pending = pending.clone();
+            let tools_changed_flag = tools_changed.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stdout).lines();
                 while let Ok(Some(line)) = reader.next_line().await {
@@ -138,9 +146,16 @@ impl StdioTransport {
                             };
                             let _ = tx.send(result);
                         }
+                        continue;
                     }
-                    // Server-initiated requests/notifications: ignored.
-                    // v1 doesn't surface roots/sampling.
+                    // Notification path. Only `tools/list_changed` is
+                    // observed in v1; everything else (progress,
+                    // resources, sampling) is dropped silently.
+                    if let Some(method) = msg.get("method").and_then(|m| m.as_str()) {
+                        if method == "notifications/tools/list_changed" {
+                            tools_changed_flag.store(true, Ordering::Relaxed);
+                        }
+                    }
                 }
                 // Reader exited (EOF). Drain any remaining waiters with
                 // a transport-error so callers don't hang forever.
@@ -184,6 +199,7 @@ impl StdioTransport {
             next_id: AtomicI64::new(1),
             stderr: stderr_buf,
             child: Arc::new(Mutex::new(Some(child))),
+            tools_changed,
         })
     }
 
@@ -275,6 +291,14 @@ impl McpTransport for StdioTransport {
             let _ = child.start_kill();
         }
         Ok(())
+    }
+
+    fn take_tools_changed(&self) -> bool {
+        // `swap(false)` is the read-and-clear we want: returns the
+        // prior value while clearing the flag in the same atomic step.
+        // No `compare_exchange` needed — only one consumer (the agent
+        // loop's per-turn refresh).
+        self.tools_changed.swap(false, Ordering::Relaxed)
     }
 }
 
