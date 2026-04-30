@@ -1,4 +1,9 @@
-# UI / DX Roadmap
+# UI / DX Roadmap (superseded by `specs/tui.md`)
+
+> **Note:** this doc is the line-oriented + crossterm-sprinkles plan.
+> The user opted to be more ambitious and build a full ratatui TUI
+> instead. See `specs/tui.md` for the active plan; this file is kept
+> for context on the rejected branch.
 
 How the harness *feels* matters as much as what it does. Today's REPL
 works — multi-turn streaming, slash commands, Ctrl-C cancel, diff
