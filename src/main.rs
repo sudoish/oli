@@ -12,6 +12,7 @@ mod tools;
 
 use async_trait::async_trait;
 use clap::Parser;
+use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 
@@ -22,10 +23,9 @@ use crate::agent::memory::{
 };
 use crate::config::Config;
 use crate::error::{AgentError, Result};
-use crate::policy::{ConfigPolicy, ReadlineApprover};
+use crate::policy::{AlwaysDeny, ConfigPolicy, ReadlineApprover};
 use crate::providers::Provider as ProviderTrait;
-use crate::providers::anthropic::AnthropicProvider;
-use crate::providers::openai_compat::OpenAICompatProvider;
+use crate::tools::context::ReadLogger;
 use crate::tools::task::{SubagentSpawner, Task};
 use crate::tools::{
     Registry, bash::Bash, edit::Edit, glob::Glob, grep::Grep, read::Read, write::Write,
@@ -52,6 +52,14 @@ struct Args {
     /// needs to go further than the conservative default.
     #[arg(long)]
     max_turns: Option<usize>,
+
+    /// Strict mode: in `-p` runs, deny every `Ask` policy decision
+    /// instead of auto-approving. Use for unattended scripted tasks
+    /// that should not silently rubber-stamp Edit/Write/unknown-Bash
+    /// calls. Has no effect on the interactive REPL (which already
+    /// prompts).
+    #[arg(long)]
+    strict: bool,
 }
 
 #[tokio::main]
@@ -66,20 +74,9 @@ async fn main() {
 async fn run(args: Args) -> Result<()> {
     let cfg = std::sync::Arc::new(Config::load_or_default()?);
     let provider_name = cfg.default_provider.clone();
-    let pcfg = cfg.provider(&provider_name)?;
-    let api_key = cfg.resolve_api_key(&provider_name)?;
     let model = cfg.model_for(&provider_name)?;
 
-    let provider: Box<dyn ProviderTrait> = match pcfg.kind.as_str() {
-        "openai-compat" => Box::new(OpenAICompatProvider::new(pcfg.base_url.clone(), api_key)),
-        "anthropic" => Box::new(AnthropicProvider::new(pcfg.base_url.clone(), api_key)),
-        other => {
-            return Err(AgentError::Config(format!(
-                "unsupported provider kind '{}' for '{}' (try 'openai-compat' or 'anthropic')",
-                other, provider_name
-            )));
-        }
-    };
+    let provider: Box<dyn ProviderTrait> = providers::build(&cfg, &provider_name)?;
 
     // Long-term notes store. Used by WriteNote/SearchNotes/ListNotes
     // tools. Single instance shared across parent + subagents so notes
@@ -142,11 +139,17 @@ async fn run(args: Args) -> Result<()> {
 
     let interactive = args.prompt.is_none();
     let session_id = resolve_session_id(&args, interactive)?;
-    let memory = build_memory(session_id.as_deref()).await?;
+    let (memory, replayed_reads, read_logger) = build_memory(session_id.as_deref()).await?;
 
     let mut hooks = crate::hooks::HookRegistry::new();
     for h in plugin_hooks {
         hooks.register_box(h);
+    }
+    if interactive {
+        // Surface tool calls live so the user sees `→ Read(file=…)`
+        // before each call. Stays out of the scripted `-p` path so
+        // automation log scrapers don't have to filter it.
+        hooks.register(repl::ProgressHook);
     }
 
     let max_turns = args.max_turns.unwrap_or(cfg.agent.max_turns);
@@ -159,13 +162,32 @@ async fn run(args: Args) -> Result<()> {
         .with_plugin_manifest(plugin_manifest)
         .with_max_turns(max_turns);
 
+    // Wire up read-set persistence: drained replay paths repopulate the
+    // `Edit`-required read-set from prior sessions; the logger forwards
+    // future `mark_read` calls into the JSONL transcript.
+    {
+        let ctx = agent_base.tool_context();
+        for p in replayed_reads {
+            ctx.insert_canonical_read(p).await;
+        }
+        if let Some(logger) = read_logger {
+            ctx.set_read_logger(logger).await;
+        }
+    }
+
     match args.prompt {
         Some(p) => {
             // One-shot: scripted-friendly. Policy still gates which tools
-            // run, but `Ask` decisions auto-approve (default `AlwaysApprove`)
-            // so the model isn't blocked by an interactive prompt no one
-            // can answer.
-            let mut agent = agent_base.pin_system_prompt(system_prompt).await;
+            // run; `--strict` flips `Ask` decisions from auto-approve
+            // to deny, suitable for unattended runs that must not
+            // rubber-stamp Edit/Write/unknown-Bash without supervision.
+            let mut agent = if args.strict {
+                agent_base.with_approver(Box::new(AlwaysDeny))
+            } else {
+                agent_base
+            }
+            .pin_system_prompt(system_prompt)
+            .await;
             let output = agent.run(&p).await?;
             if !output.is_empty() {
                 println!("{}", output);
@@ -211,14 +233,27 @@ fn resolve_session_id(args: &Args, interactive: bool) -> Result<Option<String>> 
 /// Build the agent's memory. With a session id we wrap the linear
 /// default in `PersistedMemory`, replaying any existing transcript.
 /// Without one (`-p` ephemeral mode), the linear memory stands alone.
-async fn build_memory(session_id: Option<&str>) -> Result<Box<dyn Memory>> {
+///
+/// Returns the memory plus the read paths replayed from the session
+/// transcript and (when persisted) a `ReadLogger` that mirrors future
+/// reads into the same file. `-p` mode without `--continue`/`--resume`
+/// gets a fresh memory and an empty read-set.
+async fn build_memory(
+    session_id: Option<&str>,
+) -> Result<(
+    Box<dyn Memory>,
+    Vec<PathBuf>,
+    Option<Arc<dyn ReadLogger>>,
+)> {
     let inner: Box<dyn Memory> = Box::new(LinearWithCompact::new());
     match session_id {
         Some(id) => {
-            let persisted = PersistedMemory::open(id, inner).await?;
-            Ok(Box::new(persisted))
+            let mut persisted = PersistedMemory::open(id, inner).await?;
+            let reads = persisted.drain_replayed_reads();
+            let logger = persisted.read_logger();
+            Ok((Box::new(persisted), reads, Some(logger)))
         }
-        None => Ok(inner),
+        None => Ok((inner, Vec::new(), None)),
     }
 }
 
@@ -262,19 +297,9 @@ struct AgentSpawner {
 #[async_trait]
 impl SubagentSpawner for AgentSpawner {
     async fn spawn(&self, prompt: &str, max_turns: usize) -> Result<String> {
-        let pcfg = self.cfg.provider(&self.provider_name)?;
-        let api_key = self.cfg.resolve_api_key(&self.provider_name)?;
         let model = self.cfg.model_for(&self.provider_name)?;
-        let provider: Box<dyn ProviderTrait> = match pcfg.kind.as_str() {
-            "openai-compat" => Box::new(OpenAICompatProvider::new(pcfg.base_url.clone(), api_key)),
-            "anthropic" => Box::new(AnthropicProvider::new(pcfg.base_url.clone(), api_key)),
-            other => {
-                return Err(AgentError::Config(format!(
-                    "subagent spawn: unsupported provider kind '{}'",
-                    other
-                )));
-            }
-        };
+        let provider: Box<dyn ProviderTrait> =
+            providers::build(&self.cfg, &self.provider_name)?;
         let mut tools = build_default_tools(&self.cfg, self.notes_store.clone());
         for tool in mcp::build_tools(&self.mcp_handles).await {
             tools.register_box(tool);

@@ -1,12 +1,15 @@
 //! Interactive REPL: rustyline for line editing, streaming output to stdout,
 //! Ctrl-C cancels the in-flight turn, Ctrl-D exits.
 
+use async_trait::async_trait;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
+use serde_json::Value;
 use std::io::Write;
 
 use crate::agent::Agent;
 use crate::error::{AgentError, Result};
+use crate::hooks::{Hook, HookPayload};
 
 pub mod slash;
 
@@ -117,6 +120,61 @@ async fn run_turn(agent: &mut Agent, prompt: &str) {
         agent.memory.truncate(saved_len).await;
         println!("\n(cancelled)");
     }
+}
+
+/// Live progress indicator for tool rounds. Prints a one-line
+/// `→ Tool(args)` to stderr on `PreToolUse` so the user sees what
+/// the model is reaching for *before* it runs. Stays on stderr so
+/// it doesn't interleave with the streamed assistant content on
+/// stdout. Args are clipped to fit a single line.
+pub struct ProgressHook;
+
+#[async_trait]
+impl Hook for ProgressHook {
+    fn name(&self) -> &str {
+        "progress"
+    }
+
+    async fn handle(&self, payload: &HookPayload<'_>) {
+        if let HookPayload::PreToolUse { tool, args } = payload {
+            let preview = preview_args(args, 60);
+            let line = if preview.is_empty() {
+                format!("→ {}\n", tool)
+            } else {
+                format!("→ {}({})\n", tool, preview)
+            };
+            let mut err = std::io::stderr();
+            let _ = err.write_all(line.as_bytes());
+            let _ = err.flush();
+        }
+    }
+}
+
+/// Single-line, char-bounded preview of tool args. Picks a couple of
+/// common scalar fields (`file_path`, `command`, `pattern`, `path`,
+/// `prompt`) when present and falls through to a JSON dump otherwise.
+fn preview_args(args: &Value, max_len: usize) -> String {
+    let priority = ["file_path", "command", "pattern", "path", "prompt"];
+    for k in priority.iter() {
+        if let Some(v) = args.get(*k).and_then(|v| v.as_str()) {
+            return clip_one_line(&format!("{}={}", k, v), max_len);
+        }
+    }
+    let raw = args.to_string();
+    if raw == "{}" {
+        return String::new();
+    }
+    clip_one_line(&raw, max_len)
+}
+
+fn clip_one_line(s: &str, max_len: usize) -> String {
+    let one = s.replace('\n', " ");
+    if one.chars().count() <= max_len {
+        return one;
+    }
+    let mut out: String = one.chars().take(max_len.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 /// rustyline's `readline` is blocking, so it has to live on a blocking

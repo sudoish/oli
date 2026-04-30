@@ -20,6 +20,7 @@
 //! the compaction threshold again.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -28,14 +29,19 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 
 use crate::error::{AgentError, Result};
+use crate::tools::context::ReadLogger;
 
 use super::{CompactContext, Memory};
 
 pub struct PersistedMemory {
     inner: Box<dyn Memory>,
-    file: Mutex<File>,
+    file: Arc<Mutex<File>>,
     path: PathBuf,
     id: String,
+    /// Canonicalized paths replayed from the session file's `read` ops.
+    /// Drained by the binary at startup into the live `ToolContext` so
+    /// `Edit`'s read-first invariant survives a `--resume`.
+    replayed_reads: Vec<PathBuf>,
 }
 
 impl PersistedMemory {
@@ -57,8 +63,9 @@ impl PersistedMemory {
         tokio::fs::create_dir_all(dir).await?;
         let path = dir.join(format!("{}.jsonl", id));
 
+        let mut replayed_reads = Vec::new();
         if path.exists() {
-            replay_into(&path, inner.as_mut()).await?;
+            replay_into(&path, inner.as_mut(), &mut replayed_reads).await?;
         }
 
         let file = OpenOptions::new()
@@ -69,9 +76,10 @@ impl PersistedMemory {
 
         Ok(Self {
             inner,
-            file: Mutex::new(file),
+            file: Arc::new(Mutex::new(file)),
             path,
             id: id.to_string(),
+            replayed_reads,
         })
     }
 
@@ -83,6 +91,23 @@ impl PersistedMemory {
         &self.path
     }
 
+    /// Drain the read paths replayed from the session file. Caller
+    /// applies them to the live `ToolContext` via
+    /// `insert_canonical_read`. A second call returns an empty vec.
+    pub fn drain_replayed_reads(&mut self) -> Vec<PathBuf> {
+        std::mem::take(&mut self.replayed_reads)
+    }
+
+    /// Hand out a `ReadLogger` that appends `read` ops to this session's
+    /// file. Caller binds it onto the `ToolContext` so the `Read` tool's
+    /// `mark_read` calls land in the transcript and round-trip across
+    /// `--resume`.
+    pub fn read_logger(&self) -> Arc<dyn ReadLogger> {
+        Arc::new(PersistedReadLogger {
+            file: self.file.clone(),
+        })
+    }
+
     async fn append(&self, op: Value) {
         let mut line = op.to_string();
         line.push('\n');
@@ -92,6 +117,29 @@ impl PersistedMemory {
         // the live conversation. Future hook for telemetry/error
         // reporting; for now we silently swallow to keep the agent loop
         // resilient against full disks / closed handles.
+        let _ = f.write_all(line.as_bytes()).await;
+        let _ = f.flush().await;
+    }
+}
+
+/// Adapter that lets `ToolContext::mark_read` mirror reads into the
+/// session JSONL. Holds an `Arc` to the same `File` mutex
+/// `PersistedMemory` writes through, so ordering between a `record`
+/// op and a `read` op reflects real call order.
+struct PersistedReadLogger {
+    file: Arc<Mutex<File>>,
+}
+
+#[async_trait]
+impl ReadLogger for PersistedReadLogger {
+    async fn log_read(&self, path: &Path) {
+        let line = json!({
+            "op": "read",
+            "path": path.to_string_lossy().to_string(),
+        })
+        .to_string()
+            + "\n";
+        let mut f = self.file.lock().await;
         let _ = f.write_all(line.as_bytes()).await;
         let _ = f.flush().await;
     }
@@ -140,7 +188,11 @@ impl Memory for PersistedMemory {
     }
 }
 
-async fn replay_into(path: &Path, mem: &mut dyn Memory) -> Result<()> {
+async fn replay_into(
+    path: &Path,
+    mem: &mut dyn Memory,
+    reads: &mut Vec<PathBuf>,
+) -> Result<()> {
     let body = tokio::fs::read_to_string(path).await?;
     for line in body.lines() {
         if line.trim().is_empty() {
@@ -162,10 +214,21 @@ async fn replay_into(path: &Path, mem: &mut dyn Memory) -> Result<()> {
                     mem.record(m).await;
                 }
             }
-            "clear" => mem.clear().await,
+            "clear" => {
+                mem.clear().await;
+                // A clear in a prior run wipes session-local state, so
+                // the post-clear read-set should not carry pre-clear
+                // entries.
+                reads.clear();
+            }
             "truncate" => {
                 let n = v.get("n").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                 mem.truncate(n).await;
+            }
+            "read" => {
+                if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
+                    reads.push(PathBuf::from(p));
+                }
             }
             _ => {}
         }
@@ -370,5 +433,88 @@ mod tests {
         let b = new_session_id();
         assert!(!a.is_empty());
         assert!(b >= a);
+    }
+
+    #[tokio::test]
+    async fn read_logger_writes_read_op_and_replay_drains_into_caller() {
+        use crate::tools::context::ToolContext;
+        use std::path::Path;
+        use tempfile::NamedTempFile;
+
+        let dir = tempdir().unwrap();
+        let target_file = NamedTempFile::new().unwrap();
+        let canon = tokio::fs::canonicalize(target_file.path()).await.unwrap();
+
+        // First run: open, attach the logger to a context, mark a read,
+        // and close.
+        {
+            let m = PersistedMemory::open_at(dir.path(), "rs", fresh_inner())
+                .await
+                .unwrap();
+            let ctx = ToolContext::new();
+            ctx.set_read_logger(m.read_logger()).await;
+            ctx.mark_read(target_file.path()).await;
+        }
+
+        // The transcript should now contain a `read` op for our file.
+        let body = tokio::fs::read_to_string(dir.path().join("rs.jsonl"))
+            .await
+            .unwrap();
+        assert!(
+            body.contains(r#""op":"read""#),
+            "transcript missing read op: {}",
+            body
+        );
+
+        // Second run: replay drains the read into a fresh context.
+        let mut m2 = PersistedMemory::open_at(dir.path(), "rs", fresh_inner())
+            .await
+            .unwrap();
+        let drained = m2.drain_replayed_reads();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0], canon);
+
+        let ctx2 = ToolContext::new();
+        for p in drained {
+            ctx2.insert_canonical_read(p).await;
+        }
+        // Edit's read-first invariant should now be satisfied without
+        // re-reading the file.
+        assert!(ctx2.was_read(Path::new(target_file.path())).await);
+
+        // A subsequent drain returns an empty vec — the field is
+        // taken, not cloned.
+        assert!(m2.drain_replayed_reads().is_empty());
+    }
+
+    #[tokio::test]
+    async fn clear_in_transcript_drops_replayed_reads_too() {
+        use crate::tools::context::ToolContext;
+        use tempfile::NamedTempFile;
+
+        let dir = tempdir().unwrap();
+        let pre = NamedTempFile::new().unwrap();
+        let post = NamedTempFile::new().unwrap();
+
+        {
+            let mut m = PersistedMemory::open_at(dir.path(), "cls", fresh_inner())
+                .await
+                .unwrap();
+            let ctx = ToolContext::new();
+            ctx.set_read_logger(m.read_logger()).await;
+            ctx.mark_read(pre.path()).await;
+            m.clear().await;
+            ctx.mark_read(post.path()).await;
+        }
+
+        let mut m2 = PersistedMemory::open_at(dir.path(), "cls", fresh_inner())
+            .await
+            .unwrap();
+        let drained = m2.drain_replayed_reads();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(
+            drained[0],
+            tokio::fs::canonicalize(post.path()).await.unwrap()
+        );
     }
 }

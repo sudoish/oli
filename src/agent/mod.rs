@@ -182,6 +182,13 @@ impl Agent {
         self.ctx = ToolContext::new();
     }
 
+    /// Borrow the per-session tool context. The binary uses this at
+    /// startup to wire up a `ReadLogger` (so `Read` calls round-trip
+    /// across `--resume`) and to seed replayed read paths.
+    pub fn tool_context(&self) -> &ToolContext {
+        &self.ctx
+    }
+
     /// Force a compaction pass regardless of current token usage. Drives
     /// the `/compact` slash command. Returns whatever `maybe_compact`
     /// returns — strategies that decide there's nothing to compact (too
