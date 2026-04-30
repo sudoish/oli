@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use serde_json::Value;
 use tokio::sync::oneshot;
 
 #[derive(Default)]
@@ -41,6 +42,25 @@ pub struct App {
     /// `ToolDone` finds the right card to mutate. Cleared as
     /// cards complete.
     pub active_tools: HashMap<u64, usize>,
+    /// Approval modal state. `Some(_)` while a `Decision::Ask`
+    /// is awaiting the user's response; the `TuiApprover` has
+    /// stashed the matching response sender in its
+    /// `PendingApproval` slot. Single-slot — sequential dispatch
+    /// guarantees one in flight at a time.
+    pub approval: Option<ApprovalState>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ApprovalState {
+    pub id: u64,
+    pub tool: String,
+    pub reason: String,
+    /// Pre-rendered tool-aware preview body (unified diff for
+    /// Edit / Write, JSON dump otherwise). Computed on entry so
+    /// the render loop doesn't re-render it every frame.
+    pub preview: String,
+    /// PgUp/PgDn scroll offset within the preview body.
+    pub scroll: u16,
 }
 
 pub enum Mode {
@@ -336,6 +356,46 @@ impl App {
 
     pub fn on_system_note(&mut self, body: String) {
         self.transcript.push(TranscriptItem::System { body });
+    }
+
+    /// Pop a modal asking the user to approve a tool call. The
+    /// `TuiApprover` has already stashed the response sender;
+    /// the keypress handler matches on `self.approval` to find
+    /// the matching slot.
+    pub fn on_approval_requested(
+        &mut self,
+        id: u64,
+        tool: String,
+        args: Value,
+        reason: String,
+    ) {
+        self.approval = Some(ApprovalState {
+            id,
+            preview: crate::policy::preview_for(&tool, &args),
+            tool,
+            reason,
+            scroll: 0,
+        });
+    }
+
+    /// Caller-provided escape: `tui::run` calls this when an
+    /// approval modal key arrived (y/n/a/d/Esc) and resolves the
+    /// underlying oneshot. Clears the modal so the next render
+    /// drops it.
+    pub fn close_approval(&mut self) {
+        self.approval = None;
+    }
+
+    pub fn approval_scroll_up(&mut self) {
+        if let Some(a) = self.approval.as_mut() {
+            a.scroll = a.scroll.saturating_sub(5);
+        }
+    }
+
+    pub fn approval_scroll_down(&mut self) {
+        if let Some(a) = self.approval.as_mut() {
+            a.scroll = a.scroll.saturating_add(5);
+        }
     }
 
     /// Take the cancel sender out of the App so the caller can
@@ -655,6 +715,61 @@ mod tests {
             "expected two distinct assistant items, got {:?}",
             assistant_bodies
         );
+    }
+
+    #[test]
+    fn approval_request_populates_modal_with_preview() {
+        let mut app = App::new();
+        let args = serde_json::json!({"file_path": "src/x.rs"});
+        app.on_approval_requested(7, "Edit".into(), args, "edit src/x.rs".into());
+        let approval = app.approval.expect("modal should be set");
+        assert_eq!(approval.id, 7);
+        assert_eq!(approval.tool, "Edit");
+        assert_eq!(approval.reason, "edit src/x.rs");
+        assert!(
+            approval.preview.contains("file: src/x.rs"),
+            "preview should contain rendered tool args, got: {}",
+            approval.preview
+        );
+        assert_eq!(approval.scroll, 0);
+    }
+
+    #[test]
+    fn approval_modal_scroll_steps_in_units_of_five() {
+        let mut app = App::new();
+        app.on_approval_requested(
+            1,
+            "Edit".into(),
+            serde_json::json!({"file_path":"x"}),
+            "r".into(),
+        );
+        // PgDn three times → scroll 15.
+        app.approval_scroll_down();
+        app.approval_scroll_down();
+        app.approval_scroll_down();
+        assert_eq!(app.approval.as_ref().unwrap().scroll, 15);
+        // PgUp once → 10.
+        app.approval_scroll_up();
+        assert_eq!(app.approval.as_ref().unwrap().scroll, 10);
+        // Saturating: scrolling above the top stops at 0.
+        for _ in 0..10 {
+            app.approval_scroll_up();
+        }
+        assert_eq!(app.approval.as_ref().unwrap().scroll, 0);
+    }
+
+    #[test]
+    fn close_approval_drops_the_modal() {
+        let mut app = App::new();
+        app.on_approval_requested(
+            1,
+            "Edit".into(),
+            serde_json::json!({"file_path":"x"}),
+            "r".into(),
+        );
+        assert!(app.approval.is_some());
+        app.close_approval();
+        assert!(app.approval.is_none());
     }
 
     #[test]

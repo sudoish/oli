@@ -14,9 +14,9 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
-use crate::tui::app::{App, Mode, ToolCardState, TranscriptItem};
+use crate::tui::app::{App, ApprovalState, Mode, ToolCardState, TranscriptItem};
 
 const TITLE: &str = "oli";
 
@@ -32,6 +32,139 @@ pub fn draw(f: &mut Frame, app: &App) {
     draw_status(f, chunks[0], app);
     draw_transcript(f, chunks[1], app);
     draw_input(f, chunks[2], app);
+
+    if let Some(approval) = &app.approval {
+        draw_approval_modal(f, area, approval);
+    }
+}
+
+/// Centered overlay above the transcript. Width 80% of the
+/// terminal (clamped to [60, 120] cols), height 60% of the
+/// terminal (clamped to [10, 40] rows). `Clear` blanks the area
+/// underneath so the transcript bleed-through doesn't make the
+/// modal hard to read.
+fn draw_approval_modal(f: &mut Frame, full_area: Rect, approval: &ApprovalState) {
+    let modal = centered_rect(full_area, 80, 60).intersection(full_area);
+    f.render_widget(Clear, modal);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(Line::from(vec![
+            Span::styled(
+                " ⚠ approve ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" {} ", approval.tool),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    // Layout inside the modal: reason (1 line), preview (flex),
+    // legend (1 line).
+    let parts = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Min(3),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+
+    // Reason header.
+    let reason = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "  reason: ",
+            Style::default().fg(Color::DarkGray),
+        ),
+        Span::styled(
+            approval.reason.as_str(),
+            Style::default().fg(Color::White),
+        ),
+    ]));
+    f.render_widget(reason, parts[0]);
+
+    // Diff / preview body. Lines starting with `+`/`-` (after the
+    // 4-space indent the diff renderer emits) get colored;
+    // everything else stays white.
+    let lines: Vec<Line> = approval
+        .preview
+        .lines()
+        .map(diff_line_to_styled)
+        .collect();
+    let preview = Paragraph::new(lines)
+        .wrap(Wrap { trim: false })
+        .scroll((approval.scroll, 0));
+    f.render_widget(preview, parts[1]);
+
+    // Legend / single-key affordances.
+    let legend = Paragraph::new(Line::from(vec![
+        Span::styled(
+            "  [y]es  [n]o  [a]llow this session  [d]eny session  [PgUp/Dn] scroll  [Esc] cancel",
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ]));
+    f.render_widget(legend, parts[2]);
+}
+
+/// Color a unified-diff line by its sign char. Renderer in
+/// `policy::render_unified_diff` emits `    + body` / `    - body`
+/// / `      body` (4 spaces indent + sign + space + body). Others
+/// (the "file: …", "(replace_all)" header lines etc) stay white.
+fn diff_line_to_styled(line: &str) -> Line {
+    let trimmed = line.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("+ ") {
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!("+ {}", rest),
+                Style::default().fg(Color::Green),
+            ),
+        ])
+    } else if let Some(rest) = trimmed.strip_prefix("- ") {
+        Line::from(vec![
+            Span::raw("    "),
+            Span::styled(
+                format!("- {}", rest),
+                Style::default().fg(Color::Red),
+            ),
+        ])
+    } else {
+        Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(Color::White),
+        ))
+    }
+}
+
+/// Centered rectangle within `r`, sized as a percentage. Clamped
+/// in both dimensions so the modal doesn't shrink past readability
+/// or balloon past usefulness.
+fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
+    let target_w = ((r.width as u32 * percent_x as u32) / 100).clamp(60, 120) as u16;
+    let target_h = ((r.height as u32 * percent_y as u32) / 100).clamp(10, 40) as u16;
+    let w = target_w.min(r.width);
+    let h = target_h.min(r.height);
+    let x = r.x + r.width.saturating_sub(w) / 2;
+    let y = r.y + r.height.saturating_sub(h) / 2;
+    Rect {
+        x,
+        y,
+        width: w,
+        height: h,
+    }
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {

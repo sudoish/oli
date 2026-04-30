@@ -273,7 +273,7 @@ impl Approver for ReadlineApprover {
 /// Tool-aware preview. Edit and Write get diff/content views so the
 /// user sees what's about to land; everything else falls through to a
 /// compact JSON dump truncated at 200 chars.
-fn preview_for(tool: &str, args: &Value) -> String {
+pub(crate) fn preview_for(tool: &str, args: &Value) -> String {
     match tool {
         "Edit" => render_edit_preview(args),
         "Write" => render_write_preview(args),

@@ -21,6 +21,7 @@
 //! are independent producers. The render task is the only consumer.
 
 mod app;
+mod approver;
 mod driver;
 mod event;
 mod hook;
@@ -29,7 +30,7 @@ mod ui;
 
 pub use app::App;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers};
@@ -41,8 +42,9 @@ use crate::error::{AgentError, Result};
 use crate::plugins::PluginReloader;
 use crate::repl::slash::SlashCommand;
 use crate::tui::app::{Mode, SubmitAction};
+use crate::tui::approver::{PendingApproval, TuiApprover};
 use crate::tui::driver::AgentCommand;
-use crate::tui::event::UiEvent;
+use crate::tui::event::{ApprovalResponse, UiEvent};
 use crate::tui::terminal::TerminalGuard;
 
 pub async fn run(
@@ -63,6 +65,16 @@ pub async fn run(
     // plugin Replace/Skip outcomes don't suppress the card the
     // user wants to see.
     agent.hooks.register(hook::TuiHook::new(tx.clone()));
+
+    // Swap in the TUI's approver: when policy returns Ask, this
+    // pushes UiEvent::ApprovalRequested onto the same channel and
+    // awaits the user's keystroke via the PendingApproval slot
+    // shared with the render task.
+    let pending_approval: PendingApproval = Arc::new(Mutex::new(None));
+    agent = agent.with_approver(Box::new(TuiApprover::new(
+        tx.clone(),
+        pending_approval.clone(),
+    )));
 
     // Input task: lives until the channel is dropped (i.e. until
     // we drop the last `tx` after the loop exits).
@@ -103,10 +115,10 @@ pub async fn run(
             Err(_) => None,
         };
         if let Some(ev) = first {
-            handle_event(&mut app, ev, &cmd_tx);
+            handle_event(&mut app, ev, &cmd_tx, &pending_approval);
         }
         while let Ok(ev) = rx.try_recv() {
-            handle_event(&mut app, ev, &cmd_tx);
+            handle_event(&mut app, ev, &cmd_tx, &pending_approval);
         }
         if app.should_quit {
             break;
@@ -124,9 +136,10 @@ fn handle_event(
     app: &mut App,
     ev: UiEvent,
     cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+    pending_approval: &PendingApproval,
 ) {
     match ev {
-        UiEvent::Key(key) => on_key(app, key, cmd_tx),
+        UiEvent::Key(key) => on_key(app, key, cmd_tx, pending_approval),
         UiEvent::Resize => {}
         UiEvent::TurnStarted => app.on_turn_started(),
         UiEvent::ContentChunk(s) => app.on_content_chunk(&s),
@@ -146,6 +159,12 @@ fn handle_event(
             summary,
             ok,
         } => app.on_tool_done(id, duration, summary, ok),
+        UiEvent::ApprovalRequested {
+            id,
+            tool,
+            args,
+            reason,
+        } => app.on_approval_requested(id, tool, args, reason),
     }
 }
 
@@ -153,7 +172,16 @@ fn on_key(
     app: &mut App,
     key: crossterm::event::KeyEvent,
     cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+    pending_approval: &PendingApproval,
 ) {
+    // Approval modal short-circuits everything else: while it's
+    // up, the user's keystrokes go to y/n/a/d/Esc and modal
+    // scroll, not to the input box.
+    if app.approval.is_some() {
+        handle_approval_key(app, key, pending_approval);
+        return;
+    }
+
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
     match key.code {
         KeyCode::Char('c') if ctrl => {
@@ -212,6 +240,37 @@ fn on_key(
         app.mode = Mode::Thinking {
             since: std::time::Instant::now(),
         };
+    }
+}
+
+fn handle_approval_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    pending_approval: &PendingApproval,
+) {
+    let response = match key.code {
+        KeyCode::Char('y') | KeyCode::Char('Y') => Some(ApprovalResponse::Yes),
+        KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(ApprovalResponse::No),
+        KeyCode::Char('a') | KeyCode::Char('A') => Some(ApprovalResponse::AlwaysAllow),
+        KeyCode::Char('d') | KeyCode::Char('D') => Some(ApprovalResponse::AlwaysDeny),
+        // PgUp/PgDn scroll the diff body; let the user read a
+        // long change before deciding.
+        KeyCode::PageUp => {
+            app.approval_scroll_up();
+            None
+        }
+        KeyCode::PageDown => {
+            app.approval_scroll_down();
+            None
+        }
+        _ => None,
+    };
+
+    if let Some(resp) = response {
+        if let Some(tx) = pending_approval.lock().unwrap().take() {
+            let _ = tx.send(resp);
+        }
+        app.close_approval();
     }
 }
 

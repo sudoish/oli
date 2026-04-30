@@ -474,10 +474,10 @@ line-oriented plan; this doc supersedes it.
 | H2 | Tool-card widget with spinner + timing            | DONE   |
 | H3 | Cards interleave with assistant content           | DONE   |
 | H4 | Per-tool result summaries                         | DONE   |
-| I1 | Approval modal layer                              | TODO   |
-| I2 | Single-key approval (y/n/a/d/ESC)                 | TODO   |
-| I3 | Diff preview inside modal                         | TODO   |
-| I4 | Modal scroll for long diffs                       | TODO   |
+| I1 | Approval modal layer                              | DONE   |
+| I2 | Single-key approval (y/n/a/d/ESC)                 | DONE   |
+| I3 | Diff preview inside modal                         | DONE   |
+| I4 | Modal scroll for long diffs                       | DONE   |
 | J1 | Markdown parser → ratatui Lines                   | TODO   |
 | J2 | Syntect-highlighted code fences                   | TODO   |
 | J3 | Light/dark theme detection                        | TODO   |

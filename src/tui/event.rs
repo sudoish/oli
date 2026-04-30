@@ -1,8 +1,12 @@
 //! Single channel feeding the render loop. Phase G adds the
 //! agent-driver-side variants; Phase H adds tool-card events;
-//! later phases keep growing it as the surface widens.
+//! Phase I adds approval modal events. The variants keep growing
+//! as the surface widens — `Clone`/`Debug` derives stay with us
+//! by deliberately keeping non-clone state (oneshot senders) out
+//! of the variants and in side-channel slots instead.
 
 use crossterm::event::KeyEvent;
+use serde_json::Value;
 
 #[derive(Debug, Clone)]
 pub enum UiEvent {
@@ -55,5 +59,31 @@ pub enum UiEvent {
         summary: String,
         ok: bool,
     },
+
+    // ----- Approval modal events (Phase I) -----
+    /// Policy gate returned `Decision::Ask`; the agent task is
+    /// suspended on the approver's oneshot. The render loop pops
+    /// a modal and waits for `y/n/a/d/ESC`. The matching response
+    /// sender is stashed in `tui::approver::PendingApproval`,
+    /// keyed implicitly (single-slot — only one approval pending
+    /// at a time).
+    ApprovalRequested {
+        id: u64,
+        tool: String,
+        args: Value,
+        reason: String,
+    },
 }
+
+/// User's response to an approval modal. The `Always*` variants
+/// also tell the `TuiApprover` to remember the (tool, args)
+/// fingerprint so subsequent identical requests auto-resolve.
+#[derive(Debug, Clone, Copy)]
+pub enum ApprovalResponse {
+    Yes,
+    No,
+    AlwaysAllow,
+    AlwaysDeny,
+}
+
 
