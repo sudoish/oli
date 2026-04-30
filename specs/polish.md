@@ -334,8 +334,8 @@ boundary.
 | ID | Item                                              | Status |
 | -- | ------------------------------------------------- | ------ |
 | P1 | Zero build warnings                               | DONE   |
-| P2 | Overlay sum type on App                           | TODO   |
-| P3 | Split tui/app.rs and tui/ui.rs                    | TODO   |
+| P2 | Overlay sum type on App                           | DONE   |
+| P3 | Split tui/app.rs and tui/ui.rs                    | DONE   |
 | Q1 | Extract `lib.rs`                                  | TODO   |
 | Q2 | Move binary entry to `src/bin/oli.rs`             | TODO   |
 | Q3 | Module-level `//!` docs everywhere                | TODO   |
