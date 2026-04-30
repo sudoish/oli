@@ -516,8 +516,11 @@ impl App {
             Some(s) => s,
             None => return,
         };
-        // Replace from `replace_start_byte` (the trigger char's
-        // position) to current cursor with the trigger + pick.
+        // Replace `[replace_start_byte .. cursor]` with `trigger + pick`.
+        // tui-textarea's `delete_str` deletes FORWARD from the
+        // cursor, so we jump the cursor back to the trigger
+        // position first, then delete the typed prefix forward,
+        // then insert the replacement.
         let (row, col) = self.input.cursor();
         let line = self
             .input
@@ -525,8 +528,6 @@ impl App {
             .get(row)
             .cloned()
             .unwrap_or_default();
-        // Compute the byte index at the cursor (col is char-based
-        // per tui-textarea).
         let cursor_byte = line
             .char_indices()
             .nth(col)
@@ -537,21 +538,19 @@ impl App {
             CompletionKind::Path { .. } => '@',
         };
         let replacement = format!("{}{}", trigger, pick);
-        // Walk back from the cursor by char count; tui-textarea's
-        // delete_str takes a CHAR count, not a byte count.
         let chars_to_delete = line[menu.replace_start_byte..cursor_byte].chars().count();
+        // Char-based column at the trigger position.
+        let start_col = line[..menu.replace_start_byte].chars().count();
+        self.input
+            .move_cursor(CursorMove::Jump(row as u16, start_col as u16));
         self.input.delete_str(chars_to_delete);
         self.input.insert_str(replacement);
         // Add a trailing space for slash completions so the user
         // can immediately type args. Path completions stop at the
         // selected entry — they may want to descend further (no
         // space).
-        if matches!(self.completion, None) {
-            // self.completion was just taken; check what it WAS
-            // via the trigger:
-            if trigger == '/' {
-                self.input.insert_str(" ");
-            }
+        if trigger == '/' {
+            self.input.insert_str(" ");
         }
     }
 

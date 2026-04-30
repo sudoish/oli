@@ -85,6 +85,28 @@ fn typing_slash_auto_opens_completion_popup() {
 }
 
 #[test]
+fn accepting_completion_replaces_typed_prefix_not_appends_to_it() {
+    // Regression: typing /mod then accepting /model used to produce
+    // "/mod/model" because delete_str was deleting forward from a
+    // cursor that sat at end-of-input.
+    let mut app = App::new();
+    app.set_slash_meta(vec![
+        ("model".into(), String::new()),
+        ("mode".into(), String::new()),
+    ]);
+    type_str(&mut app, "/mod");
+    assert!(app.completion.is_some(), "popup should be open");
+    // Accept whatever's first in the menu (alphabetically: mode).
+    app.on_completion_key(key(KeyCode::Enter));
+    let buf = input_string(&app);
+    assert!(
+        buf == "/mode " || buf == "/model ",
+        "expected /<pick> with trailing space, got {:?}",
+        buf
+    );
+}
+
+#[test]
 fn typing_past_slash_args_closes_completion_popup() {
     let mut app = App::new();
     app.set_slash_meta(vec![("model".into(), String::new())]);
