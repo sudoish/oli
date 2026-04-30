@@ -1,36 +1,24 @@
-mod agent;
-mod config;
-mod error;
-mod hooks;
-mod mcp;
-mod notes;
-mod plugins;
-mod policy;
-mod providers;
-mod repl;
-mod tools;
-mod tui;
+//! Binary entry point for `oli`. Parses CLI args, builds the
+//! agent + tool registry from config, and dispatches to the TUI,
+//! the line-mode REPL, or one-shot prompt mode. Reaches into the
+//! library at `oli::*` for everything substantive — this file
+//! is intentionally a wiring shim, not where logic lives.
 
-use async_trait::async_trait;
 use clap::Parser;
-use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 
-use crate::agent::Agent;
-use crate::agent::context::SystemPromptBuilder;
-use crate::agent::memory::{
-    LinearWithCompact, Memory, PersistedMemory, list_sessions, new_session_id,
+use oli::agent::Agent;
+use oli::agent::context::SystemPromptBuilder;
+use oli::bootstrap::{
+    DefaultAgentSpawner, build_default_tools, build_memory, resolve_session_id,
 };
-use crate::config::Config;
-use crate::error::{AgentError, Result};
-use crate::policy::{AlwaysDeny, ConfigPolicy, ReadlineApprover};
-use crate::providers::Provider as ProviderTrait;
-use crate::tools::context::ReadLogger;
-use crate::tools::task::{SubagentSpawner, Task};
-use crate::tools::{
-    Registry, bash::Bash, edit::Edit, glob::Glob, grep::Grep, read::Read, write::Write,
-};
+use oli::config::Config;
+use oli::error::Result;
+use oli::policy::{AlwaysDeny, ConfigPolicy, ReadlineApprover};
+use oli::providers::Provider as ProviderTrait;
+use oli::tools::task::{SubagentSpawner, Task};
+use oli::{hooks, mcp, notes, plugins, providers, repl, tui};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -114,7 +102,7 @@ async fn run(args: Args) -> Result<()> {
     // it only on the parent — a child built by the spawner gets the
     // baseline tool set without `Task`, preventing infinite recursion
     // through nested subagents.
-    let spawner: Arc<dyn SubagentSpawner> = Arc::new(AgentSpawner {
+    let spawner: Arc<dyn SubagentSpawner> = Arc::new(DefaultAgentSpawner {
         cfg: cfg.clone(),
         provider_name: provider_name.clone(),
         notes_store: notes_store.clone(),
@@ -154,10 +142,11 @@ async fn run(args: Args) -> Result<()> {
     let policy = Box::new(ConfigPolicy::from_config(&cfg.policy));
 
     let interactive = args.prompt.is_none();
-    let session_id = resolve_session_id(&args, interactive)?;
+    let session_id =
+        resolve_session_id(args.resume.as_deref(), args.continue_session, interactive)?;
     let (memory, replayed_reads, read_logger) = build_memory(session_id.as_deref()).await?;
 
-    let mut hooks = crate::hooks::HookRegistry::new();
+    let mut hooks = hooks::HookRegistry::new();
     for h in plugin_hooks {
         hooks.register_box(h);
     }
@@ -233,111 +222,5 @@ async fn run(args: Args) -> Result<()> {
                 repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
             }
         }
-    }
-}
-
-/// Decide which session id to use for this run. Precedence: explicit
-/// `--resume`, then `--continue` (latest by mtime), then a fresh id for
-/// REPL mode, then `None` for ephemeral one-shot mode (`-p` without
-/// either flag).
-fn resolve_session_id(args: &Args, interactive: bool) -> Result<Option<String>> {
-    if let Some(id) = &args.resume {
-        return Ok(Some(id.clone()));
-    }
-    if args.continue_session {
-        let entries = list_sessions();
-        let latest = entries
-            .into_iter()
-            .next()
-            .ok_or_else(|| AgentError::Config("no prior sessions to continue".into()))?;
-        return Ok(Some(latest.id));
-    }
-    if interactive {
-        return Ok(Some(new_session_id()));
-    }
-    Ok(None)
-}
-
-/// Build the agent's memory. With a session id we wrap the linear
-/// default in `PersistedMemory`, replaying any existing transcript.
-/// Without one (`-p` ephemeral mode), the linear memory stands alone.
-///
-/// Returns the memory plus the read paths replayed from the session
-/// transcript and (when persisted) a `ReadLogger` that mirrors future
-/// reads into the same file. `-p` mode without `--continue`/`--resume`
-/// gets a fresh memory and an empty read-set.
-async fn build_memory(
-    session_id: Option<&str>,
-) -> Result<(
-    Box<dyn Memory>,
-    Vec<PathBuf>,
-    Option<Arc<dyn ReadLogger>>,
-)> {
-    let inner: Box<dyn Memory> = Box::new(LinearWithCompact::new());
-    match session_id {
-        Some(id) => {
-            let mut persisted = PersistedMemory::open(id, inner).await?;
-            let reads = persisted.drain_replayed_reads();
-            let logger = persisted.read_logger();
-            Ok((Box::new(persisted), reads, Some(logger)))
-        }
-        None => Ok((inner, Vec::new(), None)),
-    }
-}
-
-/// Built-in tool set shared between the parent agent and any subagent
-/// spawned via `Task`. Excludes `Task` itself so subagents can't recurse
-/// (the parent registers `Task` separately on top of this). Includes
-/// the notes tools backed by the supplied `NotesStore`.
-fn build_default_tools(cfg: &Config, notes_store: Arc<dyn notes::NotesStore>) -> Registry {
-    let mut tools = Registry::new();
-    tools.register(Read);
-    tools.register(Write);
-    tools.register(Edit);
-    tools.register(Bash);
-    tools.register(Grep);
-    tools.register(Glob);
-    tools.register(crate::tools::notes::WriteNote::new(notes_store.clone()));
-    tools.register(crate::tools::notes::SearchNotes::new(notes_store.clone()));
-    tools.register(crate::tools::notes::ListNotes::new(notes_store));
-    for sub in &cfg.tools.subprocess {
-        tools.register(crate::tools::subprocess::SubprocessTool::from_config(sub));
-    }
-    tools
-}
-
-/// `SubagentSpawner` impl that builds a fresh agent from config on each
-/// call. Each subagent has its own LinearWithCompact memory (no
-/// persistence — children are ephemeral by design) and inherits the
-/// parent's policy + capability registry. The result is the child's
-/// final assistant message; intermediate tool steps stay in the
-/// child's memory and are discarded when it returns.
-struct AgentSpawner {
-    cfg: Arc<Config>,
-    provider_name: String,
-    notes_store: Arc<dyn notes::NotesStore>,
-    /// Subagents see the same MCP tools the parent does. We share the
-    /// connected handles by Arc so spawning a child doesn't re-dial the
-    /// servers.
-    mcp_handles: Arc<Vec<mcp::McpHandle>>,
-}
-
-#[async_trait]
-impl SubagentSpawner for AgentSpawner {
-    async fn spawn(&self, prompt: &str, max_turns: usize) -> Result<String> {
-        let model = self.cfg.model_for(&self.provider_name)?;
-        let provider: Box<dyn ProviderTrait> =
-            providers::build(&self.cfg, &self.provider_name)?;
-        let mut tools = build_default_tools(&self.cfg, self.notes_store.clone());
-        for tool in mcp::build_tools(&self.mcp_handles).await {
-            tools.register_box(tool);
-        }
-        let policy = Box::new(ConfigPolicy::from_config(&self.cfg.policy));
-
-        let mut agent = Agent::new(provider, tools, model)
-            .with_policy(policy)
-            .with_config(self.cfg.clone(), &self.provider_name)
-            .with_max_turns(max_turns);
-        agent.run(prompt).await
     }
 }
