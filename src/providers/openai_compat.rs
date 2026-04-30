@@ -56,7 +56,7 @@ impl CacheStrategy {
             Some("anthropic") => return Self::Anthropic,
             Some("none") | Some("") => return Self::None,
             Some(other) => {
-                eprintln!(
+                crate::log_warn!(
                     "[providers] unknown cache strategy `{}`, defaulting to None",
                     other
                 );

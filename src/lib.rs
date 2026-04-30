@@ -37,6 +37,7 @@
 pub mod agent;
 pub mod bootstrap;
 pub mod config;
+pub mod diagnostics;
 pub mod error;
 pub mod hooks;
 pub mod mcp;

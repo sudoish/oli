@@ -339,9 +339,9 @@ boundary.
 | Q1 | Extract `lib.rs`                                  | DONE   |
 | Q2 | Move binary entry to `src/bin/oli.rs`             | DONE   |
 | Q3 | Module-level `//!` docs everywhere                | DONE   |
-| R1 | `/diagnostics` ring buffer + slash                | TODO   |
-| R2 | Tiny logging shim replacing bare `eprintln!`      | TODO   |
-| R3 | `/diagnostics clear`                              | TODO   |
+| R1 | `/diagnostics` ring buffer + slash                | DONE   |
+| R2 | Tiny logging shim replacing bare `eprintln!`      | DONE   |
+| R3 | `/diagnostics clear`                              | DONE   |
 | S1 | Persisted approval allow-list                     | TODO   |
 | S2 | Subagent inherits parent's ToolContext            | TODO   |
 | S3 | Tool-result `ShowFull`                            | TODO   |

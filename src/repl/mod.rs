@@ -137,7 +137,7 @@ async fn run_turn(agent: &mut Agent, prompt: &str) {
                 cancelled = false;
                 match r {
                     Ok(_) => println!(),
-                    Err(e) => eprintln!("\nerror: {e}"),
+                    Err(e) => crate::log_error!("\nerror: {e}"),
                 }
             }
         }

@@ -206,7 +206,7 @@ pub async fn refresh_changed_tools(handles: &[McpHandle]) -> Vec<ToolListDelta> 
         let fresh = match server.refetch_tools().await {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("mcp `{}` tools/list refresh failed: {}", h.name, e);
+                crate::log_warn!("mcp `{}` tools/list refresh failed: {}", h.name, e);
                 continue;
             }
         };
@@ -231,7 +231,7 @@ pub async fn refresh_changed_tools(handles: &[McpHandle]) -> Vec<ToolListDelta> 
             .collect();
 
         if !removed.is_empty() || !added.is_empty() {
-            eprintln!(
+            crate::log_info!(
                 "[mcp] server `{}` tool list changed: -{} +{}",
                 h.name,
                 removed.len(),

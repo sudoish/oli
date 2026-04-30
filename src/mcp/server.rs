@@ -86,7 +86,7 @@ impl McpServer {
         match server.try_connect().await {
             Ok(()) => server.health = HealthState::Healthy,
             Err(e) => {
-                eprintln!("mcp: server `{}` failed to start: {}", name, e);
+                crate::log_warn!("mcp: server `{}` failed to start: {}", name, e);
                 server.health = HealthState::Down(e.to_string());
             }
         }
@@ -192,12 +192,13 @@ impl McpServer {
                     self.tools = parse_tool_list(&v);
                 }
                 Ok(Err(e)) => {
-                    eprintln!("mcp `{}` tools/list failed: {}", self.name, e);
+                    crate::log_warn!("mcp `{}` tools/list failed: {}", self.name, e);
                 }
                 Err(_) => {
-                    eprintln!(
+                    crate::log_warn!(
                         "mcp `{}` tools/list timed out after {}ms",
-                        self.name, self.cfg.init_timeout_ms
+                        self.name,
+                        self.cfg.init_timeout_ms
                     );
                 }
             }

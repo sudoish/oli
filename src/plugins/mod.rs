@@ -121,8 +121,9 @@ pub struct HostShared {
 }
 
 /// Discover and load every plugin from the standard set of dirs.
-/// Failures are reported as `eprintln!` lines and the affected plugin
-/// is skipped — a misbehaving plugin never crashes the session.
+/// Failures route through `crate::diagnostics` (visible in
+/// `/diagnostics` and on stderr) and the affected plugin is
+/// skipped — a misbehaving plugin never crashes the session.
 pub async fn load_all(
     tools_for_host: Arc<Mutex<crate::tools::Registry>>,
     spawner: Option<Arc<dyn SubagentSpawner>>,
@@ -216,7 +217,7 @@ pub async fn load_dir(
                 out.hooks.extend(loaded.hooks);
             }
             Err(e) => {
-                eprintln!("[plugins] {} failed to load: {}", path.display(), e);
+                crate::log_warn!("[plugins] {} failed to load: {}", path.display(), e);
             }
         }
     }
@@ -402,7 +403,16 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
         let plugin_id = host.plugin_id.clone();
         let log =
             lua.create_function(move |_lua, (_self, level, msg): (Table, String, String)| {
-                eprintln!("[plugin:{}] {} {}", plugin_id, level, msg);
+                let lvl = match level.as_str() {
+                    "error" => crate::diagnostics::Level::Error,
+                    "warn" => crate::diagnostics::Level::Warn,
+                    "debug" => crate::diagnostics::Level::Debug,
+                    _ => crate::diagnostics::Level::Info,
+                };
+                crate::diagnostics::push(
+                    lvl,
+                    format!("[plugin:{}] {} {}", plugin_id, level, msg),
+                );
                 Ok(())
             })?;
         ctx.set("log", log)?;
@@ -671,14 +681,14 @@ impl Hook for LuaHook {
         let f = match fetch_function(&self.lua, self.exec_idx) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("[plugin:{}] hook fetch failed: {}", self.plugin_id, e);
+                crate::log_warn!("[plugin:{}] hook fetch failed: {}", self.plugin_id, e);
                 return HookOutcome::Continue;
             }
         };
         let ctx_table = match build_ctx(&self.lua, self.host.clone()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("[plugin:{}] hook ctx build failed: {}", self.plugin_id, e);
+                crate::log_warn!("[plugin:{}] hook ctx build failed: {}", self.plugin_id, e);
                 return HookOutcome::Continue;
             }
         };
@@ -705,7 +715,7 @@ impl Hook for LuaHook {
         match result {
             Ok(v) => lua_value_to_hook_outcome(&self.lua, v),
             Err(e) => {
-                eprintln!("[plugin:{}] hook error: {}", self.plugin_id, e);
+                crate::log_warn!("[plugin:{}] hook error: {}", self.plugin_id, e);
                 HookOutcome::Continue
             }
         }

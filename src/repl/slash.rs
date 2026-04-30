@@ -159,6 +159,7 @@ impl SlashRegistry {
         r.register(Model);
         r.register(Sessions);
         r.register(Plugins::new(reloader));
+        r.register(Diagnostics);
         r.register(Exit);
         r
     }
@@ -828,6 +829,38 @@ impl SlashCommand for Exit {
     }
 }
 
+/// `/diagnostics [clear]` — show the recent operational log
+/// (plugin warnings, MCP failures, provider quirks). Without args
+/// renders the tail; with `clear` empties the ring buffer.
+pub struct Diagnostics;
+
+#[async_trait]
+impl SlashCommand for Diagnostics {
+    fn name(&self) -> &str {
+        "diagnostics"
+    }
+    fn description(&self) -> &str {
+        "show operational log (plugin/MCP/provider warnings); pass `clear` to wipe"
+    }
+    async fn run(&self, args: &str, _agent: &mut Agent) -> SlashOutcome {
+        let trimmed = args.trim();
+        if trimmed == "clear" {
+            crate::diagnostics::clear();
+            return SlashOutcome::Continue(Some("(diagnostics cleared)".into()));
+        }
+        let entries = crate::diagnostics::tail(50);
+        if entries.is_empty() {
+            return SlashOutcome::Continue(Some("(no diagnostics recorded)".into()));
+        }
+        let mut out = String::new();
+        out.push_str(&format!("Recent diagnostics ({}):\n", entries.len()));
+        for e in entries {
+            out.push_str(&format!("  [{}] {}\n", e.level.label(), e.body));
+        }
+        SlashOutcome::Continue(Some(out.trim_end().to_string()))
+    }
+}
+
 /// Render a `/help` listing for a registry. Kept here so the REPL can call it
 /// directly without re-implementing trait introspection.
 pub fn render_help(reg: &SlashRegistry) -> String {
@@ -857,6 +890,56 @@ mod tests {
         let mut agent = fresh_agent();
         let out = reg.dispatch("nope", &mut agent).await;
         assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn diagnostics_renders_recent_entries() {
+        // Serialized with the diagnostics::tests cases that
+        // share the process-wide ring buffer.
+        let _g = crate::diagnostics::TEST_SERIAL.lock().unwrap();
+        crate::diagnostics::clear();
+        crate::diagnostics::push(
+            crate::diagnostics::Level::Warn,
+            "[plugins] foo failed to load: oops".into(),
+        );
+        let reg = SlashRegistry::default_set();
+        let mut agent = fresh_agent();
+        let out = reg.dispatch("diagnostics", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(body)) => {
+                assert!(body.contains("[warn]"));
+                assert!(body.contains("foo failed to load"));
+            }
+            _ => panic!("expected Continue with body"),
+        }
+        crate::diagnostics::clear();
+    }
+
+    #[tokio::test]
+    async fn diagnostics_clear_wipes_the_ring() {
+        let _g = crate::diagnostics::TEST_SERIAL.lock().unwrap();
+        crate::diagnostics::clear();
+        crate::diagnostics::push(crate::diagnostics::Level::Info, "noise".into());
+        let reg = SlashRegistry::default_set();
+        let mut agent = fresh_agent();
+        let out = reg.dispatch("diagnostics clear", &mut agent).await.unwrap();
+        assert!(matches!(out, SlashOutcome::Continue(Some(_))));
+        assert!(crate::diagnostics::tail(usize::MAX).is_empty());
+    }
+
+    #[tokio::test]
+    async fn diagnostics_empty_states_renders_a_note() {
+        let _g = crate::diagnostics::TEST_SERIAL.lock().unwrap();
+        crate::diagnostics::clear();
+        let reg = SlashRegistry::default_set();
+        let mut agent = fresh_agent();
+        let out = reg.dispatch("diagnostics", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(body)) => {
+                assert!(body.contains("no diagnostics recorded"));
+            }
+            _ => panic!("expected note about empty buffer"),
+        }
     }
 
     #[tokio::test]
