@@ -80,17 +80,23 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
         let is_active = app.active_assistant == Some(i);
         match item {
             TranscriptItem::UserPrompt { body } => {
-                lines.push(Line::from(Span::styled(
-                    "▌ you",
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                )));
+                let bubble_width = bubble_width_for(rule_width);
                 for body_line in body.lines() {
-                    lines.push(Line::from(Span::styled(
-                        format!("  {}", body_line),
-                        Style::default().fg(Color::White),
-                    )));
+                    for chunk in wrap_to_width(body_line, bubble_width as usize) {
+                        let chunk_w = chunk.chars().count() as u16;
+                        let pad = rule_width.saturating_sub(chunk_w) as usize;
+                        let mut spans: Vec<Span<'static>> = Vec::with_capacity(2);
+                        if pad > 0 {
+                            spans.push(Span::raw(" ".repeat(pad)));
+                        }
+                        spans.push(Span::styled(
+                            chunk,
+                            Style::default()
+                                .fg(Color::Yellow)
+                                .add_modifier(Modifier::BOLD),
+                        ));
+                        lines.push(Line::from(spans));
+                    }
                 }
             }
             TranscriptItem::Assistant { body, done } => {
@@ -169,6 +175,45 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
         }
     }
     lines
+}
+
+/// Maximum width of a right-aligned user "bubble" given the
+/// transcript inner width. Caps at 60 cols so very wide terminals
+/// don't stretch user prompts edge-to-edge, with a 4-col gutter on
+/// the left so the bubble visibly hugs the right side. Floors at
+/// 20 cols so tiny terminals still wrap reasonably.
+fn bubble_width_for(inner_width: u16) -> u16 {
+    inner_width.saturating_sub(4).min(60).max(20)
+}
+
+/// Word-wrap `text` into chunks of at most `width` chars. Splits
+/// on whitespace; words longer than `width` are emitted on their
+/// own line (no mid-word breaking — terminal-pasted URLs survive).
+fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
+    if width == 0 || text.chars().count() <= width {
+        return vec![text.to_string()];
+    }
+    let mut out: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let word_w = word.chars().count();
+        if current.is_empty() {
+            current.push_str(word);
+        } else if current.chars().count() + 1 + word_w <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            out.push(std::mem::take(&mut current));
+            current.push_str(word);
+        }
+    }
+    if !current.is_empty() {
+        out.push(current);
+    }
+    if out.is_empty() {
+        out.push(text.to_string());
+    }
+    out
 }
 
 /// Dim horizontal rule used between user→assistant turn
@@ -317,6 +362,84 @@ mod tests {
             .push(TranscriptItem::UserPrompt { body: "q2".into() });
         let lines = build_transcript_lines(&app, 40);
         assert!(!has_rule(&lines));
+    }
+
+    fn empty_app() -> App {
+        let mut app = App::new();
+        app.transcript.clear(); // drop the welcome-system banner
+        app
+    }
+
+    #[test]
+    fn user_prompt_is_right_aligned_within_inner_width() {
+        let mut app = empty_app();
+        app.transcript
+            .push(TranscriptItem::UserPrompt { body: "hello".into() });
+        let inner = 40u16;
+        let lines = build_transcript_lines(&app, inner);
+        let body_line = lines
+            .iter()
+            .find(|l| line_text(l).contains("hello"))
+            .expect("hello should be in output");
+        let s = line_text(body_line);
+        assert!(s.ends_with("hello"));
+        assert_eq!(s.chars().count(), inner as usize);
+    }
+
+    #[test]
+    fn user_prompt_drops_the_you_header() {
+        let mut app = empty_app();
+        app.transcript
+            .push(TranscriptItem::UserPrompt { body: "hi".into() });
+        let lines = build_transcript_lines(&app, 40);
+        for l in &lines {
+            assert!(!line_text(l).contains("▌ you"));
+        }
+    }
+
+    #[test]
+    fn user_prompt_wraps_long_text_into_right_aligned_chunks() {
+        let mut app = empty_app();
+        let body =
+            "this is a sufficiently long user prompt that should wrap onto more than one chunk";
+        app.transcript
+            .push(TranscriptItem::UserPrompt { body: body.into() });
+        let inner = 40u16;
+        let lines = build_transcript_lines(&app, inner);
+        let chunks: Vec<&Line> = lines
+            .iter()
+            .filter(|l| {
+                let t: String = line_text(l);
+                !t.trim().is_empty() && !t.contains('─')
+            })
+            .collect();
+        assert!(chunks.len() >= 2, "expected wrapping, got {} chunk(s)", chunks.len());
+        for chunk in chunks {
+            let s = line_text(chunk);
+            assert_eq!(s.chars().count(), inner as usize, "chunk not padded to inner_width: {:?}", s);
+        }
+    }
+
+    #[test]
+    fn wrap_to_width_keeps_short_text_intact() {
+        assert_eq!(wrap_to_width("hello", 40), vec!["hello".to_string()]);
+    }
+
+    #[test]
+    fn wrap_to_width_breaks_on_whitespace_at_width() {
+        let out = wrap_to_width("one two three four five", 9);
+        // greedy: "one two", "three", "four five" — chunks ≤ 9 chars
+        for chunk in &out {
+            assert!(chunk.chars().count() <= 9, "{:?} too long", chunk);
+        }
+        assert_eq!(out.join(" "), "one two three four five");
+    }
+
+    #[test]
+    fn bubble_width_caps_at_60() {
+        assert_eq!(bubble_width_for(200), 60);
+        assert_eq!(bubble_width_for(40), 36); // 40 - 4
+        assert_eq!(bubble_width_for(10), 20); // floor
     }
 
     #[test]
