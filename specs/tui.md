@@ -459,12 +459,12 @@ line-oriented plan; this doc supersedes it.
 
 | ID | Item                                              | Status |
 | -- | ------------------------------------------------- | ------ |
-| F1 | TUI module skeleton (`src/tui/`)                  | TODO   |
-| F2 | Three-pane layout (status / transcript / input)   | TODO   |
-| F3 | Crossterm + alternate-screen lifecycle            | TODO   |
-| F4 | Echo loop (input → transcript)                    | TODO   |
-| F5 | Quit / cancel keybindings                         | TODO   |
-| F6 | `oli --plain` fallback to line REPL               | TODO   |
+| F1 | TUI module skeleton (`src/tui/`)                  | DONE   |
+| F2 | Three-pane layout (status / transcript / input)   | DONE   |
+| F3 | Crossterm + alternate-screen lifecycle            | DONE   |
+| F4 | Echo loop (input → transcript)                    | DONE   |
+| F5 | Quit / cancel keybindings                         | DONE   |
+| F6 | `oli --plain` fallback to line REPL               | DONE   |
 | G1 | Streaming sink → UI events                        | TODO   |
 | G2 | Idle / Thinking / Streaming mode transitions     | TODO   |
 | G3 | Slash command dispatch                            | TODO   |

@@ -9,6 +9,7 @@ mod policy;
 mod providers;
 mod repl;
 mod tools;
+mod tui;
 
 use async_trait::async_trait;
 use clap::Parser;
@@ -60,6 +61,14 @@ struct Args {
     /// prompts).
     #[arg(long)]
     strict: bool,
+
+    /// Disable the TUI and fall back to the line-mode rustyline REPL.
+    /// Auto-enabled when stdin or stdout isn't a terminal (so
+    /// piped usage still works without setting the flag). Useful
+    /// inside SSH sessions on minimal terminals or when
+    /// terminal-native scrollback / mouse selection matter.
+    #[arg(long)]
+    plain: bool,
 }
 
 #[tokio::main]
@@ -203,15 +212,26 @@ async fn run(args: Args) -> Result<()> {
             Ok(())
         }
         None => {
-            // Interactive: prompt the user via stdin for any `Ask`.
+            // Interactive: pick TUI by default, fall back to the
+            // line-mode REPL on `--plain` or when stdin/stdout
+            // isn't a TTY (piped invocations).
+            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
+                && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            let use_tui = !args.plain && tty;
             if let Some(id) = &session_id {
-                println!("session: {}", id);
+                if !use_tui {
+                    println!("session: {}", id);
+                }
             }
             let agent = agent_base
                 .with_approver(Box::new(ReadlineApprover))
                 .pin_system_prompt(system_prompt)
                 .await;
-            repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
+            if use_tui {
+                tui::run(agent, plugin_slashes, Some(plugin_reloader)).await
+            } else {
+                repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
+            }
         }
     }
 }
