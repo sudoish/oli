@@ -11,18 +11,26 @@
 //! pulldown-cmark falls through to literal text, so the user
 //! sees the raw markdown until the closing token lands.
 //!
-//! Code fences route through `syntect` for syntax highlighting.
-//! The bundled `SyntaxSet` and `ThemeSet` are loaded lazily on
+//! Code fences route through `syntect` for syntax highlighting
+//! when the `syntax-highlight` feature is on (default). The
+//! bundled `SyntaxSet` and `ThemeSet` are loaded lazily on
 //! first use (~few hundred ms, ~2MB resident) so a
-//! markdown-free session never pays for them.
-
-use std::sync::OnceLock;
+//! markdown-free session never pays for them. With
+//! `--no-default-features --features tui`, code fences fall
+//! back to plain dim text — the syntect dep drops out of the
+//! binary entirely.
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+
+#[cfg(feature = "syntax-highlight")]
+use std::sync::OnceLock;
+#[cfg(feature = "syntax-highlight")]
 use syntect::highlighting::{Style as SynStyle, Theme as SynTheme, ThemeSet};
+#[cfg(feature = "syntax-highlight")]
 use syntect::parsing::SyntaxSet;
+#[cfg(feature = "syntax-highlight")]
 use syntect::util::LinesWithEndings;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,6 +54,7 @@ impl Theme {
         }
     }
 
+    #[cfg(feature = "syntax-highlight")]
     fn syntect_name(self) -> &'static str {
         match self {
             // Both ship in `syntect`'s default `ThemeSet`.
@@ -67,6 +76,12 @@ pub fn render(body: &str, theme: Theme) -> Vec<Line<'static>> {
 }
 
 struct Renderer {
+    /// Theme drives the syntect color set when the `syntax-
+    /// highlight` feature is on; in plain-fallback builds the
+    /// field is unused but kept on the struct for symmetry and
+    /// to keep the public `Theme` enum aligned with what tests
+    /// pass in.
+    #[cfg_attr(not(feature = "syntax-highlight"), allow(dead_code))]
     theme: Theme,
     /// Lines we've fully composed so far.
     out: Vec<Line<'static>>,
@@ -352,15 +367,6 @@ impl Renderer {
     }
 
     fn flush_code_block(&mut self, cb: CodeBlock) {
-        let (ss, theme) = syntect_assets(self.theme);
-        let syntax = cb
-            .lang
-            .as_deref()
-            .and_then(|l| ss.find_syntax_by_token(l))
-            .or_else(|| ss.find_syntax_by_first_line(&cb.body))
-            .unwrap_or_else(|| ss.find_syntax_plain_text());
-        let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
-
         // Header gutter so code fences are visually distinct from
         // surrounding prose. Rendered as a faint cyan rule with
         // the language tag.
@@ -373,31 +379,55 @@ impl Renderer {
             Style::default().fg(Color::Cyan),
         )));
 
-        for line in LinesWithEndings::from(&cb.body) {
-            // syntect can occasionally fail on malformed input;
-            // fall back to dim mono on error.
-            let highlighted = match highlighter.highlight_line(line, ss) {
-                Ok(v) => v,
-                Err(_) => {
-                    self.out.push(Line::from(Span::styled(
-                        format!("  │ {}", line.trim_end_matches('\n')),
-                        Style::default().fg(Color::White),
-                    )));
-                    continue;
+        #[cfg(feature = "syntax-highlight")]
+        {
+            let (ss, theme) = syntect_assets(self.theme);
+            let syntax = cb
+                .lang
+                .as_deref()
+                .and_then(|l| ss.find_syntax_by_token(l))
+                .or_else(|| ss.find_syntax_by_first_line(&cb.body))
+                .unwrap_or_else(|| ss.find_syntax_plain_text());
+            let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
+
+            for line in LinesWithEndings::from(&cb.body) {
+                // syntect can occasionally fail on malformed input;
+                // fall back to dim mono on error.
+                let highlighted = match highlighter.highlight_line(line, ss) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        self.out.push(Line::from(Span::styled(
+                            format!("  │ {}", line.trim_end_matches('\n')),
+                            Style::default().fg(Color::White),
+                        )));
+                        continue;
+                    }
+                };
+                let mut spans: Vec<Span<'static>> = vec![Span::styled(
+                    "  │ ",
+                    Style::default().fg(Color::Cyan),
+                )];
+                for (style, frag) in highlighted {
+                    let frag = frag.trim_end_matches('\n');
+                    if frag.is_empty() {
+                        continue;
+                    }
+                    spans.push(Span::styled(frag.to_string(), to_ratatui_style(style)));
                 }
-            };
-            let mut spans: Vec<Span<'static>> = vec![Span::styled(
-                "  │ ",
-                Style::default().fg(Color::Cyan),
-            )];
-            for (style, frag) in highlighted {
-                let frag = frag.trim_end_matches('\n');
-                if frag.is_empty() {
-                    continue;
-                }
-                spans.push(Span::styled(frag.to_string(), to_ratatui_style(style)));
+                self.out.push(Line::from(spans));
             }
-            self.out.push(Line::from(spans));
+        }
+        #[cfg(not(feature = "syntax-highlight"))]
+        {
+            // Plain fallback when the syntect feature is off:
+            // each line in the fence gets a cyan gutter with the
+            // raw text, no per-token colors.
+            for line in cb.body.lines() {
+                self.out.push(Line::from(vec![
+                    Span::styled("  │ ", Style::default().fg(Color::Cyan)),
+                    Span::styled(line.to_string(), Style::default().fg(Color::White)),
+                ]));
+            }
         }
 
         self.out.push(Line::from(Span::styled(
@@ -421,6 +451,7 @@ fn heading_prefix(level: HeadingLevel) -> String {
 /// foreground color and bold/italic flags. Background is dropped
 /// — the assistant pane has its own bg, and overlaying syntect's
 /// theme bg looks busy.
+#[cfg(feature = "syntax-highlight")]
 fn to_ratatui_style(style: SynStyle) -> Style {
     let mut s = Style::default().fg(Color::Rgb(
         style.foreground.r,
@@ -443,6 +474,7 @@ fn to_ratatui_style(style: SynStyle) -> Style {
 /// Lazy-initialized syntect bundles. Loaded once on first code
 /// fence; subsequent renders reuse them. ~2 MB resident +
 /// ~hundred-ms startup cost paid lazily.
+#[cfg(feature = "syntax-highlight")]
 fn syntect_assets(theme: Theme) -> (&'static SyntaxSet, &'static SynTheme) {
     static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
     static THEME_SETS: OnceLock<ThemeSet> = OnceLock::new();

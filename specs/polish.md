@@ -347,6 +347,6 @@ boundary.
 | S3 | Tool-result `ShowFull`                            | DONE   |
 | T1 | `oli init` headless CLI                           | DONE   |
 | T2 | `/config reload`                                  | DONE   |
-| T3 | Syntect (and TUI) feature flags                   | TODO   |
+| T3 | Syntect (and TUI) feature flags                   | DONE   |
 | T4 | TUI cheatsheet doc                                | TODO   |
 | T5 | `specs/README.md` table of contents               | TODO   |

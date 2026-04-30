@@ -18,7 +18,9 @@ use oli::error::Result;
 use oli::policy::{AlwaysDeny, ConfigPolicy, ReadlineApprover};
 use oli::providers::Provider as ProviderTrait;
 use oli::tools::task::{SubagentSpawner, Task};
-use oli::{hooks, mcp, notes, plugins, providers, repl, tui};
+#[cfg(feature = "tui")]
+use oli::tui;
+use oli::{hooks, mcp, notes, plugins, providers, repl};
 
 #[derive(Parser)]
 #[command(author, version, about)]
@@ -335,10 +337,19 @@ async fn run(args: Args) -> Result<()> {
         None => {
             // Interactive: pick TUI by default, fall back to the
             // line-mode REPL on `--plain` or when stdin/stdout
-            // isn't a TTY (piped invocations).
+            // isn't a TTY (piped invocations). When the binary
+            // was built `--no-default-features` (without `tui`),
+            // `use_tui` is forced false and we always use the
+            // line-mode REPL.
             let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
                 && std::io::IsTerminal::is_terminal(&std::io::stdout());
+            #[cfg(feature = "tui")]
             let use_tui = !args.plain && tty;
+            #[cfg(not(feature = "tui"))]
+            let use_tui = {
+                let _ = (args.plain, tty);
+                false
+            };
             if let Some(id) = &session_id {
                 if !use_tui {
                     println!("session: {}", id);
@@ -348,11 +359,20 @@ async fn run(args: Args) -> Result<()> {
                 .with_approver(Box::new(ReadlineApprover))
                 .pin_system_prompt(system_prompt)
                 .await;
-            if use_tui {
-                tui::run(agent, plugin_slashes, Some(plugin_reloader), session_id).await
-            } else {
-                repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
+            #[cfg(feature = "tui")]
+            {
+                if use_tui {
+                    return tui::run(
+                        agent,
+                        plugin_slashes,
+                        Some(plugin_reloader),
+                        session_id,
+                    )
+                    .await;
+                }
             }
+            let _ = use_tui; // referenced in cfg branch above
+            repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
         }
     }
 }

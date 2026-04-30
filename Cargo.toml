@@ -5,6 +5,15 @@ edition = "2024"
 rust-version = "1.95"
 description = "A minimal, hackable, single-binary terminal coding agent."
 
+[features]
+# Default ships the full experience: TUI + code-fence syntax highlighting.
+# `cargo build --no-default-features` produces a line-mode-only binary
+# (~2-3 MB smaller) that's useful for piped CI usage where the TUI deps
+# are dead weight.
+default = ["tui", "syntax-highlight"]
+tui = ["dep:ratatui", "dep:crossterm", "dep:tui-textarea-2", "dep:pulldown-cmark"]
+syntax-highlight = ["tui", "dep:syntect"]
+
 [dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "signal"] }
 clap = { version = "4.3.14", features = ["derive"] }
@@ -20,12 +29,14 @@ mlua = { version = "0.10", features = ["lua54", "vendored", "async", "send", "se
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 eventsource-stream = "0.2"
 similar = "2"
-ratatui = "0.30.0"
-crossterm = { version = "0.29.0", features = ["event-stream"] }
-tui-textarea-2 = "0.10.2"
-pulldown-cmark = "0.13.3"
-syntect = "5.3.0"
 libc = "0.2.186"
+
+# Optional: gated behind feature flags above.
+ratatui = { version = "0.30.0", optional = true }
+crossterm = { version = "0.29.0", features = ["event-stream"], optional = true }
+tui-textarea-2 = { version = "0.10.2", optional = true }
+pulldown-cmark = { version = "0.13.3", optional = true }
+syntect = { version = "5.3.0", optional = true }
 
 [dev-dependencies]
 tempfile = "3"

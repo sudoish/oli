@@ -47,6 +47,7 @@ pub mod policy;
 pub mod providers;
 pub mod repl;
 pub mod tools;
+#[cfg(feature = "tui")]
 pub mod tui;
 pub mod wizard_init;
 
