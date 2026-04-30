@@ -28,18 +28,20 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     let input_lines = app.input.lines().len().max(1).min(8) as u16;
     let input_height = input_lines + 2; // borders
     let chunks = Layout::vertical([
-        Constraint::Length(1),               // status bar
+        Constraint::Length(1),               // status bar (identity)
         Constraint::Min(3),                  // transcript
+        Constraint::Length(1),               // activity strip
         Constraint::Length(input_height),    // input
     ])
     .split(area);
 
     draw_status(f, chunks[0], app);
     transcript::draw_transcript(f, chunks[1], app);
-    draw_input(f, chunks[2], app);
+    draw_activity_strip(f, chunks[2], app);
+    draw_input(f, chunks[3], app);
 
     if app.completion.is_some() {
-        draw_completion_popup(f, chunks[1], chunks[2], app);
+        draw_completion_popup(f, chunks[1], chunks[3], app);
     }
     use crate::tui::app::Overlay;
     match &app.overlay {
@@ -83,13 +85,10 @@ pub(super) fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
-    // Left-aligned identity strip + right-aligned mode indicator.
-    // Width-aware collapse: the identity fields drop right-to-
-    // left when the terminal narrows. Priority (most important
-    // last to drop): model > tokens > branch > session.
-
-    let mode = render_mode_indicator(app);
-    let mode_w = spans_width(&mode) as u16;
+    // Identity-only status bar: title chip + model + tokens +
+    // branch + session, dropped right-to-left when the terminal
+    // narrows. The live activity indicator lives in its own row
+    // above the input (see `draw_activity_strip`).
 
     let mut left = vec![Span::styled(
         format!(" {} ", TITLE),
@@ -100,9 +99,9 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     )];
 
     let fields = build_status_fields(app);
-    let mut budget = area.width.saturating_sub(mode_w + 2); // +2 for spacing
-    // Subtract the title badge.
-    budget = budget.saturating_sub(visible_width(&Line::from(left.clone())) as u16);
+    let mut budget = area
+        .width
+        .saturating_sub(visible_width(&Line::from(left.clone())) as u16);
 
     // Drop fields right-to-left until we fit. Each field is "  • <body>".
     let mut visible: Vec<Vec<Span<'static>>> = Vec::new();
@@ -121,15 +120,6 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
         ));
         left.extend(field);
     }
-
-    // Pad and append mode on the right. We compute remaining
-    // width and pad with spaces so mode lands at the far right.
-    let line_w = visible_width(&Line::from(left.clone())) as u16;
-    let pad = area.width.saturating_sub(line_w + mode_w);
-    if pad > 0 {
-        left.push(Span::raw(" ".repeat(pad as usize)));
-    }
-    left.extend(mode);
 
     let bar = Paragraph::new(Line::from(left)).style(Style::default().bg(Color::Reset));
     f.render_widget(bar, area);
@@ -238,11 +228,27 @@ fn format_count(n: u32) -> String {
     }
 }
 
-/// Right-aligned mode indicator: the live signal of "what is
-/// the loop doing now?" Approval modal up trumps everything;
-/// otherwise renders the agent's mode with a spinner / arrow
-/// / dot / pause glyph.
-fn render_mode_indicator(app: &App) -> Vec<Span<'static>> {
+/// Live activity row above the input. Left side: mode +
+/// elapsed time (or a dim em-dash when idle). Right side:
+/// `Esc to cancel` whenever the harness is busy. Approval modal
+/// up trumps everything.
+fn draw_activity_strip(f: &mut Frame, area: Rect, app: &App) {
+    let left = render_activity_strip_left(app);
+    let right = render_activity_strip_right(app);
+    let left_w = spans_width(&left) as u16;
+    let right_w = spans_width(&right) as u16;
+    let mut spans = left;
+    let pad = area.width.saturating_sub(left_w + right_w);
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad as usize)));
+    }
+    spans.extend(right);
+    let strip = Paragraph::new(Line::from(spans));
+    f.render_widget(strip, area);
+}
+
+/// Left half of the activity strip — the mode label.
+pub(super) fn render_activity_strip_left(app: &App) -> Vec<Span<'static>> {
     if app.approval().is_some() {
         return vec![Span::styled(
             " ⏸ awaiting approval ".to_string(),
@@ -254,10 +260,8 @@ fn render_mode_indicator(app: &App) -> Vec<Span<'static>> {
     }
     match &app.mode {
         Mode::Idle => vec![Span::styled(
-            " · idle ".to_string(),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
+            " — ".to_string(),
+            Style::default().fg(Color::DarkGray),
         )],
         Mode::Thinking { since } => {
             let secs = since.elapsed().as_secs_f32();
@@ -285,6 +289,24 @@ fn render_mode_indicator(app: &App) -> Vec<Span<'static>> {
             )]
         }
     }
+}
+
+/// Right half of the activity strip — cancel hint while busy,
+/// suppressed while an approval modal is up (the modal owns the
+/// keyboard) and while idle.
+pub(super) fn render_activity_strip_right(app: &App) -> Vec<Span<'static>> {
+    if app.approval().is_some() {
+        return Vec::new();
+    }
+    if matches!(app.mode, Mode::Idle) {
+        return Vec::new();
+    }
+    vec![Span::styled(
+        "Esc to cancel ".to_string(),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )]
 }
 
 /// Pick a frame of a 10-step braille spinner from elapsed seconds.
@@ -406,34 +428,73 @@ mod tests {
     }
 
     #[test]
-    fn mode_indicator_overrides_to_awaiting_when_modal_is_up() {
+    fn activity_strip_overrides_to_awaiting_when_modal_is_up() {
         let mut app = app_with_status(StatusModel::default());
         app.on_approval_requested(
             "Edit".into(),
             serde_json::json!({"file_path":"x"}),
             "edit".into(),
         );
-        let spans = render_mode_indicator(&app);
+        let spans = render_activity_strip_left(&app);
         let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(combined.contains("awaiting approval"));
     }
 
     #[test]
-    fn mode_indicator_idle_when_nothing_is_happening() {
+    fn activity_strip_renders_dim_dash_when_idle() {
         let app = app_with_status(StatusModel::default());
-        let spans = render_mode_indicator(&app);
+        let spans = render_activity_strip_left(&app);
         let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(combined.contains("idle"));
+        assert!(combined.contains("—"));
     }
 
     #[test]
-    fn mode_indicator_streaming_when_streaming() {
+    fn activity_strip_renders_streaming_label_with_elapsed() {
         let mut app = app_with_status(StatusModel::default());
         app.on_turn_started();
         app.on_content_chunk("hi");
-        let spans = render_mode_indicator(&app);
+        let spans = render_activity_strip_left(&app);
         let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(combined.contains("streaming"));
+        assert!(combined.contains("s")); // "0.0s" / "1.2s" etc.
+    }
+
+    #[test]
+    fn activity_strip_renders_tool_running_label() {
+        let mut app = app_with_status(StatusModel::default());
+        app.on_turn_started();
+        app.on_tool_start(1, "grep".into(), "".into());
+        let spans = render_activity_strip_left(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("running grep"), "got: {}", combined);
+    }
+
+    #[test]
+    fn activity_strip_right_shows_cancel_hint_while_busy() {
+        let mut app = app_with_status(StatusModel::default());
+        app.on_turn_started();
+        let spans = render_activity_strip_right(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("Esc"));
+    }
+
+    #[test]
+    fn activity_strip_right_is_empty_when_idle() {
+        let app = app_with_status(StatusModel::default());
+        let spans = render_activity_strip_right(&app);
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn activity_strip_right_is_empty_when_modal_is_up() {
+        let mut app = app_with_status(StatusModel::default());
+        app.on_approval_requested(
+            "Edit".into(),
+            serde_json::json!({"file_path":"x"}),
+            "edit".into(),
+        );
+        let spans = render_activity_strip_right(&app);
+        assert!(spans.is_empty());
     }
 }
 
