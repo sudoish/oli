@@ -147,6 +147,35 @@ impl ToolContext {
     pub async fn cwd(&self) -> Option<PathBuf> {
         self.inner.lock().await.cwd.clone()
     }
+
+    /// Snapshot read-set entries (canonical path + mtime) — used
+    /// by `SubagentSpawner` to seed a child agent's read-set
+    /// from the parent's. The snapshot is one-way: the parent's
+    /// reads carry forward, but the child's later reads stay
+    /// local (they don't propagate back).
+    pub async fn snapshot_reads(&self) -> Vec<(PathBuf, Option<SystemTime>)> {
+        self.inner
+            .lock()
+            .await
+            .read_files
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect()
+    }
+
+    /// Seed the read-set from a list of `(path, mtime)` pairs
+    /// (typically from another context's `snapshot_reads`). The
+    /// `ReadLogger`, if any, is not invoked — same semantics as
+    /// `insert_canonical_read`.
+    pub async fn insert_canonical_reads_with_mtimes(
+        &self,
+        entries: Vec<(PathBuf, Option<SystemTime>)>,
+    ) {
+        let mut state = self.inner.lock().await;
+        for (path, mtime) in entries {
+            state.read_files.insert(path, mtime);
+        }
+    }
 }
 
 #[cfg(test)]

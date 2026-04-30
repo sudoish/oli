@@ -342,8 +342,8 @@ boundary.
 | R1 | `/diagnostics` ring buffer + slash                | DONE   |
 | R2 | Tiny logging shim replacing bare `eprintln!`      | DONE   |
 | R3 | `/diagnostics clear`                              | DONE   |
-| S1 | Persisted approval allow-list                     | TODO   |
-| S2 | Subagent inherits parent's ToolContext            | TODO   |
+| S1 | Persisted approval allow-list                     | DONE   |
+| S2 | Subagent inherits parent's ToolContext            | DONE   |
 | S3 | Tool-result `ShowFull`                            | TODO   |
 | T1 | `oli init` headless CLI                           | TODO   |
 | T2 | `/config reload`                                  | TODO   |

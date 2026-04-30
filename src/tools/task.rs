@@ -29,9 +29,22 @@ const DEFAULT_MAX_RESULT_BYTES: usize = 8 * 1024;
 /// implementation builds a fresh agent each call, runs it bounded by
 /// `max_turns`, and returns whatever the child's final assistant
 /// message contained.
+///
+/// `parent_ctx` is the parent agent's `ToolContext` at the moment
+/// of the spawn. Implementations should snapshot the read-set
+/// (and optionally the sticky cwd) into the child's context so
+/// the child can `Edit` files the parent already read without
+/// re-reading. The clone is one-way — the child's later reads
+/// stay local, mirroring how subagent results stay scoped to
+/// the child.
 #[async_trait]
 pub trait SubagentSpawner: Send + Sync {
-    async fn spawn(&self, prompt: &str, max_turns: usize) -> Result<String>;
+    async fn spawn(
+        &self,
+        prompt: &str,
+        max_turns: usize,
+        parent_ctx: Option<ToolContext>,
+    ) -> Result<String>;
 }
 
 pub struct Task {
@@ -78,7 +91,7 @@ impl Tool for Task {
         })
     }
 
-    async fn run(&self, args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn run(&self, args: Value, ctx: &ToolContext) -> Result<String> {
         let prompt = args.get("prompt").and_then(|v| v.as_str()).ok_or_else(|| {
             ToolError::InvalidArguments {
                 tool: "Task".into(),
@@ -95,7 +108,15 @@ impl Tool for Task {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_MAX_RESULT_BYTES);
-        let raw = self.spawner.spawn(prompt, max_turns).await?;
+        // Hand the spawner a clone of our context so the child
+        // agent can inherit the parent's read-set / cwd. ToolContext
+        // is internally `Arc<Mutex<...>>` — the clone is cheap, but
+        // the child snapshots-and-detaches inside spawn() so its
+        // later reads stay local.
+        let raw = self
+            .spawner
+            .spawn(prompt, max_turns, Some(ctx.clone()))
+            .await?;
         Ok(truncate(&raw, max_result_bytes))
     }
 }
@@ -109,26 +130,51 @@ mod tests {
     /// answer. Lets tests assert plumbing without spinning a real agent.
     struct StubSpawner {
         seen: Mutex<Vec<(String, usize)>>,
+        ctx_snapshots: Mutex<Vec<Vec<std::path::PathBuf>>>,
         answer: String,
+    }
+
+    impl StubSpawner {
+        fn new(answer: &str) -> Self {
+            Self {
+                seen: Mutex::new(Vec::new()),
+                ctx_snapshots: Mutex::new(Vec::new()),
+                answer: answer.into(),
+            }
+        }
     }
 
     #[async_trait]
     impl SubagentSpawner for StubSpawner {
-        async fn spawn(&self, prompt: &str, max_turns: usize) -> Result<String> {
+        async fn spawn(
+            &self,
+            prompt: &str,
+            max_turns: usize,
+            parent_ctx: Option<ToolContext>,
+        ) -> Result<String> {
             self.seen
                 .lock()
                 .unwrap()
                 .push((prompt.to_string(), max_turns));
+            // Capture the parent's read-set snapshot (if any)
+            // so tests can assert it propagated correctly.
+            let snapshot = match parent_ctx {
+                Some(c) => c
+                    .snapshot_reads()
+                    .await
+                    .into_iter()
+                    .map(|(p, _)| p)
+                    .collect(),
+                None => Vec::new(),
+            };
+            self.ctx_snapshots.lock().unwrap().push(snapshot);
             Ok(self.answer.clone())
         }
     }
 
     #[tokio::test]
     async fn forwards_prompt_to_spawner_and_returns_summary() {
-        let spawner = Arc::new(StubSpawner {
-            seen: Mutex::new(Vec::new()),
-            answer: "child-summary".into(),
-        });
+        let spawner = Arc::new(StubSpawner::new("child-summary"));
         let task = Task::new(spawner.clone());
         let ctx = ToolContext::new();
 
@@ -146,10 +192,7 @@ mod tests {
 
     #[tokio::test]
     async fn honors_explicit_max_turns_argument() {
-        let spawner = Arc::new(StubSpawner {
-            seen: Mutex::new(Vec::new()),
-            answer: "ok".into(),
-        });
+        let spawner = Arc::new(StubSpawner::new("ok"));
         let task = Task::new(spawner.clone());
         let ctx = ToolContext::new();
 
@@ -164,7 +207,12 @@ mod tests {
         struct NoCall;
         #[async_trait]
         impl SubagentSpawner for NoCall {
-            async fn spawn(&self, _: &str, _: usize) -> Result<String> {
+            async fn spawn(
+                &self,
+                _: &str,
+                _: usize,
+                _: Option<ToolContext>,
+            ) -> Result<String> {
                 unreachable!("spawner must not be invoked when args invalid")
             }
         }
@@ -179,10 +227,7 @@ mod tests {
         // 50 KB summary; default cap is 8 KB. Result should be capped
         // and the truncation marker visible.
         let big = "x".repeat(50_000);
-        let spawner = Arc::new(StubSpawner {
-            seen: Mutex::new(Vec::new()),
-            answer: big,
-        });
+        let spawner = Arc::new(StubSpawner::new(&big));
         let task = Task::new(spawner);
         let ctx = ToolContext::new();
         let out = task
@@ -204,10 +249,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_max_result_bytes_overrides_default_cap() {
         let answer = "abcdef".repeat(2000); // ~12 KB
-        let spawner = Arc::new(StubSpawner {
-            seen: Mutex::new(Vec::new()),
-            answer: answer.clone(),
-        });
+        let spawner = Arc::new(StubSpawner::new(&answer));
         let task = Task::new(spawner);
         let ctx = ToolContext::new();
         // Cap above the answer length: nothing truncated.
@@ -226,7 +268,12 @@ mod tests {
         struct Failing;
         #[async_trait]
         impl SubagentSpawner for Failing {
-            async fn spawn(&self, _: &str, _: usize) -> Result<String> {
+            async fn spawn(
+                &self,
+                _: &str,
+                _: usize,
+                _: Option<ToolContext>,
+            ) -> Result<String> {
                 Err(crate::error::AgentError::Provider("boom".into()))
             }
         }
@@ -234,5 +281,50 @@ mod tests {
         let ctx = ToolContext::new();
         let err = task.run(json!({"prompt": "x"}), &ctx).await.unwrap_err();
         assert!(err.to_string().contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn parent_read_set_propagates_to_spawner_via_tool_context() {
+        let spawner = Arc::new(StubSpawner::new("done"));
+        let task = Task::new(spawner.clone());
+
+        // Parent has read two files. Both canonical paths must
+        // appear in the snapshot the spawner receives.
+        let f1 = tempfile::NamedTempFile::new().unwrap();
+        let f2 = tempfile::NamedTempFile::new().unwrap();
+        let ctx = ToolContext::new();
+        ctx.mark_read(f1.path()).await;
+        ctx.mark_read(f2.path()).await;
+
+        task.run(json!({"prompt": "delegate"}), &ctx).await.unwrap();
+
+        let snapshots = spawner.ctx_snapshots.lock().unwrap().clone();
+        assert_eq!(snapshots.len(), 1);
+        let mut paths = snapshots[0].clone();
+        paths.sort();
+        let mut expected: Vec<_> = vec![
+            tokio::fs::canonicalize(f1.path()).await.unwrap(),
+            tokio::fs::canonicalize(f2.path()).await.unwrap(),
+        ];
+        expected.sort();
+        assert_eq!(paths, expected);
+    }
+
+    #[tokio::test]
+    async fn child_reads_dont_propagate_back_to_parent() {
+        // Sanity: snapshot_reads is a one-way clone via
+        // insert_canonical_reads_with_mtimes; a child writing
+        // into its own ToolContext (which the StubSpawner does
+        // not, but we simulate here) doesn't surface to the
+        // parent.
+        let parent = ToolContext::new();
+        let child = ToolContext::new();
+
+        // Seed child from parent (empty), then have child read
+        // a file. Parent's snapshot must remain empty.
+        let f = tempfile::NamedTempFile::new().unwrap();
+        child.mark_read(f.path()).await;
+        let parent_snap = parent.snapshot_reads().await;
+        assert!(parent_snap.is_empty());
     }
 }

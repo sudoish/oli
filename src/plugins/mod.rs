@@ -492,8 +492,13 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
                         "ctx:prompt: no SubagentSpawner bound to this plugin host".into(),
                     ))
                 })?;
+                // Plugins don't have visibility into the parent
+                // agent's tool context — they ride a sandboxed
+                // host shared across all plugin calls — so we
+                // don't propagate read-set/cwd through. A future
+                // refinement could expose a read-only snapshot.
                 spawner
-                    .spawn(&prompt, 10)
+                    .spawn(&prompt, 10, None)
                     .await
                     .map_err(mlua::Error::external)
             }

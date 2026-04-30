@@ -119,7 +119,12 @@ pub struct DefaultAgentSpawner {
 
 #[async_trait]
 impl SubagentSpawner for DefaultAgentSpawner {
-    async fn spawn(&self, prompt: &str, max_turns: usize) -> Result<String> {
+    async fn spawn(
+        &self,
+        prompt: &str,
+        max_turns: usize,
+        parent_ctx: Option<crate::tools::ToolContext>,
+    ) -> Result<String> {
         let model = self.cfg.model_for(&self.provider_name)?;
         let provider: Box<dyn ProviderTrait> =
             providers::build(&self.cfg, &self.provider_name)?;
@@ -133,6 +138,22 @@ impl SubagentSpawner for DefaultAgentSpawner {
             .with_policy(policy)
             .with_config(self.cfg.clone(), &self.provider_name)
             .with_max_turns(max_turns);
+
+        // Seed the child's read-set + cwd from the parent's
+        // snapshot so the child can Edit files the parent has
+        // already read without re-reading. `read_logger` is
+        // intentionally not propagated — the child's reads are
+        // ephemeral and don't belong in the parent's session
+        // transcript.
+        if let Some(parent) = parent_ctx {
+            let child_ctx = agent.tool_context();
+            let reads = parent.snapshot_reads().await;
+            child_ctx.insert_canonical_reads_with_mtimes(reads).await;
+            if let Some(cwd) = parent.cwd().await {
+                child_ctx.set_cwd(cwd).await;
+            }
+        }
+
         agent.run(prompt).await
     }
 }
