@@ -195,10 +195,10 @@ each phase boundary.
 | C1 | `/plugins reload`                                 | DONE   |
 | C2 | Session-level cost in `/cost`                     | DONE   |
 | C3 | Subagent result cap                               | DONE   |
-| D1 | OpenRouter prompt-cache headers                   | TODO   |
-| D2 | Anthropic `list_models`                           | TODO   |
-| D3 | Unified-diff preview for Edit/Write               | TODO   |
-| D4 | File-watch invalidation for Edit                  | TODO   |
+| D1 | OpenRouter prompt-cache headers                   | DONE   |
+| D2 | Anthropic `list_models`                           | DONE   |
+| D3 | Unified-diff preview for Edit/Write               | DONE   |
+| D4 | File-watch invalidation for Edit                  | DONE   |
 | E1 | Plugin resource caps via mlua instruction hook    | TODO   |
 | E2 | EmbeddingRAG memory strategy                      | TODO   |
 | E3 | MCP `notifications/tools/list_changed`            | TODO   |

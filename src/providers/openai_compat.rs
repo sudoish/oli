@@ -24,16 +24,79 @@ pub struct OpenAICompatProvider {
     client: reqwest::Client,
     base_url: String,
     api_key: String,
+    cache: CacheStrategy,
+}
+
+/// Prompt-caching mode for OpenAI-compat requests.
+///
+/// `Anthropic` attaches `cache_control: { type: "ephemeral" }` to the
+/// last (system) message and to the last tool definition, mirroring
+/// the breakpoints the native Anthropic provider uses. Routes through
+/// OpenRouter that target Claude models accept this and emit cache
+/// reads on long sessions, dropping repeat-input cost by >90% on
+/// hits.
+///
+/// `None` is the default and matches the pre-Phase-D shape: a plain
+/// OpenAI Chat Completions payload with stringy message content and
+/// no cache hints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CacheStrategy {
+    #[default]
+    None,
+    Anthropic,
+}
+
+impl CacheStrategy {
+    /// Resolve a strategy from the config's optional `cache` field
+    /// plus auto-detection on `base_url` + `model`. Explicit config
+    /// wins; the auto-path covers OpenRouter routes where the user
+    /// didn't think to set `cache = "anthropic"`.
+    pub fn resolve(cfg: Option<&str>, base_url: &str, model: &str) -> Self {
+        match cfg.map(str::trim) {
+            Some("anthropic") => return Self::Anthropic,
+            Some("none") | Some("") => return Self::None,
+            Some(other) => {
+                eprintln!(
+                    "[providers] unknown cache strategy `{}`, defaulting to None",
+                    other
+                );
+                return Self::None;
+            }
+            None => {}
+        }
+        // Auto-detect: OpenRouter routes routed at an Anthropic-shaped
+        // model id (`anthropic/claude-*` or bare `claude-*`).
+        let is_openrouter = base_url.contains("openrouter.ai");
+        let is_claude = model.starts_with("anthropic/") || model.starts_with("claude-");
+        if is_openrouter && is_claude {
+            Self::Anthropic
+        } else {
+            Self::None
+        }
+    }
 }
 
 impl OpenAICompatProvider {
+    /// Construct a provider with no cache strategy. Public sugar over
+    /// `with_cache(_, _, CacheStrategy::None)` for callers (and tests)
+    /// that don't care about caching.
+    #[allow(dead_code)]
     pub fn new(base_url: impl Into<String>, api_key: impl Into<String>) -> Self {
+        Self::with_cache(base_url, api_key, CacheStrategy::None)
+    }
+
+    pub fn with_cache(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        cache: CacheStrategy,
+    ) -> Self {
         let base = base_url.into();
         let base_url = base.trim_end_matches('/').to_string();
         Self {
             client: reqwest::Client::new(),
             base_url,
             api_key: api_key.into(),
+            cache,
         }
     }
 
@@ -42,14 +105,59 @@ impl OpenAICompatProvider {
     }
 }
 
+/// In-place transform: tag the last system message and the last tool
+/// definition in `payload` with Anthropic-style `cache_control`
+/// breakpoints. The system message's `content` is rewritten from a
+/// string to a single-element array of `{type:"text", text, cache_control}`
+/// blocks — OpenRouter accepts both shapes when routing to Claude.
+/// No-op if the payload has no system message and no tools.
+fn apply_anthropic_cache_breakpoints(payload: &mut Value) {
+    if let Some(msgs) = payload.get_mut("messages").and_then(|m| m.as_array_mut()) {
+        // Tag the *last* system message — earlier ones are usually
+        // CLAUDE.md-prefix continuations and we want the cache
+        // breakpoint at the boundary between "stable prefix" and
+        // "live conversation."
+        let last_system_idx = msgs
+            .iter()
+            .rposition(|m| m.get("role").and_then(|r| r.as_str()) == Some("system"));
+        if let Some(idx) = last_system_idx {
+            if let Some(content) = msgs[idx].get("content").cloned() {
+                if let Some(text) = content.as_str() {
+                    msgs[idx].as_object_mut().unwrap().insert(
+                        "content".to_string(),
+                        json!([{
+                            "type": "text",
+                            "text": text,
+                            "cache_control": { "type": "ephemeral" }
+                        }]),
+                    );
+                }
+            }
+        }
+    }
+    if let Some(tools) = payload.get_mut("tools").and_then(|t| t.as_array_mut()) {
+        if let Some(last) = tools.last_mut() {
+            if let Some(obj) = last.as_object_mut() {
+                obj.insert(
+                    "cache_control".to_string(),
+                    json!({"type": "ephemeral"}),
+                );
+            }
+        }
+    }
+}
+
 #[async_trait]
 impl Provider for OpenAICompatProvider {
     async fn chat(&self, req: ChatRequest) -> Result<ChatResponse> {
-        let payload = json!({
+        let mut payload = json!({
             "model": req.model,
             "messages": req.messages,
             "tools": req.tools,
         });
+        if matches!(self.cache, CacheStrategy::Anthropic) {
+            apply_anthropic_cache_breakpoints(&mut payload);
+        }
 
         let resp = self
             .client
@@ -107,7 +215,7 @@ impl Provider for OpenAICompatProvider {
     }
 
     async fn chat_stream(&self, req: ChatRequest, sink: ContentSink<'_>) -> Result<ChatResponse> {
-        let payload = json!({
+        let mut payload = json!({
             "model": req.model,
             "messages": req.messages,
             "tools": req.tools,
@@ -118,6 +226,9 @@ impl Provider for OpenAICompatProvider {
             // simply leave usage `None`, which the agent already handles.
             "stream_options": { "include_usage": true },
         });
+        if matches!(self.cache, CacheStrategy::Anthropic) {
+            apply_anthropic_cache_breakpoints(&mut payload);
+        }
 
         let resp = self
             .client
@@ -345,6 +456,112 @@ fn format_embedded_error(err: &Value) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_strategy_resolve_explicit_anthropic_wins() {
+        assert_eq!(
+            CacheStrategy::resolve(Some("anthropic"), "https://example.com", "any"),
+            CacheStrategy::Anthropic
+        );
+    }
+
+    #[test]
+    fn cache_strategy_resolve_none_or_empty_disables() {
+        assert_eq!(
+            CacheStrategy::resolve(Some("none"), "https://openrouter.ai", "anthropic/claude-haiku"),
+            CacheStrategy::None
+        );
+        assert_eq!(
+            CacheStrategy::resolve(Some(""), "https://openrouter.ai", "anthropic/claude-haiku"),
+            CacheStrategy::None
+        );
+    }
+
+    #[test]
+    fn cache_strategy_auto_detects_openrouter_routes_to_claude() {
+        assert_eq!(
+            CacheStrategy::resolve(None, "https://openrouter.ai/api/v1", "anthropic/claude-haiku-4.5"),
+            CacheStrategy::Anthropic
+        );
+        assert_eq!(
+            CacheStrategy::resolve(None, "https://openrouter.ai/api/v1", "claude-3-5-sonnet"),
+            CacheStrategy::Anthropic
+        );
+    }
+
+    #[test]
+    fn cache_strategy_does_not_auto_detect_for_non_openrouter_or_non_claude() {
+        // OpenRouter but routing to a non-Anthropic model.
+        assert_eq!(
+            CacheStrategy::resolve(None, "https://openrouter.ai/api/v1", "openai/gpt-4o-mini"),
+            CacheStrategy::None
+        );
+        // Anthropic-shaped model but a different host (Ollama proxy
+        // exposing it OpenAI-compat doesn't accept Anthropic
+        // cache_control). Stay safe.
+        assert_eq!(
+            CacheStrategy::resolve(None, "http://localhost:11434/v1", "claude-3-5-sonnet"),
+            CacheStrategy::None
+        );
+    }
+
+    #[test]
+    fn anthropic_cache_breakpoints_tag_last_system_message_and_last_tool() {
+        let mut payload = json!({
+            "model": "anthropic/claude-haiku-4.5",
+            "messages": [
+                {"role": "system", "content": "you are helpful"},
+                {"role": "user", "content": "go"}
+            ],
+            "tools": [
+                {"type":"function","function":{"name":"A","description":"","parameters":{}}},
+                {"type":"function","function":{"name":"B","description":"","parameters":{}}}
+            ]
+        });
+        apply_anthropic_cache_breakpoints(&mut payload);
+
+        // System message: content is now a single-element array of
+        // text blocks with cache_control on the only block.
+        let sys_blocks = payload["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(sys_blocks.len(), 1);
+        assert_eq!(sys_blocks[0]["type"], "text");
+        assert_eq!(sys_blocks[0]["text"], "you are helpful");
+        assert_eq!(sys_blocks[0]["cache_control"]["type"], "ephemeral");
+        // User message untouched.
+        assert_eq!(payload["messages"][1]["content"], "go");
+
+        // Tools: only the *last* one carries the cache_control breakpoint.
+        let tools = payload["tools"].as_array().unwrap();
+        assert!(tools[0].get("cache_control").is_none());
+        assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn anthropic_cache_breakpoints_target_last_system_when_multiple() {
+        let mut payload = json!({
+            "messages": [
+                {"role": "system", "content": "first"},
+                {"role": "system", "content": "second"},
+                {"role": "user", "content": "go"}
+            ]
+        });
+        apply_anthropic_cache_breakpoints(&mut payload);
+        // First is a plain string; second is the wrapped one.
+        assert_eq!(payload["messages"][0]["content"], "first");
+        let blocks = payload["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(blocks[0]["text"], "second");
+        assert!(blocks[0].get("cache_control").is_some());
+    }
+
+    #[test]
+    fn anthropic_cache_breakpoints_no_op_when_no_system_or_tools() {
+        let mut payload = json!({
+            "messages": [{"role": "user", "content": "hi"}]
+        });
+        let before = payload.clone();
+        apply_anthropic_cache_breakpoints(&mut payload);
+        assert_eq!(before, payload);
+    }
 
     #[test]
     fn embedded_error_renders_integer_code() {

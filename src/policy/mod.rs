@@ -302,10 +302,8 @@ fn render_edit_preview(args: &Value) -> String {
     if replace_all {
         out.push_str("  (replace_all)");
     }
-    out.push_str("\n  -- old:\n");
-    out.push_str(&indent_with("    | ", &truncate_lines(old, 30)));
-    out.push_str("\n  ++ new:\n");
-    out.push_str(&indent_with("    | ", &truncate_lines(new, 30)));
+    out.push('\n');
+    out.push_str(&render_unified_diff(old, new, 30));
     out
 }
 
@@ -317,13 +315,60 @@ fn render_write_preview(args: &Value) -> String {
     let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
     let bytes = content.len();
     let lines = content.lines().count();
-    format!(
-        "  file: {}\n  ({} bytes, {} lines)\n  ++ content:\n{}",
-        path,
-        bytes,
-        lines,
-        indent_with("    | ", &truncate_lines(content, 30))
-    )
+
+    // If the file already exists, render as a unified diff against
+    // its current contents — much more readable than a raw dump for
+    // edits to existing files. New-file Writes still show the
+    // content body inline since "diff against empty" doesn't add value.
+    let path_exists = std::fs::metadata(path).is_ok();
+    let mut out = format!("  file: {}\n  ({} bytes, {} lines)\n", path, bytes, lines);
+    if path_exists {
+        let existing = std::fs::read_to_string(path).unwrap_or_default();
+        out.push_str(&render_unified_diff(&existing, content, 30));
+    } else {
+        out.push_str("  ++ content:\n");
+        out.push_str(&indent_with("    | ", &truncate_lines(content, 30)));
+    }
+    out
+}
+
+/// Render a unified diff between `old` and `new` with three lines of
+/// context. Long bodies get truncated to roughly `max_lines` of diff
+/// output before a `... (more lines)` marker. Color-free; the REPL
+/// approval prompt is line-oriented and we keep this terminal-agnostic.
+fn render_unified_diff(old: &str, new: &str, max_lines: usize) -> String {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old, new);
+    let mut out = String::new();
+    let mut emitted = 0usize;
+    let mut more = 0usize;
+    for op in diff.grouped_ops(3) {
+        for change in op.iter().flat_map(|o| diff.iter_changes(o)) {
+            if emitted >= max_lines {
+                more += 1;
+                continue;
+            }
+            let sign = match change.tag() {
+                ChangeTag::Equal => " ",
+                ChangeTag::Delete => "-",
+                ChangeTag::Insert => "+",
+            };
+            // `change.value()` already includes a trailing newline on
+            // most lines; trim and re-add so we don't get blank gaps.
+            let body = change.value().trim_end_matches('\n');
+            out.push_str(&format!("    {} {}\n", sign, body));
+            emitted += 1;
+        }
+    }
+    if more > 0 {
+        out.push_str(&format!("    ... ({} more lines)\n", more));
+    }
+    if out.is_empty() {
+        // No changes (both bodies identical) — say so, otherwise the
+        // approval prompt looks like it's missing content.
+        out.push_str("    (no diff — old and new are identical)\n");
+    }
+    out
 }
 
 fn indent_with(prefix: &str, body: &str) -> String {
@@ -546,7 +591,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_preview_shows_old_and_new_with_path() {
+    fn edit_preview_shows_unified_diff_with_path() {
         let args = json!({
             "file_path": "src/x.rs",
             "old_string": "let a = 1;",
@@ -554,10 +599,9 @@ mod tests {
         });
         let s = render_edit_preview(&args);
         assert!(s.contains("file: src/x.rs"));
-        assert!(s.contains("-- old:"));
-        assert!(s.contains("let a = 1;"));
-        assert!(s.contains("++ new:"));
-        assert!(s.contains("let a = 2;"));
+        // Both directions of the change appear in the diff.
+        assert!(s.contains("- let a = 1;"), "missing deletion line: {}", s);
+        assert!(s.contains("+ let a = 2;"), "missing addition line: {}", s);
     }
 
     #[test]
@@ -573,24 +617,63 @@ mod tests {
     }
 
     #[test]
-    fn write_preview_reports_size_and_truncates_long_content() {
+    fn edit_preview_reports_no_diff_when_unchanged() {
+        let args = json!({
+            "file_path": "x",
+            "old_string": "same",
+            "new_string": "same",
+        });
+        let s = render_edit_preview(&args);
+        assert!(s.contains("no diff"), "expected no-diff marker: {}", s);
+    }
+
+    #[test]
+    fn write_preview_reports_size_and_truncates_long_content_for_new_file() {
         let big = "line\n".repeat(100);
-        let args = json!({"file_path":"big.txt","content": big});
+        let args = json!({"file_path":"/tmp/__nonexistent_file_for_write_preview__","content": big});
         let s = render_write_preview(&args);
-        assert!(s.contains("file: big.txt"));
+        assert!(s.contains("file: /tmp/"));
         assert!(s.contains("500 bytes"));
         assert!(s.contains("100 lines"));
+        // New-file path still uses the inline truncation marker.
         assert!(s.contains("more lines"));
+    }
+
+    #[test]
+    fn write_preview_renders_unified_diff_when_file_exists() {
+        use tempfile::NamedTempFile;
+        let f = NamedTempFile::new().unwrap();
+        std::fs::write(f.path(), "alpha\nbeta\ngamma\n").unwrap();
+        let args = json!({
+            "file_path": f.path().to_str().unwrap(),
+            "content": "alpha\nBETA\ngamma\n",
+        });
+        let s = render_write_preview(&args);
+        assert!(s.contains("- beta"), "missing deletion: {}", s);
+        assert!(s.contains("+ BETA"), "missing addition: {}", s);
     }
 
     #[test]
     fn preview_for_routes_to_tool_specific_renderers() {
         let edit_args = json!({"file_path":"x","old_string":"a","new_string":"b"});
-        assert!(preview_for("Edit", &edit_args).contains("-- old:"));
+        // Diff lines now use the unified-diff format.
+        let edit = preview_for("Edit", &edit_args);
+        assert!(edit.contains("- a"));
+        assert!(edit.contains("+ b"));
         let write_args = json!({"file_path":"x","content":"c"});
         assert!(preview_for("Write", &write_args).contains("++ content:"));
         // Unknown tools fall through to JSON dump.
         let other = json!({"command":"ls"});
         assert_eq!(preview_for("Bash", &other), other.to_string());
+    }
+
+    #[test]
+    fn unified_diff_truncates_long_diffs_with_marker() {
+        let old = (0..200).map(|i| format!("line {}\n", i)).collect::<String>();
+        let new = (0..200)
+            .map(|i| format!("LINE {}\n", i))
+            .collect::<String>();
+        let s = render_unified_diff(&old, &new, 20);
+        assert!(s.contains("more lines"), "expected truncation marker: {}", s);
     }
 }

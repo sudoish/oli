@@ -57,11 +57,21 @@ impl Tool for Edit {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        if !ctx.was_read(file_path).await {
-            return Ok(format!(
-                "Error: file {} has not been read this session. Call Read first.",
-                file_path
-            ));
+        match ctx.is_stale(file_path).await {
+            None => {
+                return Ok(format!(
+                    "Error: file {} has not been read this session. Call Read first.",
+                    file_path
+                ));
+            }
+            Some(true) => {
+                return Ok(format!(
+                    "Error: file {} has been modified externally since the last Read. \
+                     Re-read it before editing.",
+                    file_path
+                ));
+            }
+            Some(false) => {}
         }
 
         let body = match tokio::fs::read_to_string(file_path).await {
@@ -205,6 +215,73 @@ mod tests {
         assert_eq!(
             tokio::fs::read_to_string(f.path()).await.unwrap(),
             "aa\nbb\naa\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn refuses_when_file_modified_externally_after_read() {
+        let f = write_file("hello world");
+        let path = f.path().to_str().unwrap().to_string();
+        let ctx = ToolContext::new();
+        ctx.mark_read(&path).await;
+
+        // Bump the mtime by writing fresh contents *after* the read.
+        // Sleep one second on macOS HFS-derived filesystems where
+        // mtime resolution is 1s; tempfiles on tmpfs/APFS see ms-level
+        // resolution but a small sleep is harmless and portable.
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        tokio::fs::write(f.path(), "external mutation\n").await.unwrap();
+
+        let out = Edit
+            .run(
+                json!({
+                    "file_path": path,
+                    "old_string": "external",
+                    "new_string": "X"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(
+            out.contains("modified externally"),
+            "expected stale-file error, got: {}",
+            out
+        );
+        // File contents unchanged by the refused edit.
+        assert_eq!(
+            tokio::fs::read_to_string(f.path()).await.unwrap(),
+            "external mutation\n"
+        );
+    }
+
+    #[tokio::test]
+    async fn allows_edit_after_re_reading_an_externally_changed_file() {
+        let f = write_file("hello world");
+        let path = f.path().to_str().unwrap().to_string();
+        let ctx = ToolContext::new();
+        ctx.mark_read(&path).await;
+
+        tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+        tokio::fs::write(f.path(), "fresh body\n").await.unwrap();
+
+        // Re-read picks up the new mtime; Edit should now succeed.
+        ctx.mark_read(&path).await;
+        let out = Edit
+            .run(
+                json!({
+                    "file_path": path,
+                    "old_string": "fresh",
+                    "new_string": "minty"
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.starts_with("Successfully edited"), "got: {}", out);
+        assert_eq!(
+            tokio::fs::read_to_string(f.path()).await.unwrap(),
+            "minty body\n"
         );
     }
 

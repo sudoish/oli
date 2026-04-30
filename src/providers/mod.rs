@@ -17,9 +17,26 @@ pub fn build(cfg: &Config, provider_name: &str) -> Result<Box<dyn Provider>> {
     match pcfg.kind.as_str() {
         "openai-compat" => {
             let api_key = cfg.resolve_api_key(provider_name)?;
-            Ok(Box::new(openai_compat::OpenAICompatProvider::new(
+            // The agent-loop active-model id is the right input for
+            // cache auto-detection. Tracking which model is active at
+            // factory-call time isn't trivial without a wider refactor,
+            // so we use the provider's `default_model` as a hint here;
+            // the OpenAI-compat provider gets the explicit
+            // `cache = "anthropic"` config for non-default models.
+            let model_hint = pcfg
+                .default_model
+                .clone()
+                .or_else(|| cfg.default_model.clone())
+                .unwrap_or_default();
+            let cache = openai_compat::CacheStrategy::resolve(
+                pcfg.cache.as_deref(),
+                &pcfg.base_url,
+                &model_hint,
+            );
+            Ok(Box::new(openai_compat::OpenAICompatProvider::with_cache(
                 pcfg.base_url.clone(),
                 api_key,
+                cache,
             )))
         }
         "anthropic" => {

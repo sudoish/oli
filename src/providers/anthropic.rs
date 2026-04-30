@@ -87,6 +87,49 @@ impl Provider for AnthropicProvider {
         Ok(ChatResponse { message, usage })
     }
 
+    async fn list_models(&self) -> Result<Vec<String>> {
+        let url = format!("{}/v1/models", self.base_url);
+        let resp = self
+            .client
+            .get(&url)
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", ANTHROPIC_VERSION)
+            .send()
+            .await
+            .map_err(|e| AgentError::Provider(format!("anthropic models request: {}", e)))?;
+
+        let status = resp.status();
+        let bytes = resp
+            .bytes()
+            .await
+            .map_err(|e| AgentError::Provider(format!("anthropic models read body: {}", e)))?;
+
+        if !status.is_success() {
+            // The Messages API surfaces errors under `{error: {message, type}}`.
+            // Render whichever message is most useful, falling back to status
+            // alone for empty bodies.
+            let text = String::from_utf8_lossy(&bytes);
+            if let Ok(v) = serde_json::from_slice::<Value>(&bytes) {
+                if let Some(msg) = v
+                    .get("error")
+                    .and_then(|e| e.get("message"))
+                    .and_then(|m| m.as_str())
+                {
+                    return Err(AgentError::Provider(format!(
+                        "anthropic models {}: {}",
+                        status, msg
+                    )));
+                }
+            }
+            return Err(AgentError::Provider(format!(
+                "anthropic models {}: {}",
+                status, text
+            )));
+        }
+
+        parse_models_response(&bytes)
+    }
+
     async fn chat_stream(&self, req: ChatRequest, sink: ContentSink<'_>) -> Result<ChatResponse> {
         let body = build_request_body(&req, true);
         let resp = self
@@ -252,6 +295,23 @@ fn handle_stream_event(
         }
         _ => {}
     }
+}
+
+/// Parse the body of a `GET /v1/models` response. Anthropic returns
+/// `{"data": [{"id": ..., ...}, ...], "has_more": ..., ...}`; we
+/// only care about the `id`s. Extracted from `list_models` so it
+/// can be unit-tested without a live HTTP roundtrip.
+fn parse_models_response(bytes: &[u8]) -> Result<Vec<String>> {
+    let v: Value = serde_json::from_slice(bytes)
+        .map_err(|e| AgentError::Provider(format!("anthropic models parse: {}", e)))?;
+    let data = v
+        .get("data")
+        .and_then(|x| x.as_array())
+        .ok_or_else(|| AgentError::Provider("models response missing `data` array".into()))?;
+    Ok(data
+        .iter()
+        .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(String::from))
+        .collect())
 }
 
 fn anthropic_usage_from_value(v: &Value) -> Option<Usage> {
@@ -616,5 +676,40 @@ mod tests {
         let (msg, _) = anthropic_to_openai_response(&resp);
         assert_eq!(msg["content"], "all done");
         assert!(msg.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn parse_models_response_returns_id_list_in_order() {
+        let body = br#"{
+            "data": [
+                {"id":"claude-opus-4-1","type":"model","display_name":"Opus 4.1"},
+                {"id":"claude-sonnet-4-5","type":"model"},
+                {"id":"claude-haiku-4-5","type":"model"}
+            ],
+            "has_more": false
+        }"#;
+        let ids = parse_models_response(body).unwrap();
+        assert_eq!(
+            ids,
+            vec![
+                "claude-opus-4-1".to_string(),
+                "claude-sonnet-4-5".to_string(),
+                "claude-haiku-4-5".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_models_response_skips_entries_without_id() {
+        let body = br#"{"data":[{"id":"a"},{"name":"no-id"},{"id":"b"}]}"#;
+        let ids = parse_models_response(body).unwrap();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn parse_models_response_errors_when_data_missing() {
+        let body = br#"{"oops": []}"#;
+        let err = parse_models_response(body).unwrap_err();
+        assert!(err.to_string().contains("missing `data`"));
     }
 }

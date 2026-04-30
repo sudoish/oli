@@ -109,6 +109,20 @@ pub struct ProviderConfig {
     pub api_key_env: Option<String>,
     #[serde(default)]
     pub default_model: Option<String>,
+
+    /// Prompt-caching strategy. Default `None` means no cache hints
+    /// are sent (the OpenAI-compat path's pre-Phase-D behavior).
+    /// `"anthropic"` makes the OpenAI-compat provider attach
+    /// `cache_control: ephemeral` blocks on the system message and
+    /// the last tool definition the same way the native Anthropic
+    /// provider does — useful for routing through OpenRouter to
+    /// Claude where the upstream supports Anthropic-style caching.
+    /// Auto-detection layers on top: an OpenRouter base_url plus an
+    /// Anthropic-shaped model id is treated as `"anthropic"` even
+    /// when the user hasn't set the field. Has no effect on the
+    /// native Anthropic provider, which already caches.
+    #[serde(default)]
+    pub cache: Option<String>,
 }
 
 impl Config {
@@ -179,6 +193,7 @@ impl Config {
                 api_key: None,
                 api_key_env: Some("OPENROUTER_API_KEY".to_string()),
                 default_model: Some("anthropic/claude-haiku-4.5".to_string()),
+                cache: None,
             },
         );
         Self {

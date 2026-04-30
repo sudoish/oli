@@ -19,6 +19,7 @@ rustyline = "14"
 mlua = { version = "0.10", features = ["lua54", "vendored", "async", "send", "serialize"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 eventsource-stream = "0.2"
+similar = "2"
 
 [dev-dependencies]
 tempfile = "3"
