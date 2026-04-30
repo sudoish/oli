@@ -57,7 +57,21 @@ pub async fn run(
     mut agent: Agent,
     plugin_slashes: Vec<Box<dyn SlashCommand>>,
     reloader: Option<Arc<PluginReloader>>,
+    session_id: Option<String>,
 ) -> Result<()> {
+    // Snapshot identity fields for the status bar before the
+    // agent moves into the driver task. Branch is queried once
+    // (it doesn't change mid-session in any healthy workflow);
+    // model + ctx_window come from the agent's configured caps.
+    let initial_status = app::StatusModel {
+        session_id,
+        model: agent.model.clone(),
+        ctx_window: agent.caps.ctx_window as u32,
+        branch: detect_git_branch(),
+        last_usage: None,
+        session_usage: Default::default(),
+    };
+
     let mut guard = TerminalGuard::enter()
         .map_err(|e| AgentError::Provider(format!("tui init: {}", e)))?;
 
@@ -129,6 +143,7 @@ pub async fn run(
     // working session even if the history file is corrupt.
     app.set_history(history::load());
     app.set_slash_names(initial_slash_names);
+    app.set_status(initial_status);
 
     guard
             .terminal_mut()
@@ -197,6 +212,7 @@ fn handle_event(
             args,
             reason,
         } => app.on_approval_requested(id, tool, args, reason),
+        UiEvent::UsageUpdate { last, session } => app.update_usage(last, session),
     }
 }
 
@@ -485,4 +501,35 @@ fn handle_approval_key(
 
 fn io_err(e: std::io::Error) -> AgentError {
     AgentError::Provider(format!("tui io: {}", e))
+}
+
+/// Best-effort current git branch + dirty marker, queried once
+/// at TUI startup. Returns `None` if not inside a repo or git is
+/// missing — the status bar drops the field in that case. Branch
+/// changes mid-session are rare in agent workflows and a
+/// stale-by-a-minute readout is fine.
+fn detect_git_branch() -> Option<String> {
+    let cwd = std::env::current_dir().ok()?;
+    // `git rev-parse --abbrev-ref HEAD` for the branch name.
+    let branch = std::process::Command::new("git")
+        .current_dir(&cwd)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .ok()?;
+    if !branch.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&branch.stdout).trim().to_string();
+    if name.is_empty() {
+        return None;
+    }
+    // Append `*` if the worktree is dirty.
+    let dirty = std::process::Command::new("git")
+        .current_dir(&cwd)
+        .args(["status", "--porcelain=v1"])
+        .output()
+        .ok()
+        .map(|o| !o.stdout.is_empty())
+        .unwrap_or(false);
+    Some(if dirty { format!("{} *", name) } else { name })
 }

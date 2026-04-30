@@ -174,37 +174,196 @@ fn centered_rect(r: Rect, percent_x: u16, percent_y: u16) -> Rect {
 }
 
 fn draw_status(f: &mut Frame, area: Rect, app: &App) {
-    let (mode_label, mode_style) = match &app.mode {
-        Mode::Idle => (
-            " idle ".to_string(),
-            Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
-        ),
-        Mode::Thinking { since } => {
-            let secs = since.elapsed().as_secs_f32();
-            (
-                format!(" {} thinking · {:.1}s ", spinner_glyph(secs), secs),
-                Style::default().fg(Color::Yellow),
-            )
-        }
-        Mode::Streaming => (
-            " ▶ streaming ".to_string(),
-            Style::default().fg(Color::Green),
-        ),
-    };
+    // Left-aligned identity strip + right-aligned mode indicator.
+    // Width-aware collapse: the identity fields drop right-to-
+    // left when the terminal narrows. Priority (most important
+    // last to drop): model > tokens > branch > session.
 
-    let bar = Paragraph::new(Line::from(vec![
-        Span::styled(
-            format!(" {} ", TITLE),
+    let mode = render_mode_indicator(app);
+    let mode_w = spans_width(&mode) as u16;
+
+    let mut left = vec![Span::styled(
+        format!(" {} ", TITLE),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    let fields = build_status_fields(app);
+    let mut budget = area.width.saturating_sub(mode_w + 2); // +2 for spacing
+    // Subtract the title badge.
+    budget = budget.saturating_sub(visible_width(&Line::from(left.clone())) as u16);
+
+    // Drop fields right-to-left until we fit. Each field is "  • <body>".
+    let mut visible: Vec<Vec<Span<'static>>> = Vec::new();
+    for f in fields {
+        let w = spans_width(&f) as u16 + 4; // sep "  • "
+        if w <= budget {
+            visible.push(f);
+            budget = budget.saturating_sub(w);
+        }
+    }
+
+    for field in visible {
+        left.push(Span::styled(
+            "  • ",
+            Style::default().fg(Color::DarkGray),
+        ));
+        left.extend(field);
+    }
+
+    // Pad and append mode on the right. We compute remaining
+    // width and pad with spaces so mode lands at the far right.
+    let line_w = visible_width(&Line::from(left.clone())) as u16;
+    let pad = area.width.saturating_sub(line_w + mode_w);
+    if pad > 0 {
+        left.push(Span::raw(" ".repeat(pad as usize)));
+    }
+    left.extend(mode);
+
+    let bar = Paragraph::new(Line::from(left)).style(Style::default().bg(Color::Reset));
+    f.render_widget(bar, area);
+}
+
+/// Visual width of a `Line` — counts chars, not bytes. Wide
+/// (CJK / emoji) chars under-count, but every status field is
+/// ASCII / Latin-1 + a few box-drawing chars (1 cell each), so
+/// this is accurate in practice.
+fn visible_width(line: &Line<'_>) -> usize {
+    line.spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+fn spans_width(spans: &[Span<'_>]) -> usize {
+    spans.iter().map(|s| s.content.chars().count()).sum()
+}
+
+/// Identity strip fields, ordered left-to-right (drop priority
+/// is right-to-left so the *last* field is the first to be
+/// pushed off when the terminal narrows). Each field is a
+/// `Vec<Span>` so it can carry styled sub-fragments (e.g. the
+/// token gauge's color-graded number).
+fn build_status_fields(app: &App) -> Vec<Vec<Span<'static>>> {
+    let mut out: Vec<Vec<Span<'static>>> = Vec::new();
+    // Model (highest priority — kept on the narrowest terminals).
+    if !app.status.model.is_empty() {
+        out.push(vec![Span::styled(
+            app.status.model.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )]);
+    }
+    // Token gauge with color thresholds.
+    out.push(token_gauge_field(app));
+    // Branch.
+    if let Some(branch) = &app.status.branch {
+        out.push(vec![Span::styled(
+            branch.clone(),
+            Style::default().fg(Color::Magenta),
+        )]);
+    }
+    // Session id (truncated; the full id is from
+    // `new_session_id()` which is a 13-digit unix-millis string).
+    if let Some(id) = &app.status.session_id {
+        let short: String = id.chars().rev().take(6).collect::<String>();
+        let short: String = short.chars().rev().collect();
+        out.push(vec![Span::styled(
+            format!("session …{}", short),
+            Style::default().fg(Color::DarkGray),
+        )]);
+    }
+    out
+}
+
+/// Tokens-used / context-window with a color graded by ratio:
+/// green < 60%, amber 60–85%, red > 85%. Falls through to a
+/// plain dash when no usage is recorded yet.
+fn token_gauge_field(app: &App) -> Vec<Span<'static>> {
+    let used = app
+        .status
+        .last_usage
+        .map(|u| u.prompt_tokens as u32 + u.completion_tokens as u32)
+        .unwrap_or(0);
+    let ctx = app.status.ctx_window.max(1);
+    let ratio = used as f32 / ctx as f32;
+    let color = if ratio >= 0.85 {
+        Color::Red
+    } else if ratio >= 0.60 {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+    let used_label = format_count(used);
+    let ctx_label = format_count(ctx);
+    if used == 0 {
+        vec![Span::styled(
+            format!("— / {} tok", ctx_label),
+            Style::default().fg(Color::DarkGray),
+        )]
+    } else {
+        vec![
+            Span::styled(used_label, Style::default().fg(color)),
+            Span::styled(
+                format!(" / {} tok", ctx_label),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]
+    }
+}
+
+/// `12345 → 12.3k`, `200000 → 200k`. Keeps the gauge compact
+/// without a generic humanize crate.
+fn format_count(n: u32) -> String {
+    if n < 10_000 {
+        n.to_string()
+    } else if n < 1_000_000 {
+        let v = n as f32 / 1_000.0;
+        if v >= 100.0 {
+            format!("{:.0}k", v)
+        } else {
+            format!("{:.1}k", v)
+        }
+    } else {
+        format!("{:.1}m", n as f32 / 1_000_000.0)
+    }
+}
+
+/// Right-aligned mode indicator: the live signal of "what is
+/// the loop doing now?" Approval modal up trumps everything;
+/// otherwise renders the agent's mode with a spinner / arrow
+/// / dot / pause glyph.
+fn render_mode_indicator(app: &App) -> Vec<Span<'static>> {
+    if app.approval.is_some() {
+        return vec![Span::styled(
+            " ⏸ awaiting approval ".to_string(),
             Style::default()
                 .fg(Color::Black)
-                .bg(Color::Cyan)
+                .bg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(mode_label, mode_style),
-    ]))
-    .style(Style::default().bg(Color::Reset));
-    f.render_widget(bar, area);
+        )];
+    }
+    match &app.mode {
+        Mode::Idle => vec![Span::styled(
+            " · idle ".to_string(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )],
+        Mode::Thinking { since } => {
+            let secs = since.elapsed().as_secs_f32();
+            vec![Span::styled(
+                format!(" {} thinking · {:.1}s ", spinner_glyph(secs), secs),
+                Style::default().fg(Color::Yellow),
+            )]
+        }
+        Mode::Streaming => vec![Span::styled(
+            " ▶ streaming ".to_string(),
+            Style::default()
+                .fg(Color::Green)
+                .add_modifier(Modifier::BOLD),
+        )],
+    }
 }
 
 /// Pick a frame of a 10-step braille spinner from elapsed seconds.
@@ -427,6 +586,144 @@ fn render_tool_card_detail(state: &ToolCardState) -> Option<Line<'static>> {
 // renderer borrowed `app.transcript`. The current single-pass
 // design (Vec<Line<'static>> built upfront) lets us use the
 // real count, so the helper is gone.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::Usage;
+    use crate::tui::app::StatusModel;
+
+    #[test]
+    fn format_count_renders_units_at_thresholds() {
+        assert_eq!(format_count(42), "42");
+        assert_eq!(format_count(9_999), "9999");
+        assert_eq!(format_count(12_345), "12.3k");
+        assert_eq!(format_count(123_000), "123k");
+        assert_eq!(format_count(2_500_000), "2.5m");
+    }
+
+    fn app_with_status(s: StatusModel) -> App {
+        let mut app = App::new();
+        app.set_status(s);
+        app
+    }
+
+    #[test]
+    fn token_gauge_picks_green_under_60_percent() {
+        let app = app_with_status(StatusModel {
+            ctx_window: 100_000,
+            last_usage: Some(Usage {
+                prompt_tokens: 30_000,
+                completion_tokens: 5_000,
+                total_tokens: 35_000,
+            }),
+            ..Default::default()
+        });
+        let spans = token_gauge_field(&app);
+        // First span carries the count + green color.
+        assert_eq!(spans[0].style.fg, Some(Color::Green));
+    }
+
+    #[test]
+    fn token_gauge_picks_amber_at_60_to_85_percent() {
+        let app = app_with_status(StatusModel {
+            ctx_window: 100_000,
+            last_usage: Some(Usage {
+                prompt_tokens: 70_000,
+                completion_tokens: 0,
+                total_tokens: 70_000,
+            }),
+            ..Default::default()
+        });
+        let spans = token_gauge_field(&app);
+        assert_eq!(spans[0].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
+    fn token_gauge_picks_red_above_85_percent() {
+        let app = app_with_status(StatusModel {
+            ctx_window: 100_000,
+            last_usage: Some(Usage {
+                prompt_tokens: 90_000,
+                completion_tokens: 0,
+                total_tokens: 90_000,
+            }),
+            ..Default::default()
+        });
+        let spans = token_gauge_field(&app);
+        assert_eq!(spans[0].style.fg, Some(Color::Red));
+    }
+
+    #[test]
+    fn token_gauge_renders_dash_when_no_usage_recorded() {
+        let app = app_with_status(StatusModel {
+            ctx_window: 100_000,
+            ..Default::default()
+        });
+        let spans = token_gauge_field(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.starts_with("—"), "got: {}", combined);
+    }
+
+    #[test]
+    fn build_status_fields_include_model_and_branch() {
+        let app = app_with_status(StatusModel {
+            model: "claude-haiku-4.5".into(),
+            ctx_window: 200_000,
+            branch: Some("main *".into()),
+            session_id: Some("1714411234567".into()),
+            ..Default::default()
+        });
+        let fields = build_status_fields(&app);
+        // Model present.
+        let model_seen = fields
+            .iter()
+            .any(|f| f.iter().any(|s| s.content.contains("claude-haiku-4.5")));
+        assert!(model_seen);
+        // Branch present.
+        let branch_seen = fields
+            .iter()
+            .any(|f| f.iter().any(|s| s.content.contains("main *")));
+        assert!(branch_seen);
+        // Session id rendered with truncated tail.
+        let session_seen = fields
+            .iter()
+            .any(|f| f.iter().any(|s| s.content.contains("session …")));
+        assert!(session_seen);
+    }
+
+    #[test]
+    fn mode_indicator_overrides_to_awaiting_when_modal_is_up() {
+        let mut app = app_with_status(StatusModel::default());
+        app.on_approval_requested(
+            1,
+            "Edit".into(),
+            serde_json::json!({"file_path":"x"}),
+            "edit".into(),
+        );
+        let spans = render_mode_indicator(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("awaiting approval"));
+    }
+
+    #[test]
+    fn mode_indicator_idle_when_nothing_is_happening() {
+        let app = app_with_status(StatusModel::default());
+        let spans = render_mode_indicator(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("idle"));
+    }
+
+    #[test]
+    fn mode_indicator_streaming_when_streaming() {
+        let mut app = app_with_status(StatusModel::default());
+        app.on_turn_started();
+        app.on_content_chunk("hi");
+        let spans = render_mode_indicator(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("streaming"));
+    }
+}
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let busy = app.is_busy();

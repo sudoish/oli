@@ -108,6 +108,14 @@ async fn handle_prompt(
         res = agent.run_streaming(&body, &mut sink) => res,
     };
 
+    // Surface the freshest usage to the status bar regardless of
+    // whether the run succeeded — failed runs still consumed
+    // tokens, and we want the gauge honest.
+    let _ = ui_tx.send(UiEvent::UsageUpdate {
+        last: agent.last_usage,
+        session: agent.session_usage,
+    });
+
     match result {
         Ok(content) => {
             let _ = ui_tx.send(UiEvent::TurnFinished {

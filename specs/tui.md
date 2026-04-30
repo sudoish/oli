@@ -491,10 +491,10 @@ line-oriented plan; this doc supersedes it.
 | L2 | Stick-to-bottom + "↓ N new" hint                  | DONE   |
 | L3 | Ctrl+Home / Ctrl+End shortcuts (g/G dropped)      | DONE   |
 | L4 | `/copy N` via OSC52                               | DONE   |
-| M1 | Always-on status line                             | TODO   |
-| M2 | Token-gauge color thresholds                      | TODO   |
-| M3 | Mode indicator (spinner / arrow / pause / dot)    | TODO   |
-| M4 | Width-aware status collapse                       | TODO   |
+| M1 | Always-on status line                             | DONE   |
+| M2 | Token-gauge color thresholds                      | DONE   |
+| M3 | Mode indicator (spinner / arrow / pause / dot)    | DONE   |
+| M4 | Width-aware status collapse                       | DONE   |
 | N1 | Interactive `/sessions` picker                    | TODO   |
 | N2 | Interactive `/help` browser                       | TODO   |
 | N3 | `/<cmd> ?` inline help popup                      | TODO   |

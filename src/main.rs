@@ -228,7 +228,7 @@ async fn run(args: Args) -> Result<()> {
                 .pin_system_prompt(system_prompt)
                 .await;
             if use_tui {
-                tui::run(agent, plugin_slashes, Some(plugin_reloader)).await
+                tui::run(agent, plugin_slashes, Some(plugin_reloader), session_id).await
             } else {
                 repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
             }

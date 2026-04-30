@@ -143,6 +143,23 @@ pub struct App {
     /// Detected from `$COLORFGBG` at TUI startup; defaults to
     /// dark on detection failure.
     pub theme: Theme,
+
+    /// Status-bar fields. Identity (model / session / branch /
+    /// ctx_window) is set once at startup; usage is updated by
+    /// the driver after each chat round.
+    pub status: StatusModel,
+}
+
+/// Aggregate of every field the status bar can display. Optional
+/// fields render as "—" or get dropped on narrow terminals.
+#[derive(Clone, Debug, Default)]
+pub struct StatusModel {
+    pub session_id: Option<String>,
+    pub model: String,
+    pub ctx_window: u32,
+    pub branch: Option<String>,
+    pub last_usage: Option<crate::providers::Usage>,
+    pub session_usage: crate::providers::Usage,
 }
 
 impl Default for App {
@@ -166,6 +183,7 @@ impl Default for App {
             scroll_max: 0,
             scroll_viewport_height: 0,
             theme: Theme::Dark,
+            status: StatusModel::default(),
         }
     }
 }
@@ -192,6 +210,19 @@ impl App {
     pub fn set_slash_names(&mut self, mut names: Vec<String>) {
         names.sort();
         self.slash_names = names;
+    }
+
+    pub fn set_status(&mut self, status: StatusModel) {
+        self.status = status;
+    }
+
+    pub fn update_usage(
+        &mut self,
+        last: Option<crate::providers::Usage>,
+        session: crate::providers::Usage,
+    ) {
+        self.status.last_usage = last;
+        self.status.session_usage = session;
     }
 
     pub fn set_history(&mut self, history: Vec<String>) {

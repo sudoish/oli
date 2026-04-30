@@ -63,6 +63,14 @@ pub enum UiEvent {
         ok: bool,
     },
 
+    /// Driver picked up fresh `last_usage` + `session_usage`
+    /// from the agent. The status bar's token gauge reads from
+    /// the last received update.
+    UsageUpdate {
+        last: Option<crate::providers::Usage>,
+        session: crate::providers::Usage,
+    },
+
     // ----- Approval modal events (Phase I) -----
     /// Policy gate returned `Decision::Ask`; the agent task is
     /// suspended on the approver's oneshot. The render loop pops
