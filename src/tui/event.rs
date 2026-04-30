@@ -95,14 +95,20 @@ pub enum UiEvent {
 }
 
 /// User's response to an approval modal. The `Always*` variants
-/// also tell the `TuiApprover` to remember the (tool, args)
-/// fingerprint so subsequent identical requests auto-resolve.
+/// tell the `TuiApprover` to remember the (tool, args) fingerprint
+/// so subsequent identical requests auto-resolve. `PersistAllow`
+/// goes one step further: writes the fingerprint to
+/// `~/.config/oli/policy-allow.json` so it survives across runs.
 #[derive(Debug, Clone, Copy)]
 pub enum ApprovalResponse {
     Yes,
     No,
     AlwaysAllow,
     AlwaysDeny,
+    /// Caps `[A]` — like `AlwaysAllow` but also writes through
+    /// to disk. Picked up by future runs via
+    /// `PersistedAllowList::open()`.
+    PersistAllow,
 }
 
 

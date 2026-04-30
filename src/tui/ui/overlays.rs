@@ -91,7 +91,7 @@ pub(super) fn draw_approval_modal(
 
     // Legend / single-key affordances.
     let mut legend_spans: Vec<Span<'static>> = vec![Span::styled(
-        "  [y]es  [n]o  [a]llow this session  [d]eny session  [PgUp/Dn] scroll  [Esc] cancel",
+        "  [y]es  [n]o  [a]llow this session  [A]llow always (persisted)  [d]eny session  [PgUp/Dn] scroll  [Esc] cancel",
         Style::default()
             .fg(Color::DarkGray)
             .add_modifier(Modifier::ITALIC),

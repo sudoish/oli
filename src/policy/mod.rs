@@ -15,6 +15,9 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::HashSet;
 
+pub mod persisted_allow;
+pub use persisted_allow::PersistedAllowList;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     Allow,

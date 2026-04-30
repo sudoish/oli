@@ -20,7 +20,7 @@ use serde_json::Value;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
-use crate::policy::Approver;
+use crate::policy::{Approver, PersistedAllowList};
 use crate::tui::event::{ApprovalResponse, UiEvent};
 
 /// Slot the render task uses to find the in-flight approval
@@ -37,20 +37,30 @@ pub struct TuiApprover {
     allow: Arc<Mutex<HashSet<String>>>,
     /// Counterpart for "always deny this session."
     deny: Arc<Mutex<HashSet<String>>>,
+    /// Persistent allow-list backed by
+    /// `~/.config/oli/policy-allow.json`. Checked before the
+    /// session set so a fingerprint persisted in a prior run
+    /// short-circuits without prompting; `[A]` writes through.
+    persisted: Arc<PersistedAllowList>,
 }
 
 impl TuiApprover {
-    pub fn new(ui_tx: UnboundedSender<UiEvent>, pending: PendingApproval) -> Self {
+    pub fn new(
+        ui_tx: UnboundedSender<UiEvent>,
+        pending: PendingApproval,
+        persisted: Arc<PersistedAllowList>,
+    ) -> Self {
         Self {
             ui_tx,
             pending,
             allow: Arc::new(Mutex::new(HashSet::new())),
             deny: Arc::new(Mutex::new(HashSet::new())),
+            persisted,
         }
     }
 
     fn fingerprint(tool: &str, args: &Value) -> String {
-        format!("{}::{}", tool, args)
+        crate::policy::persisted_allow::fingerprint(tool, args)
     }
 }
 
@@ -58,6 +68,10 @@ impl TuiApprover {
 impl Approver for TuiApprover {
     async fn approve(&self, tool: &str, args: &Value, reason: &str) -> bool {
         let fp = Self::fingerprint(tool, args);
+        // Persistent allow wins first — it survives across runs.
+        if self.persisted.contains(&fp) {
+            return true;
+        }
         if self.allow.lock().unwrap().contains(&fp) {
             return true;
         }
@@ -92,6 +106,13 @@ impl Approver for TuiApprover {
                 self.deny.lock().unwrap().insert(fp);
                 false
             }
+            Ok(ApprovalResponse::PersistAllow) => {
+                // Both: in-memory for the rest of this session
+                // *and* on-disk for future runs.
+                self.allow.lock().unwrap().insert(fp.clone());
+                self.persisted.insert(fp);
+                true
+            }
             // Channel closed (TUI shutdown mid-approval). Be
             // conservative: deny.
             Err(_) => false,
@@ -112,7 +133,17 @@ mod tests {
     ) {
         let (tx, rx) = mpsc::unbounded_channel();
         let pending = Arc::new(Mutex::new(None));
-        let approver = TuiApprover::new(tx, pending.clone());
+        // Disposable allow-list backed by a tempfile so the
+        // tests don't touch the user's real config dir.
+        let dir = tempfile::tempdir().unwrap();
+        let persisted = Arc::new(PersistedAllowList::open_at(
+            dir.path().join("allow.json"),
+        ));
+        // Leak the tempdir for the lifetime of the test — its
+        // path lives inside `persisted` and we don't want it
+        // unlinked while the file is in use.
+        std::mem::forget(dir);
+        let approver = TuiApprover::new(tx, pending.clone(), persisted);
         (approver, rx, pending)
     }
 
@@ -259,6 +290,65 @@ mod tests {
             .send(ApprovalResponse::No)
             .unwrap();
         assert!(!f2.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn persist_allow_writes_through_to_disk_and_short_circuits_a_fresh_approver() {
+        // Drive a TuiApprover through a PersistAllow response,
+        // then build a *fresh* approver pointed at the same
+        // disk path and verify it auto-allows without prompting.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("allow.json");
+
+        let (tx1, _rx1) = mpsc::unbounded_channel();
+        let pending1: PendingApproval = Arc::new(Mutex::new(None));
+        let persisted = Arc::new(PersistedAllowList::open_at(path.clone()));
+        let approver = Arc::new(TuiApprover::new(
+            tx1.clone(),
+            pending1.clone(),
+            persisted.clone(),
+        ));
+
+        // First request — user types capital `A`.
+        let a1 = approver.clone();
+        let f1 = tokio::spawn(async move {
+            a1.approve("Bash", &json!({"command":"cargo test"}), "ok").await
+        });
+        // Wait for the approver to stash the sender, then
+        // respond. We can't recv on the dropped rx1 (tx still
+        // owns it via approver), so just spin until the slot
+        // fills.
+        let sender = loop {
+            if let Some(s) = pending1.lock().unwrap().take() {
+                break s;
+            }
+            tokio::task::yield_now().await;
+        };
+        sender.send(ApprovalResponse::PersistAllow).unwrap();
+        assert!(f1.await.unwrap());
+
+        // Sanity: in-memory persisted list now contains the fp.
+        let fp = format!("Bash::{}", json!({"command":"cargo test"}));
+        assert!(persisted.contains(&fp));
+
+        // New process — load from disk into a brand-new
+        // approver and verify the same request short-circuits.
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        let pending2: PendingApproval = Arc::new(Mutex::new(None));
+        let fresh_persisted = Arc::new(PersistedAllowList::open_at(path));
+        let fresh_approver = Arc::new(TuiApprover::new(tx2, pending2, fresh_persisted));
+        let a2 = fresh_approver.clone();
+        let f2 = tokio::spawn(async move {
+            a2.approve("Bash", &json!({"command":"cargo test"}), "ok").await
+        });
+        let allowed = tokio::time::timeout(std::time::Duration::from_millis(200), f2)
+            .await
+            .expect("should auto-resolve from persisted set")
+            .expect("task ok");
+        assert!(allowed);
+        // No event should have been pushed — the fresh approver
+        // resolves directly from the on-disk allow set.
+        assert!(rx2.try_recv().is_err(), "expected no approval prompt");
     }
 
     #[tokio::test]

@@ -91,11 +91,15 @@ pub async fn run(
     // Swap in the TUI's approver: when policy returns Ask, this
     // pushes UiEvent::ApprovalRequested onto the same channel and
     // awaits the user's keystroke via the PendingApproval slot
-    // shared with the render task.
+    // shared with the render task. The persisted allow-list is
+    // loaded from `~/.config/oli/policy-allow.json` so prior `[A]`
+    // decisions short-circuit without prompting.
     let pending_approval: PendingApproval = Arc::new(Mutex::new(None));
+    let persisted_allow = Arc::new(crate::policy::PersistedAllowList::open());
     agent = agent.with_approver(Box::new(TuiApprover::new(
         tx.clone(),
         pending_approval.clone(),
+        persisted_allow,
     )));
 
     // Input task: lives until the channel is dropped (i.e. until
@@ -788,7 +792,12 @@ fn handle_approval_key(
     let response = match key.code {
         KeyCode::Char('y') | KeyCode::Char('Y') => Some(ApprovalResponse::Yes),
         KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(ApprovalResponse::No),
-        KeyCode::Char('a') | KeyCode::Char('A') => Some(ApprovalResponse::AlwaysAllow),
+        // Lowercase `a` — allow for the rest of *this* session.
+        // Uppercase `A` — also write the fingerprint to
+        // `~/.config/oli/policy-allow.json` so future runs
+        // skip the prompt.
+        KeyCode::Char('a') => Some(ApprovalResponse::AlwaysAllow),
+        KeyCode::Char('A') => Some(ApprovalResponse::PersistAllow),
         KeyCode::Char('d') | KeyCode::Char('D') => Some(ApprovalResponse::AlwaysDeny),
         // PgUp/PgDn scroll the diff body; let the user read a
         // long change before deciding.
@@ -814,7 +823,9 @@ fn handle_approval_key(
         // doesn't keep nagging them.
         if matches!(
             resp,
-            ApprovalResponse::AlwaysAllow | ApprovalResponse::AlwaysDeny
+            ApprovalResponse::AlwaysAllow
+                | ApprovalResponse::AlwaysDeny
+                | ApprovalResponse::PersistAllow
         ) && app.hint_is_unseen(hints::ids::APPROVAL_ALLOW)
         {
             app.mark_hint_shown(hints::ids::APPROVAL_ALLOW);
