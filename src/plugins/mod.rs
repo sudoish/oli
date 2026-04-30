@@ -59,9 +59,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
-use mlua::{Function, Lua, LuaSerdeExt, Table, Value as LuaValue};
+use mlua::{Function, HookTriggers, Lua, LuaSerdeExt, Table, Value as LuaValue, VmState};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
@@ -242,7 +243,10 @@ async fn load_one(
 
     let lua = Lua::new();
     apply_sandbox(&lua)?;
-    let plugin_table: Table = lua.load(&source).eval()?;
+    // Plugin top-level evaluation runs under the same budget guard as
+    // its handlers. A misbehaving plugin that runs an infinite loop at
+    // load time should fail fast rather than freeze startup.
+    let plugin_table: Table = run_sync_under_budget(&lua, || lua.load(&source).eval())?;
 
     let name: String = plugin_table
         .get::<Option<String>>("name")?
@@ -595,7 +599,9 @@ impl Tool for LuaToolSpec {
             .map_err(|e| AgentError::Provider(format!("plugin tool fetch: {}", e)))?;
         let ctx_table = build_ctx(&lua, host).map_err(lua_err)?;
         let args_lua = lua.to_value(&args).map_err(lua_err)?;
-        let out: LuaValue = f.call_async((args_lua, ctx_table)).await.map_err(lua_err)?;
+        let out: LuaValue = call_under_budget(&lua, &f, (args_lua, ctx_table))
+            .await
+            .map_err(lua_err)?;
         Ok(stringify_lua(&lua, out))
     }
 }
@@ -627,7 +633,8 @@ impl SlashCommand for LuaSlashCommand {
             Ok(c) => c,
             Err(e) => return SlashOutcome::Continue(Some(format!("plugin error: {}", e))),
         };
-        let res: mlua::Result<LuaValue> = f.call_async((args.to_string(), ctx_table)).await;
+        let res: mlua::Result<LuaValue> =
+            call_under_budget(&self.lua, &f, (args.to_string(), ctx_table)).await;
         match res {
             Ok(v) => SlashOutcome::Continue(Some(stringify_lua(&self.lua, v))),
             Err(e) => SlashOutcome::Continue(Some(format!("plugin error: {}", e))),
@@ -693,7 +700,9 @@ impl Hook for LuaHook {
                 let _ = event_table.set("final_content", *final_content);
             }
         }
-        match f.call_async::<LuaValue>((event_table, ctx_table)).await {
+        let result: mlua::Result<LuaValue> =
+            call_under_budget(&self.lua, &f, (event_table, ctx_table)).await;
+        match result {
             Ok(v) => lua_value_to_hook_outcome(&self.lua, v),
             Err(e) => {
                 eprintln!("[plugin:{}] hook error: {}", self.plugin_id, e);
@@ -732,6 +741,81 @@ fn lua_value_to_hook_outcome(lua: &Lua, v: LuaValue) -> HookOutcome {
 
 fn lua_err(e: mlua::Error) -> AgentError {
     AgentError::Provider(format!("plugin: {}", e))
+}
+
+/// Per-call instruction budget. ~1M instructions is roughly 10–20 ms on
+/// a modern CPU running the Lua 5.4 interpreter — small enough that an
+/// infinite loop in a plugin doesn't freeze a REPL session, large
+/// enough that a real plugin doing meaningful work (parsing JSON,
+/// composing a few `ctx:tool` calls) finishes well under it.
+const PLUGIN_INSTRUCTION_BUDGET: usize = 1_000_000;
+/// How often the count hook fires. Smaller = more accurate budget,
+/// more overhead. 10k strikes a balance: ~100 hook invocations per
+/// budget exhaustion.
+const HOOK_INSTRUCTION_INTERVAL: u32 = 10_000;
+
+/// Install an instruction-count hook that aborts the Lua VM with a
+/// `plugin exceeded execution budget` runtime error after `budget`
+/// bytecode instructions. The hook is bound to the supplied thread —
+/// `Lua::set_hook` would only catch the main state, missing the
+/// coroutine `call_async` actually runs inside.
+fn install_thread_budget_guard(thread: &mlua::Thread, counter: Arc<AtomicUsize>, budget: usize) {
+    let triggers = HookTriggers::new().every_nth_instruction(HOOK_INSTRUCTION_INTERVAL);
+    thread.set_hook(triggers, move |_lua, _debug| {
+        let prior = counter.fetch_add(HOOK_INSTRUCTION_INTERVAL as usize, Ordering::Relaxed);
+        if prior >= budget {
+            return Err(mlua::Error::RuntimeError(format!(
+                "plugin exceeded execution budget ({} instructions)",
+                budget
+            )));
+        }
+        Ok(VmState::Continue)
+    });
+}
+
+/// Run a plugin entry-point function under the instruction budget.
+/// Builds a fresh coroutine for the call, attaches the count hook to
+/// it, and drives it as a future. The mlua-internal `Function::call_async`
+/// path was tried first but its hook is bound to the main state and
+/// doesn't catch infinite loops in tool/slash/hook handlers — those
+/// run on a child thread the count hook never sees. Going through
+/// `create_thread` + `Thread::set_hook` + `into_async` puts the hook
+/// on the right state.
+async fn call_under_budget<A, R>(lua: &Lua, f: &Function, args: A) -> mlua::Result<R>
+where
+    A: mlua::IntoLuaMulti,
+    R: mlua::FromLuaMulti,
+{
+    let thread = lua.create_thread(f.clone())?;
+    let counter = Arc::new(AtomicUsize::new(0));
+    install_thread_budget_guard(&thread, counter, PLUGIN_INSTRUCTION_BUDGET);
+    thread.into_async(args).await
+}
+
+/// Run synchronous Lua code (top-level plugin loads) under the
+/// budget. The Lua state is the main one here, so `Lua::set_hook`
+/// reaches the right thread.
+fn run_sync_under_budget<F, T>(lua: &Lua, f: F) -> mlua::Result<T>
+where
+    F: FnOnce() -> mlua::Result<T>,
+{
+    let counter = Arc::new(AtomicUsize::new(0));
+    let counter_hook = counter.clone();
+    let triggers = HookTriggers::new().every_nth_instruction(HOOK_INSTRUCTION_INTERVAL);
+    lua.set_hook(triggers, move |_lua, _debug| {
+        let prior =
+            counter_hook.fetch_add(HOOK_INSTRUCTION_INTERVAL as usize, Ordering::Relaxed);
+        if prior >= PLUGIN_INSTRUCTION_BUDGET {
+            return Err(mlua::Error::RuntimeError(format!(
+                "plugin exceeded execution budget ({} instructions)",
+                PLUGIN_INSTRUCTION_BUDGET
+            )));
+        }
+        Ok(VmState::Continue)
+    });
+    let result = f();
+    lua.remove_hook();
+    result
 }
 
 /// Render a Lua return value into a string for the harness side.
@@ -1022,6 +1106,149 @@ return p
             HookOutcome::Replace(v) => assert_eq!(v, json!("[redacted]")),
             other => panic!("expected Replace, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn plugin_tool_with_infinite_loop_aborts_under_budget() {
+        // A plugin tool that runs `while true do end`: without the
+        // budget guard it would freeze the agent loop indefinitely.
+        // With the guard, we should see an error mentioning the
+        // budget within a tight timebox (~100ms is plenty even on
+        // slow CI; we give ourselves 5s before declaring failure).
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("loopy.lua"),
+            r#"
+local p = { name = "loopy" }
+p.tools = {
+  { name = "Loop", description = "spins forever",
+    parameters = { type = "object", properties = {} },
+    execute = function(args, ctx)
+      while true do end
+      return "unreachable"
+    end },
+}
+return p
+            "#,
+        )
+        .unwrap();
+        let mut out = LoadedPlugins::default();
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
+        assert_eq!(out.tools.len(), 1);
+
+        let ctx = ToolContext::new();
+        let started = std::time::Instant::now();
+        let run_result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            out.tools[0].run(json!({}), &ctx),
+        )
+        .await
+        .expect("budget guard should fire well within 5s");
+
+        // Lua runtime errors propagate as `Err(_)` from `Tool::run`.
+        let err = run_result.expect_err("expected budget exhaustion to surface as Err");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("budget"),
+            "expected 'budget' in error message, got: {}",
+            msg
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "expected budget guard to abort quickly, took {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_with_infinite_loop_at_load_time_is_skipped() {
+        // A plugin file that runs `while true do end` at top level
+        // (before returning the plugin table) used to hang startup.
+        // The sync budget guard around `lua.load(&source).eval()`
+        // should abort within ~50 ms and the loader logs and skips
+        // it. A second well-formed plugin in the same dir still
+        // loads.
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a_loopy_load.lua"),
+            r#"
+while true do end
+return { name = "loopy-load" }
+            "#,
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b_ok.lua"),
+            r#"
+local p = { name = "ok" }
+p.tools = {
+  { name = "T", description = "",
+    parameters = { type = "object", properties = {} },
+    execute = function(args, ctx) return "ok" end },
+}
+return p
+            "#,
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        let mut out = LoadedPlugins::default();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            load_dir(dir.path(), empty_registry(), None, &mut out),
+        )
+        .await
+        .expect("load_dir should not hang on a load-time infinite loop");
+        let elapsed = started.elapsed();
+
+        // The good plugin still loads; the loopy one is skipped.
+        let names: Vec<&str> = out.manifest.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"ok"), "expected `ok` to load; got {:?}", names);
+        assert!(
+            !names.contains(&"loopy-load"),
+            "loopy-load should have been skipped"
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "load should abort fast, took {:?}",
+            elapsed
+        );
+    }
+
+    #[tokio::test]
+    async fn well_behaved_plugin_tool_runs_to_completion_under_budget() {
+        // A short-running tool finishes well before the budget is
+        // exhausted, and the second call doesn't see leftover state
+        // from the first (the hook is removed on return so the
+        // counter starts fresh).
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("normal.lua"),
+            r#"
+local p = { name = "normal" }
+p.tools = {
+  { name = "Sum", description = "",
+    parameters = { type = "object", properties = {} },
+    execute = function(args, ctx)
+      local total = 0
+      for i = 1, 1000 do total = total + i end
+      return tostring(total)
+    end },
+}
+return p
+            "#,
+        )
+        .unwrap();
+        let mut out = LoadedPlugins::default();
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
+        let ctx = ToolContext::new();
+        // Run twice — the second call must also succeed (verifying
+        // the hook is removed and the counter resets).
+        let r1 = out.tools[0].run(json!({}), &ctx).await.unwrap();
+        assert_eq!(r1, "500500");
+        let r2 = out.tools[0].run(json!({}), &ctx).await.unwrap();
+        assert_eq!(r2, "500500");
     }
 
     #[tokio::test]

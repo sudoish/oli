@@ -199,6 +199,6 @@ each phase boundary.
 | D2 | Anthropic `list_models`                           | DONE   |
 | D3 | Unified-diff preview for Edit/Write               | DONE   |
 | D4 | File-watch invalidation for Edit                  | DONE   |
-| E1 | Plugin resource caps via mlua instruction hook    | TODO   |
+| E1 | Plugin resource caps via mlua instruction hook    | DONE   |
 | E2 | EmbeddingRAG memory strategy                      | TODO   |
 | E3 | MCP `notifications/tools/list_changed`            | TODO   |
