@@ -2,10 +2,39 @@ use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;
 
-use crate::error::Result;
+use crate::config::Config;
+use crate::error::{AgentError, Result};
 
 pub mod anthropic;
 pub mod openai_compat;
+
+/// Centralized provider factory. Mapping `kind -> impl Provider`
+/// lives here so adding a new provider doesn't require touching
+/// three separate dispatch sites (top-level `main.rs`, the
+/// `AgentSpawner` for subagents, and the `/provider` slash command).
+pub fn build(cfg: &Config, provider_name: &str) -> Result<Box<dyn Provider>> {
+    let pcfg = cfg.provider(provider_name)?;
+    match pcfg.kind.as_str() {
+        "openai-compat" => {
+            let api_key = cfg.resolve_api_key(provider_name)?;
+            Ok(Box::new(openai_compat::OpenAICompatProvider::new(
+                pcfg.base_url.clone(),
+                api_key,
+            )))
+        }
+        "anthropic" => {
+            let api_key = cfg.resolve_api_key(provider_name)?;
+            Ok(Box::new(anthropic::AnthropicProvider::new(
+                pcfg.base_url.clone(),
+                api_key,
+            )))
+        }
+        other => Err(AgentError::Config(format!(
+            "unsupported provider kind '{other}' for '{provider_name}' \
+             (try 'openai-compat' or 'anthropic')"
+        ))),
+    }
+}
 
 #[cfg(test)]
 pub mod fake;

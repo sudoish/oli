@@ -345,19 +345,10 @@ impl SlashCommand for Provider {
             return SlashOutcome::Continue(Some(out.trim_end().to_string()));
         }
 
-        // Swap path.
+        // Swap path. Delegate to the central provider factory so we
+        // pick up any new kinds without duplicating the dispatch.
         let pcfg = match cfg.provider(arg) {
             Ok(p) => p,
-            Err(e) => return SlashOutcome::Continue(Some(format!("error: {}", e))),
-        };
-        if pcfg.kind != "openai-compat" {
-            return SlashOutcome::Continue(Some(format!(
-                "unsupported provider kind: {} (only openai-compat is wired today)",
-                pcfg.kind
-            )));
-        }
-        let api_key = match cfg.resolve_api_key(arg) {
-            Ok(k) => k,
             Err(e) => return SlashOutcome::Continue(Some(format!("error: {}", e))),
         };
         let new_model = pcfg
@@ -365,11 +356,12 @@ impl SlashCommand for Provider {
             .clone()
             .or_else(|| cfg.default_model.clone())
             .unwrap_or_else(|| agent.model.clone());
+        let new_provider = match crate::providers::build(cfg.as_ref(), arg) {
+            Ok(p) => p,
+            Err(e) => return SlashOutcome::Continue(Some(format!("error: {}", e))),
+        };
 
-        agent.provider = Box::new(crate::providers::openai_compat::OpenAICompatProvider::new(
-            pcfg.base_url.clone(),
-            api_key,
-        ));
+        agent.provider = new_provider;
         agent.provider_name = arg.to_string();
         agent.model = new_model.clone();
         agent.caps = agent.resolve_caps(&new_model);
