@@ -22,8 +22,10 @@
 
 mod app;
 mod approver;
+mod completion;
 mod driver;
 mod event;
+mod history;
 mod hook;
 mod terminal;
 mod ui;
@@ -100,11 +102,25 @@ pub async fn run(
         }
     });
 
+    // Snapshot slash names BEFORE the slashes move into the
+    // driver. The default registry's set is fixed at compile
+    // time; plugin slashes contribute their names dynamically.
+    // The TUI's completion popup uses this list. `/plugins
+    // reload` updates it via the driver-emitted SlashNamesChanged
+    // event.
+    let initial_slash_names = collect_slash_names(&plugin_slashes);
+
     // Agent driver task: owns the agent + slash registry. Talks
     // back through the same UiEvent channel.
     let (cmd_tx, driver_handle) = driver::spawn(agent, plugin_slashes, reloader, tx.clone());
 
     let mut app = App::new();
+    // Persistent history loaded once at startup; appended on each
+    // submit. Failures are silently ignored — the user gets a
+    // working session even if the history file is corrupt.
+    app.set_history(history::load());
+    app.set_slash_names(initial_slash_names);
+
     guard.terminal_mut().draw(|f| ui::draw(f, &app)).map_err(io_err)?;
 
     let frame_budget = Duration::from_millis(16); // ~60fps ceiling
@@ -206,18 +222,34 @@ fn on_key(
         }
         _ => {}
     }
+    // Completion menu interception: when a popup is open, send
+    // navigation keys (Up/Down/Tab/Enter/Esc) to it first. If
+    // it consumes the event, we don't touch the textarea this
+    // tick.
+    if app.completion.is_some() && app.on_completion_key(key) {
+        return;
+    }
+
     let action = app.on_key(key);
+    match &action {
+        SubmitAction::Prompt(body) | SubmitAction::Slash(body) => {
+            // Persist to the history file alongside the in-memory
+            // dedupe-aware push that `App::submit` already did. We
+            // record both prompts and slashes so Ctrl+R can recall
+            // any past invocation. Slashes go in with their `/`
+            // prefix to match what the user typed.
+            let entry = match &action {
+                SubmitAction::Slash(_) => format!("/{}", body),
+                _ => body.clone(),
+            };
+            history::append(&entry);
+        }
+        SubmitAction::None => {}
+    }
     match action {
         SubmitAction::Prompt(body) => {
             let (cancel_tx, cancel_rx) = oneshot::channel();
             app.set_cancel_sender(cancel_tx);
-            // Optimistically transition to Thinking now so the
-            // user sees the indicator immediately, before the
-            // driver picks the command up. The driver fires
-            // TurnStarted moments later — that path also calls
-            // `on_turn_started` but the assistant slot creation
-            // is idempotent in shape if not in identity. Keep the
-            // driver as the source of truth: don't preempt here.
             let _ = cmd_tx.send(AgentCommand::Prompt {
                 body,
                 cancel: cancel_rx,
@@ -241,6 +273,23 @@ fn on_key(
             since: std::time::Instant::now(),
         };
     }
+}
+
+/// Names of all slash commands the driver will know about: the
+/// default set + any plugin-registered ones the binary passed in.
+/// Used to seed the completion popup's slash list.
+fn collect_slash_names(plugin_slashes: &[Box<dyn SlashCommand>]) -> Vec<String> {
+    let mut names: Vec<String> =
+        crate::repl::slash::SlashRegistry::default_set_with_reloader(None)
+            .iter()
+            .map(|c| c.name().to_string())
+            .collect();
+    for s in plugin_slashes {
+        names.push(s.name().to_string());
+    }
+    names.sort();
+    names.dedup();
+    names
 }
 
 fn handle_approval_key(

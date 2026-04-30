@@ -482,11 +482,11 @@ line-oriented plan; this doc supersedes it.
 | J2 | Syntect-highlighted code fences                   | TODO   |
 | J3 | Light/dark theme detection                        | TODO   |
 | J4 | Streaming-safe markdown re-parse                  | TODO   |
-| K1 | Multi-line input via tui-textarea                 | TODO   |
-| K2 | Slash autocomplete popup                          | TODO   |
-| K3 | `@path` file autocomplete                         | TODO   |
-| K4 | Up/Down + Ctrl-R history                          | TODO   |
-| K5 | Persistent history file                           | TODO   |
+| K1 | Multi-line input via tui-textarea                 | DONE   |
+| K2 | Slash autocomplete popup                          | DONE   |
+| K3 | `@path` file autocomplete                         | DONE   |
+| K4 | Up/Down + Ctrl-R history                          | PART   |
+| K5 | Persistent history file                           | DONE   |
 | L1 | Scrollable transcript (Pg/wheel)                  | TODO   |
 | L2 | Stick-to-bottom + "↓ N new" hint                  | TODO   |
 | L3 | g/G + Home/End shortcuts                          | TODO   |

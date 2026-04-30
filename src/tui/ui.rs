@@ -22,16 +22,30 @@ const TITLE: &str = "oli";
 
 pub fn draw(f: &mut Frame, app: &App) {
     let area = f.area();
+    // Input box grows from 3 rows (1 line + borders) up to 10
+    // rows for an 8-line buffer. tui-textarea handles internal
+    // scroll past that. Caps so the transcript pane keeps a
+    // reasonable visible area on tall multi-line drafts.
+    let input_lines = app.input.lines().len().max(1).min(8) as u16;
+    let input_height = input_lines + 2; // borders
     let chunks = Layout::vertical([
-        Constraint::Length(1), // status bar
-        Constraint::Min(3),    // transcript
-        Constraint::Length(3), // input box
+        Constraint::Length(1),                      // status bar
+        Constraint::Min(3),                         // transcript
+        Constraint::Length(input_height),           // input
+        Constraint::Length(if app.completion.is_some() { 1 } else { 0 }), // completion popup band
     ])
     .split(area);
 
     draw_status(f, chunks[0], app);
     draw_transcript(f, chunks[1], app);
     draw_input(f, chunks[2], app);
+
+    // Completion popup is drawn ABOVE the input box (overlapping
+    // the bottom of the transcript) so it sits between what the
+    // user sees and where they're typing — fish/zsh-style.
+    if app.completion.is_some() {
+        draw_completion_popup(f, chunks[1], chunks[2], app);
+    }
 
     if let Some(approval) = &app.approval {
         draw_approval_modal(f, area, approval);
@@ -428,30 +442,120 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
             Style::default().fg(border_color),
         )]));
 
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let body = if busy && app.input.is_empty() {
-        Span::styled(
+    if busy {
+        // While busy, replace the textarea with a hint paragraph
+        // — no cursor, no typing. Restored on TurnFinished.
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        let body = Paragraph::new(Line::from(Span::styled(
             "(waiting for response — Ctrl+C cancels)".to_string(),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
-        )
-    } else {
-        Span::raw(app.input.as_str())
-    };
-    let para = Paragraph::new(Line::from(body)).style(Style::default().fg(Color::White));
-    f.render_widget(para, inner);
+        )));
+        f.render_widget(body, inner);
+        return;
+    }
 
-    // Hide the cursor while busy — there's nothing to type into.
-    if !busy {
-        let visible_col =
-            utf8_display_width(&app.input[..app.cursor]).min(inner.width as usize) as u16;
-        f.set_cursor_position(Position::new(inner.x + visible_col, inner.y));
+    // Defer to tui-textarea: it owns cursor placement, multi-line
+    // wrapping, and selection. We render the block separately so
+    // the title stays consistent with the rest of the layout.
+    f.render_widget(block, area);
+    let inner = inner_for_input(area);
+    f.render_widget(&app.input, inner);
+}
+
+/// Inner area for the input box matching the bordered block. We
+/// can't reuse `Block::inner` after rendering because we already
+/// consumed the block; recompute. The block above borders with 1
+/// row top + 1 row bottom + 1 col left + 1 col right.
+fn inner_for_input(area: Rect) -> Rect {
+    Rect {
+        x: area.x.saturating_add(1),
+        y: area.y.saturating_add(1),
+        width: area.width.saturating_sub(2),
+        height: area.height.saturating_sub(2),
     }
 }
 
-fn utf8_display_width(s: &str) -> usize {
-    s.chars().count()
+/// Slash / `@path` completion popup. Drawn just above the input
+/// box, overlapping the bottom of the transcript pane. Caps at 8
+/// visible rows; arrow keys cycle through candidates regardless.
+fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect, app: &App) {
+    let menu = match app.completion.as_ref() {
+        Some(m) => m,
+        None => return,
+    };
+    if menu.candidates.is_empty() {
+        return;
+    }
+    let visible = menu.candidates.len().min(8) as u16;
+    let popup_height = visible + 2; // borders
+    let width = (menu
+        .candidates
+        .iter()
+        .map(|c| c.chars().count())
+        .max()
+        .unwrap_or(20)
+        + 4) as u16;
+    let width = width.min(input_area.width).max(20);
+    // Anchor: align the popup's left edge with the input box,
+    // bottom edge sitting one row above the input box's top.
+    let y = input_area.y.saturating_sub(popup_height);
+    let y = y.max(transcript_area.y);
+    let popup_area = Rect {
+        x: input_area.x,
+        y,
+        width: width.min(input_area.width),
+        height: popup_height,
+    };
+
+    f.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title(Line::from(Span::styled(
+            " complete ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(popup_area);
+    f.render_widget(block, popup_area);
+
+    // Render candidates with the selected one highlighted. We
+    // paint the visible window starting at the closest entry to
+    // the selection so a wraparound from the bottom is visible.
+    let start = menu
+        .selected
+        .saturating_sub(visible as usize - 1)
+        .min(menu.candidates.len().saturating_sub(visible as usize));
+    let lines: Vec<Line> = menu
+        .candidates
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible as usize)
+        .map(|(i, name)| {
+            let is_selected = i == menu.selected;
+            let style = if is_selected {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Line::from(Span::styled(
+                if is_selected {
+                    format!("▌ {}", name)
+                } else {
+                    format!("  {}", name)
+                },
+                style,
+            ))
+        })
+        .collect();
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
 }
