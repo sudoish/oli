@@ -17,6 +17,10 @@ use super::spinner_glyph;
 /// Horizontal padding (cols) inset from each transcript edge.
 /// Applied via `Block::padding`; the rule width below subtracts 2x.
 pub(super) const TRANSCRIPT_H_PAD: u16 = 1;
+/// Bottom padding (rows) between transcript content and the
+/// activity strip / input box. Gives messages visual breathing
+/// room above the prompt area.
+pub(super) const TRANSCRIPT_BOTTOM_PAD: u16 = 2;
 
 pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     let inner_width = area.width.saturating_sub(TRANSCRIPT_H_PAD * 2);
@@ -25,7 +29,7 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     // Now that the borrow on `app.transcript` is dropped, settle
     // the scroll metrics from the actual rendered line count.
     let total = lines.len() as u16;
-    let height = area.height;
+    let height = area.height.saturating_sub(TRANSCRIPT_BOTTOM_PAD);
     let max = total.saturating_sub(height);
     app.note_scroll_metrics(max, height);
     let offset = match app.scroll_manual {
@@ -35,7 +39,12 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     let detached = app.is_scroll_detached();
     let unread = app.unread_lines;
 
-    let block = Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD));
+    let block = Block::default().padding(Padding::new(
+        TRANSCRIPT_H_PAD,
+        TRANSCRIPT_H_PAD,
+        0,
+        TRANSCRIPT_BOTTOM_PAD,
+    ));
     let para = Paragraph::new(lines)
         .block(block)
         .wrap(Wrap { trim: false })
@@ -80,20 +89,46 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
         let is_active = app.active_assistant == Some(i);
         match item {
             TranscriptItem::UserPrompt { body } => {
+                // Header `you ▐` — mirror of the assistant's `▌ oli`,
+                // pinned to the right edge of the inner pane.
+                let header_text = "you ";
+                let header_chars = header_text.chars().count() as u16 + 1; // +1 for ▐
+                let header_pad = rule_width.saturating_sub(header_chars) as usize;
+                let mut header_spans: Vec<Span<'static>> = Vec::with_capacity(3);
+                if header_pad > 0 {
+                    header_spans.push(Span::raw(" ".repeat(header_pad)));
+                }
+                header_spans.push(Span::styled(
+                    header_text.to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                header_spans.push(Span::styled(
+                    "▐".to_string(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                lines.push(Line::from(header_spans));
+
+                // Body chunks right-aligned with a 2-col right
+                // gutter — mirrors the 2-col left gutter assistant
+                // body uses under `▌ oli`.
+                let body_right_gutter: u16 = 2;
+                let body_total_w = rule_width.saturating_sub(body_right_gutter);
                 let bubble_width = bubble_width_for(rule_width);
                 for body_line in body.lines() {
                     for chunk in wrap_to_width(body_line, bubble_width as usize) {
                         let chunk_w = chunk.chars().count() as u16;
-                        let pad = rule_width.saturating_sub(chunk_w) as usize;
+                        let pad = body_total_w.saturating_sub(chunk_w) as usize;
                         let mut spans: Vec<Span<'static>> = Vec::with_capacity(2);
                         if pad > 0 {
                             spans.push(Span::raw(" ".repeat(pad)));
                         }
                         spans.push(Span::styled(
                             chunk,
-                            Style::default()
-                                .fg(Color::Yellow)
-                                .add_modifier(Modifier::BOLD),
+                            Style::default().fg(Color::White),
                         ));
                         lines.push(Line::from(spans));
                     }
@@ -371,7 +406,23 @@ mod tests {
     }
 
     #[test]
-    fn user_prompt_is_right_aligned_within_inner_width() {
+    fn user_prompt_renders_you_header_with_right_bar() {
+        let mut app = empty_app();
+        app.transcript
+            .push(TranscriptItem::UserPrompt { body: "hi".into() });
+        let inner = 40u16;
+        let lines = build_transcript_lines(&app, inner);
+        let header = lines
+            .iter()
+            .find(|l| line_text(l).contains("you"))
+            .expect("you header should be in output");
+        let s = line_text(header);
+        assert!(s.ends_with("you ▐"), "got: {:?}", s);
+        assert_eq!(s.chars().count(), inner as usize);
+    }
+
+    #[test]
+    fn user_prompt_body_is_right_aligned_with_2col_right_gutter() {
         let mut app = empty_app();
         app.transcript
             .push(TranscriptItem::UserPrompt { body: "hello".into() });
@@ -379,22 +430,12 @@ mod tests {
         let lines = build_transcript_lines(&app, inner);
         let body_line = lines
             .iter()
-            .find(|l| line_text(l).contains("hello"))
-            .expect("hello should be in output");
+            .find(|l| line_text(l).trim() == "hello")
+            .expect("hello body line should be present");
         let s = line_text(body_line);
         assert!(s.ends_with("hello"));
-        assert_eq!(s.chars().count(), inner as usize);
-    }
-
-    #[test]
-    fn user_prompt_drops_the_you_header() {
-        let mut app = empty_app();
-        app.transcript
-            .push(TranscriptItem::UserPrompt { body: "hi".into() });
-        let lines = build_transcript_lines(&app, 40);
-        for l in &lines {
-            assert!(!line_text(l).contains("▌ you"));
-        }
+        // Body sits 2 cols left of where the header's `▐` ends.
+        assert_eq!(s.chars().count(), (inner - 2) as usize);
     }
 
     #[test]
@@ -406,17 +447,23 @@ mod tests {
             .push(TranscriptItem::UserPrompt { body: body.into() });
         let inner = 40u16;
         let lines = build_transcript_lines(&app, inner);
+        // Body chunks: non-empty, no rule, no header glyph.
         let chunks: Vec<&Line> = lines
             .iter()
             .filter(|l| {
                 let t: String = line_text(l);
-                !t.trim().is_empty() && !t.contains('─')
+                !t.trim().is_empty() && !t.contains('─') && !t.contains("▐")
             })
             .collect();
         assert!(chunks.len() >= 2, "expected wrapping, got {} chunk(s)", chunks.len());
         for chunk in chunks {
             let s = line_text(chunk);
-            assert_eq!(s.chars().count(), inner as usize, "chunk not padded to inner_width: {:?}", s);
+            assert_eq!(
+                s.chars().count(),
+                (inner - 2) as usize,
+                "chunk not padded to inner_width-2: {:?}",
+                s
+            );
         }
     }
 
