@@ -39,6 +39,12 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     let detached = app.is_scroll_detached();
     let unread = app.unread_lines;
 
+    // Chat-app anchoring: when the transcript is shorter than the
+    // pane, push messages to the bottom by prepending blank lines.
+    // When content overflows the pane, the existing offset = max
+    // logic already pins the latest line to the bottom.
+    let lines = anchor_to_bottom(lines, inner_width, height);
+
     let block = Block::default().padding(Padding::new(
         TRANSCRIPT_H_PAD,
         TRANSCRIPT_H_PAD,
@@ -249,6 +255,50 @@ fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
         out.push(text.to_string());
     }
     out
+}
+
+/// Conservative visual-row count estimate that accounts for
+/// `Wrap { trim: false }`. Each line takes at least 1 row; longer
+/// lines take ceil(chars/inner_width) rows. Word-wrap may break
+/// earlier than this, so the estimate is an *upper bound*: safe
+/// for "does content fit?" decisions.
+fn visual_line_count(lines: &[Line<'_>], inner_width: u16) -> u16 {
+    let w = inner_width.max(1);
+    lines
+        .iter()
+        .map(|l| {
+            let chars: u16 = l
+                .spans
+                .iter()
+                .map(|s| s.content.chars().count() as u16)
+                .sum();
+            ((chars + w - 1) / w).max(1)
+        })
+        .sum()
+}
+
+/// Bottom-anchor the rendered lines: when the rendered content is
+/// shorter than the visible inner height, prepend blank lines so
+/// the latest message sits flush against the bottom (chat-app
+/// convention). When content overflows, return as-is — the
+/// existing `Paragraph::scroll((offset, 0))` math already pins the
+/// last line to the bottom.
+pub(super) fn anchor_to_bottom(
+    mut lines: Vec<Line<'static>>,
+    inner_width: u16,
+    inner_height: u16,
+) -> Vec<Line<'static>> {
+    let visual = visual_line_count(&lines, inner_width);
+    if visual < inner_height {
+        let pad = (inner_height - visual) as usize;
+        let mut padded = Vec::with_capacity(lines.len() + pad);
+        for _ in 0..pad {
+            padded.push(Line::raw(""));
+        }
+        padded.append(&mut lines);
+        return padded;
+    }
+    lines
 }
 
 /// Dim horizontal rule used between user→assistant turn
@@ -480,6 +530,55 @@ mod tests {
             assert!(chunk.chars().count() <= 9, "{:?} too long", chunk);
         }
         assert_eq!(out.join(" "), "one two three four five");
+    }
+
+    #[test]
+    fn anchor_to_bottom_prepends_blanks_when_content_fits() {
+        let content: Vec<Line<'static>> = vec![
+            Line::raw("hello".to_string()),
+            Line::raw("world".to_string()),
+        ];
+        let result = anchor_to_bottom(content, 40, 10);
+        assert_eq!(result.len(), 10);
+        // First 8 rows are blank padding…
+        for i in 0..8 {
+            assert_eq!(line_text(&result[i]), "", "row {} should be blank", i);
+        }
+        // …then real content sits at the bottom.
+        assert_eq!(line_text(&result[8]), "hello");
+        assert_eq!(line_text(&result[9]), "world");
+    }
+
+    #[test]
+    fn anchor_to_bottom_passes_through_when_content_overflows() {
+        let content: Vec<Line<'static>> = (0..20)
+            .map(|i| Line::raw(format!("line-{}", i)))
+            .collect();
+        let result = anchor_to_bottom(content.clone(), 40, 10);
+        assert_eq!(result.len(), content.len());
+        assert_eq!(line_text(&result[0]), "line-0");
+    }
+
+    #[test]
+    fn anchor_to_bottom_accounts_for_wrapping_in_long_lines() {
+        // A 100-char line at width 40 wraps to 3 rows; combined
+        // with one short line, visual height = 4. Pane height 10
+        // should leave 6 blank rows at the top.
+        let long: String = "x".repeat(100);
+        let content: Vec<Line<'static>> = vec![
+            Line::raw(long.clone()),
+            Line::raw("short".to_string()),
+        ];
+        let result = anchor_to_bottom(content, 40, 10);
+        // 6 blank rows + 1 long line + 1 short line = 8 entries
+        // (the long line stays as one Line; wrap happens at render
+        // time but our estimate accounts for the 3-row footprint).
+        assert_eq!(result.len(), 8);
+        for i in 0..6 {
+            assert_eq!(line_text(&result[i]), "");
+        }
+        assert_eq!(line_text(&result[6]), long);
+        assert_eq!(line_text(&result[7]), "short");
     }
 
     #[test]
