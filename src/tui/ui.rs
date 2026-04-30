@@ -21,6 +21,7 @@ use crate::tui::app::{
     SessionsPickerState, ToolCardState, TranscriptItem,
 };
 use crate::tui::hints;
+use crate::tui::wizard::{WizardProvider, WizardState, WizardStep};
 use crate::tui::markdown;
 
 const TITLE: &str = "oli";
@@ -57,6 +58,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     if let Some(search) = &app.history_search {
         draw_history_search(f, area, search, app);
+    }
+    if let Some(w) = &app.wizard {
+        draw_wizard(f, area, w);
     }
 }
 
@@ -450,6 +454,212 @@ fn draw_history_search(f: &mut Frame, full_area: Rect, search: &HistorySearchSta
         })
         .collect();
     f.render_widget(Paragraph::new(lines), parts[1]);
+}
+
+/// First-run setup wizard overlay. Multi-step modal:
+/// Welcome → PickProvider → (EnterApiKey if applicable) →
+/// Confirm → Saved/Cancelled. Esc cancels at any point.
+fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState) {
+    let modal = centered_rect(full_area, 80, 70).intersection(full_area);
+    f.render_widget(Clear, modal);
+
+    let title = match &w.step {
+        WizardStep::Welcome => " Setup (1/4)  Welcome ",
+        WizardStep::PickProvider => " Setup (2/4)  Choose provider ",
+        WizardStep::EnterApiKey => " Setup (3/4)  API key ",
+        WizardStep::Confirm => " Setup (4/4)  Confirm ",
+        WizardStep::Saved { .. } => " Setup  Saved ",
+        WizardStep::Cancelled => " Setup  Cancelled ",
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(Line::from(Span::styled(
+            title,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    let parts =
+        Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).split(inner);
+
+    let (body_lines, legend) = match &w.step {
+        WizardStep::Welcome => (welcome_lines(), "  [Enter] continue   [Esc] skip"),
+        WizardStep::PickProvider => (
+            provider_lines(w),
+            "  [↑↓] choose   [Enter] continue   [Esc] cancel",
+        ),
+        WizardStep::EnterApiKey => (
+            api_key_lines(w),
+            "  type your key   [Enter] continue   [Esc] cancel",
+        ),
+        WizardStep::Confirm => (confirm_lines(w), "  [Enter] save   [Backspace] back   [Esc] cancel"),
+        WizardStep::Saved { path } => (
+            vec![
+                Line::raw(""),
+                Line::from(Span::styled(
+                    format!("  ✅ wrote {}", path.display()),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(""),
+                Line::from(Span::styled(
+                    "  Restart `oli` to use the new config.".to_string(),
+                    Style::default().fg(Color::White),
+                )),
+            ],
+            "  press any key to dismiss",
+        ),
+        WizardStep::Cancelled => (
+            vec![Line::from(Span::styled(
+                "  Setup cancelled.".to_string(),
+                Style::default().fg(Color::DarkGray),
+            ))],
+            "  press any key to dismiss",
+        ),
+    };
+    let body = Paragraph::new(body_lines).wrap(Wrap { trim: false });
+    f.render_widget(body, parts[0]);
+
+    let legend_para = Paragraph::new(Line::from(Span::styled(
+        legend.to_string(),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )));
+    f.render_widget(legend_para, parts[1]);
+}
+
+fn welcome_lines() -> Vec<Line<'static>> {
+    vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Welcome to oli!".to_string(),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  No config file at ~/.config/oli/config.toml. Let's set one up.".to_string(),
+            Style::default().fg(Color::White),
+        )),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Three steps: pick a provider, paste an API key (skipped for Ollama),".to_string(),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "  and confirm. Esc skips at any point — you can edit the file by hand later.".to_string(),
+            Style::default().fg(Color::White),
+        )),
+    ]
+}
+
+fn provider_lines(w: &WizardState) -> Vec<Line<'static>> {
+    let mut out = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  Pick a provider:".to_string(),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+    ];
+    let current = w.current_provider();
+    for p in WizardProvider::all() {
+        let selected = p == current;
+        let style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        out.push(Line::from(Span::styled(
+            if selected {
+                format!("  ▌ {}", p.label())
+            } else {
+                format!("    {}", p.label())
+            },
+            style,
+        )));
+    }
+    out
+}
+
+fn api_key_lines(w: &WizardState) -> Vec<Line<'static>> {
+    let masked: String = w.api_key.chars().map(|_| '•').collect();
+    let display = if masked.is_empty() {
+        "(empty)".to_string()
+    } else {
+        masked
+    };
+    vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("  Provider: {}", w.current_provider().label()),
+            Style::default().fg(Color::DarkGray),
+        )),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled(
+                "  API key: ",
+                Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                display,
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(
+                "▍",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::SLOW_BLINK),
+            ),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  (input is masked; characters are hidden behind • bullets)".to_string(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )),
+    ]
+}
+
+fn confirm_lines(w: &WizardState) -> Vec<Line<'static>> {
+    let mut out = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            "  About to save the following config:".to_string(),
+            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+    ];
+    // Render the rendered TOML body, masking the api_key line so
+    // a screen reader / over-the-shoulder peeker doesn't see it.
+    let body = w.render_toml();
+    for line in body.lines() {
+        let masked = if line.starts_with("api_key") && w.current_provider().needs_api_key() {
+            "api_key       = \"••••••••••\"".to_string()
+        } else {
+            line.to_string()
+        };
+        out.push(Line::from(Span::styled(
+            format!("  {}", masked),
+            Style::default().fg(Color::White),
+        )));
+    }
+    out
 }
 
 fn clip_to_width(s: &str, max: usize) -> String {

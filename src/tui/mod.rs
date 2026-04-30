@@ -31,6 +31,7 @@ mod hook;
 mod markdown;
 mod terminal;
 mod ui;
+mod wizard;
 
 pub use app::App;
 
@@ -144,11 +145,7 @@ pub async fn run(
     app.set_status(initial_status);
     app.set_shown_hints(hints::load());
     if !has_user_config() {
-        app.on_system_note(
-            "💡 no config found at ~/.config/oli/config.toml — create one (see specs/README.md) \
-             or `oli` will fall back to env vars."
-                .into(),
-        );
+        app.open_wizard();
     }
 
     guard
@@ -281,6 +278,10 @@ fn on_key(
     }
     if app.history_search.is_some() {
         handle_history_search_key(app, key);
+        return;
+    }
+    if app.wizard.is_some() {
+        handle_wizard_key(app, key);
         return;
     }
 
@@ -648,6 +649,103 @@ fn handle_sessions_picker_key(app: &mut App, key: crossterm::event::KeyEvent) {
             }
         }
         _ => {}
+    }
+}
+
+fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    use crate::tui::wizard::WizardStep;
+
+    let step = app.wizard.as_ref().map(|w| w.step.clone());
+    let Some(step) = step else { return };
+
+    match step {
+        WizardStep::Welcome => match key.code {
+            KeyCode::Esc => {
+                app.close_wizard();
+                app.on_system_note(
+                    "(setup skipped — `oli` will fall back to env vars; \
+                     create ~/.config/oli/config.toml when ready)"
+                        .into(),
+                );
+            }
+            KeyCode::Enter => {
+                if let Some(w) = app.wizard.as_mut() {
+                    w.advance();
+                }
+            }
+            _ => {}
+        },
+        WizardStep::PickProvider => {
+            let w = app.wizard.as_mut().unwrap();
+            match key.code {
+                KeyCode::Esc => app.close_wizard(),
+                KeyCode::Up => w.navigate_provider(-1),
+                KeyCode::Down => w.navigate_provider(1),
+                KeyCode::Enter => w.advance(),
+                _ => {}
+            }
+        }
+        WizardStep::EnterApiKey => {
+            let w = app.wizard.as_mut().unwrap();
+            match key.code {
+                KeyCode::Esc => app.close_wizard(),
+                KeyCode::Backspace => {
+                    w.api_key.pop();
+                }
+                KeyCode::Enter => {
+                    if !w.api_key.is_empty() {
+                        w.advance();
+                    }
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    w.api_key.push(c);
+                }
+                _ => {}
+            }
+        }
+        WizardStep::Confirm => match key.code {
+            KeyCode::Esc => app.close_wizard(),
+            KeyCode::Enter => save_wizard(app),
+            KeyCode::Backspace => {
+                if let Some(w) = app.wizard.as_mut() {
+                    w.step_back();
+                }
+            }
+            _ => {}
+        },
+        WizardStep::Saved { .. } | WizardStep::Cancelled => {
+            // Any key dismisses the post-state. Surfaces the
+            // appropriate hint as a SystemNote (already done at
+            // save-time / cancel-time).
+            app.close_wizard();
+        }
+    }
+}
+
+fn save_wizard(app: &mut App) {
+    let Some(w) = app.wizard.as_mut() else {
+        return;
+    };
+    let body = w.render_toml();
+    let path = match wizard::config_path() {
+        Some(p) => p,
+        None => {
+            app.on_system_note("(can't resolve $HOME — config not saved)".into());
+            app.close_wizard();
+            return;
+        }
+    };
+    match wizard::save(&path, &body) {
+        Ok(()) => {
+            w.step = wizard::WizardStep::Saved { path: path.clone() };
+            app.on_system_note(format!(
+                "✅ wrote {} — restart `oli` to use the new config",
+                path.display()
+            ));
+        }
+        Err(e) => {
+            app.on_system_note(format!("(setup failed to save: {})", e));
+        }
     }
 }
 

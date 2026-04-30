@@ -169,6 +169,9 @@ pub struct App {
     pub inline_help: Option<InlineHelpState>,
     /// Ctrl-R history search overlay. `Some(_)` while open.
     pub history_search: Option<HistorySearchState>,
+    /// First-run setup wizard. `Some(_)` while the user is being
+    /// walked through provider / api-key / model selection.
+    pub wizard: Option<crate::tui::wizard::WizardState>,
     /// Set of hint ids the user has already dismissed. Persisted
     /// across sessions in `~/.config/oli/tui-hints.json` so
     /// onboarding tips fade once the user has used the feature
@@ -253,6 +256,7 @@ impl Default for App {
             help_browser: None,
             inline_help: None,
             history_search: None,
+            wizard: None,
             shown_hints: HashSet::new(),
         }
     }
@@ -352,6 +356,14 @@ impl App {
     pub fn sessions_picker_pick(&self) -> Option<String> {
         let p = self.sessions_picker.as_ref()?;
         p.entries.get(p.selected).map(|r| r.id.clone())
+    }
+
+    pub fn open_wizard(&mut self) {
+        self.wizard = Some(crate::tui::wizard::WizardState::new());
+    }
+
+    pub fn close_wizard(&mut self) {
+        self.wizard = None;
     }
 
     pub fn open_history_search(&mut self) {

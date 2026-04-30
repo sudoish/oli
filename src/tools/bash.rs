@@ -85,23 +85,95 @@ async fn run_bash(command: &str, cwd: Option<&Path>, timeout: Duration) -> Strin
     }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    // On Unix we own kill via a ProcessGroupKillGuard whose Drop
+    // sends SIGKILL to the whole group — strictly more powerful
+    // than kill_on_drop, which only reaps the immediate child
+    // and leaves grandchildren reparented to PID 1. On Windows
+    // (no setsid / killpg) we keep kill_on_drop as the
+    // best-effort cleanup.
+    #[cfg(not(unix))]
     cmd.kill_on_drop(true);
+    // Make the spawned shell its own session + process-group
+    // leader so we can SIGKILL the whole tree on cancel /
+    // timeout. Without this, killing `sh` leaves any
+    // grandchildren (`sleep`, `cargo`, ...) reparented to PID 1
+    // and running in the background.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                // setpgid(0, 0) makes this process a new
+                // process group leader (pgid == pid). Killing
+                // the group via killpg(pid, SIGKILL) reaches
+                // every descendant, including grandchildren
+                // reparented to PID 1 after we kill the
+                // immediate `sh`. setsid() would also give us
+                // a new session, which we don't need.
+                if libc::setpgid(0, 0) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     let child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => return format!("Error executing command: {}", e),
     };
 
-    match tokio::time::timeout(timeout, child.wait_with_output()).await {
+    // Snapshot the pid for the process-group kill BEFORE handing
+    // the child to wait_with_output (which consumes it). Naming
+    // matters: an `_pg_guard` underscore-prefix can be optimized
+    // out of the state machine by some Rust versions on locals
+    // unused after an await (the leading underscore signals
+    // "I'm not using this" to the compiler). Use a real name and
+    // touch it after the await to guarantee state-machine
+    // capture.
+    // Snapshot the pid for the process-group kill BEFORE handing
+    // the child to wait_with_output (which consumes it). The
+    // explicit non-underscore name + the explicit drop after the
+    // await keep the guard captured by the async state machine
+    // (a leading-underscore binding can be optimized out for
+    // unused-after-await locals on some Rust versions).
+    #[cfg(unix)]
+    let pg_guard = child.id().map(|p| ProcessGroupKillGuard(p as i32));
+
+    let result = tokio::time::timeout(timeout, child.wait_with_output()).await;
+    #[cfg(unix)]
+    drop(pg_guard);
+
+    match result {
         Ok(Ok(output)) => format_output(&output),
         Ok(Err(e)) => format!("Error waiting for command: {}", e),
-        // The child handle is owned by `wait_with_output`; dropping the
-        // future on timeout drops it, and `kill_on_drop(true)` ensures
-        // the child gets a SIGKILL on the way out.
+        // On timeout / cancel the future drops, taking
+        // `_pg_guard` and `child` with it. The guard's Drop
+        // sends SIGKILL to the negated pid (the process group)
+        // — that's how grandchildren get cleaned up.
         Err(_) => format!(
             "Command timed out after {}ms (child killed)",
             timeout.as_millis()
         ),
+    }
+}
+
+/// On Drop, SIGKILL the entire process group. `killpg` on a
+/// non-existent group is a no-op (`ESRCH`), so this is safe to
+/// fire even when the bash future completed normally.
+#[cfg(unix)]
+struct ProcessGroupKillGuard(i32);
+
+#[cfg(unix)]
+impl Drop for ProcessGroupKillGuard {
+    fn drop(&mut self) {
+        unsafe {
+            // killpg on a non-existent group returns ESRCH —
+            // harmless. On cancel this is the only kill that
+            // fires, so the group has to actually exist
+            // (set up via pre_exec setpgid).
+            libc::killpg(self.0, libc::SIGKILL);
+        }
     }
 }
 
@@ -226,38 +298,54 @@ mod tests {
 
     /// Dropping the in-flight Bash future (what the TUI's
     /// Ctrl+C path does when the cancel oneshot fires) returns
-    /// promptly. `kill_on_drop(true)` SIGKILLs the spawned `sh`
-    /// child immediately so the agent loop unblocks.
-    ///
-    /// Caveat: SIGKILL on `sh` does not propagate to `sh`'s own
-    /// grandchildren — `sleep`s spawned inside the shell get
-    /// reparented to PID 1 and finish in the background. A
-    /// process-group kill (Unix `setsid` + `killpg`) would
-    /// catch grandchildren too; deferred to a follow-up. The
-    /// agent's perspective — "the bash future returned, the
-    /// loop can move on" — is what matters for cancel UX, and
-    /// that does work today.
+    /// promptly *and* takes the whole shell-spawned tree with
+    /// it via the process-group SIGKILL. We verify by having
+    /// the shell's grandchild (`sleep`) try to write a sentinel
+    /// file *after* its sleep; with the process-group kill
+    /// active, the grandchild dies and the file never appears.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn dropping_the_future_returns_promptly() {
+    async fn dropping_the_future_kills_the_grandchild_via_process_group() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let sentinel = dir.path().join("sentinel");
+        let cmd = format!("sleep 1 && touch {}", sentinel.to_str().unwrap());
         let ctx = ToolContext::new();
+
         let started = std::time::Instant::now();
-        let bash_fut = Bash.run(
-            json!({"command": "sleep 30", "timeout_ms": 60_000}),
-            &ctx,
-        );
-        tokio::pin!(bash_fut);
-        tokio::select! {
-            _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                // bash_fut dropped at end of select.
+
+        // Scope the future so it drops at block exit — NOT at
+        // function exit. `tokio::pin!` shadows the binding into a
+        // Pin<&mut F> but the underlying F lives on the original
+        // local; we need the original to go out of scope before
+        // we can verify the kill. Otherwise pg_guard.drop fires
+        // after the assertion has already run.
+        {
+            let bash_fut = Bash.run(
+                json!({"command": cmd, "timeout_ms": 30_000}),
+                &ctx,
+            );
+            tokio::pin!(bash_fut);
+            tokio::select! {
+                _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                _ = &mut bash_fut => panic!("bash returned before cancel"),
             }
-            _ = &mut bash_fut => panic!("bash returned before cancel"),
-        }
-        // Drop has run. The future stopped polling immediately;
-        // we shouldn't be near the 30s sleep.
+        } // bash_fut + the future drop here → pg_guard drop → killpg
+
         assert!(
             started.elapsed() < Duration::from_secs(2),
-            "drop took {:?} — kill_on_drop didn't fire",
+            "drop took {:?}",
             started.elapsed()
+        );
+
+        // Wait past the original sleep duration. With process-
+        // group kill, the grandchild died and the touch never
+        // ran — sentinel must not exist.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        assert!(
+            !sentinel.exists(),
+            "sentinel exists at {:?} — process-group kill didn't reach the grandchild",
+            sentinel
         );
     }
 

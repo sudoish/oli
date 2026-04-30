@@ -498,7 +498,7 @@ line-oriented plan; this doc supersedes it.
 | N1 | Interactive `/sessions` picker                    | DONE   |
 | N2 | Interactive `/help` browser                       | DONE   |
 | N3 | `/<cmd> ?` inline help popup                      | DONE   |
-| N4 | First-run setup wizard                            | PART   |
+| N4 | First-run setup wizard                            | DONE   |
 | N5 | Fading onboarding hints                           | DONE   |
 | O1 | `/undo` rolls back last turn                      | DONE   |
 | O2 | Ctrl+E edit-and-rerun                             | DONE   |
