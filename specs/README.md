@@ -20,6 +20,7 @@ will land alongside it as `specs/<topic>.md`.
 | [`specs/memory.md`](memory.md)      | `Memory` trait design — pluggable strategies (linear+compact default, RAG, graph, hierarchical).                            |
 | [`specs/mcp.md`](mcp.md)            | MCP client design (phase 5). stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.          |
 | [`specs/formatting.md`](formatting.md) | Pretty output plan: ANSI strip, tables, HTML, wrapped code, inline code, `--plain` markdown rendering. |
+| [`specs/tui-readability.md`](tui-readability.md) | TUI readability plan: activity strip above the input (with tool-running sub-state), horizontal padding, turn separators. |
 | [`specs/ui.md`](ui.md)                | Historical line-mode UX plan (predecessor to `tui.md`). Kept for reference.                                |
 | [`docs/cheatsheet.md`](../docs/cheatsheet.md) | Every keybind, slash command, file path, and feature flag in one page.                                              |
 
