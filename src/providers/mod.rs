@@ -1,3 +1,24 @@
+//! Chat-completion providers. The `Provider` trait abstracts the
+//! one-shot `chat()` (used by `-p` mode) and the streaming
+//! `chat_stream()` (used by the TUI / REPL) over whatever wire
+//! protocol the underlying API speaks.
+//!
+//! Bundled implementations:
+//! - [`anthropic`] — Anthropic's native Messages API. Streams via
+//!   SSE. Knows how to surface usage tokens and stream
+//!   `tool_use` blocks back to the agent loop.
+//! - [`openai_compat`] — OpenAI / OpenRouter / Ollama / vLLM /
+//!   anything that speaks OpenAI's `/chat/completions` shape.
+//!
+//! `build()` is the factory the binary calls at startup: it reads
+//! `default_provider` from `Config`, instantiates the matching
+//! `[providers.<name>]` block, and returns a boxed `Provider`.
+//!
+//! Adding a new provider: implement `Provider`, return the boxed
+//! impl from `build()` for the new `kind`, and the rest of the
+//! harness (agent loop, tool registry, policy, memory) doesn't
+//! need to know about it.
+
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::Value;

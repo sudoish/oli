@@ -336,9 +336,9 @@ boundary.
 | P1 | Zero build warnings                               | DONE   |
 | P2 | Overlay sum type on App                           | DONE   |
 | P3 | Split tui/app.rs and tui/ui.rs                    | DONE   |
-| Q1 | Extract `lib.rs`                                  | TODO   |
-| Q2 | Move binary entry to `src/bin/oli.rs`             | TODO   |
-| Q3 | Module-level `//!` docs everywhere                | TODO   |
+| Q1 | Extract `lib.rs`                                  | DONE   |
+| Q2 | Move binary entry to `src/bin/oli.rs`             | DONE   |
+| Q3 | Module-level `//!` docs everywhere                | DONE   |
 | R1 | `/diagnostics` ring buffer + slash                | TODO   |
 | R2 | Tiny logging shim replacing bare `eprintln!`      | TODO   |
 | R3 | `/diagnostics clear`                              | TODO   |

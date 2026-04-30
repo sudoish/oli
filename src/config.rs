@@ -1,3 +1,25 @@
+//! TOML config — `~/.config/oli/config.toml` global, optionally
+//! layered with a project-local `.oli/config.toml`. The same
+//! `Config` is shared across the agent, providers, policy gate,
+//! tool registry, plugin loader, and MCP client.
+//!
+//! Sections (all optional except where noted):
+//! - `default_provider` (required) — picks which `[providers.<name>]`
+//!   block to instantiate.
+//! - `[providers.<name>]` — per-provider config; `kind` selects
+//!   the implementation (`anthropic`, `openai-compat`, …).
+//! - `[agent]` — per-run knobs: `max_turns`, compaction target.
+//! - `[policy]` — allow/deny rules and approval defaults.
+//! - `[[caps]]` — model-capability overrides (context window,
+//!   native-tools toggle, …) ahead of the hardcoded defaults.
+//! - `[[mcp.servers]]` — external MCP servers to dial at startup.
+//! - `[tools.subprocess]` — declared external CLI tools to expose.
+//! - `[plugins]` — plugin discovery toggles.
+//!
+//! `Config::load_or_default()` returns a fully-merged config or
+//! falls back to env-only defaults when neither file is present;
+//! that's what the binary calls at startup.
+
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::HashMap;

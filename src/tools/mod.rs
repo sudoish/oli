@@ -1,3 +1,27 @@
+//! Tool registry and the bundled built-in tools the agent ships
+//! with.
+//!
+//! The [`Tool`] trait is intentionally narrow — `name`,
+//! `description`, JSON-Schema `parameters`, and an async `call`
+//! that returns a string. The model picks tools off
+//! `Registry::openai_schemas`; the agent loop dispatches by
+//! name through `Registry::call`.
+//!
+//! Submodules:
+//! - [`bash`] — shell execution with timeout + process-group kill.
+//! - [`context`] — `ToolContext`, the per-agent shared state
+//!   (read-set, cwd, optional `ReadLogger`) tools see.
+//! - [`edit`] — surgical string-replace edits, gated on a prior
+//!   `Read` of the same file.
+//! - [`glob`] — fast filename matching.
+//! - [`grep`] — content search via ripgrep when available.
+//! - [`notes`] — `WriteNote` / `SearchNotes` / `ListNotes` over a
+//!   `NotesStore`.
+//! - [`read`] — file reads with truncation + read-set tracking.
+//! - [`subprocess`] — declared external CLI tools from config.
+//! - [`task`] — `Task` subagent dispatch via a `SubagentSpawner`.
+//! - `write` — clobber-safe whole-file writes.
+
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use std::collections::HashMap;

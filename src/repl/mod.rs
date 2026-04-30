@@ -1,5 +1,16 @@
-//! Interactive REPL: rustyline for line editing, streaming output to stdout,
-//! Ctrl-C cancels the in-flight turn, Ctrl-D exits.
+//! Line-mode interactive REPL — the fallback when the TUI can't
+//! be used (`--plain`, piped stdin/stdout, minimal terminals).
+//! Rustyline drives line editing + history; tool output streams
+//! to stdout as it arrives; Ctrl-C cancels the current turn,
+//! Ctrl-D exits.
+//!
+//! Slash commands live in [`slash`] and are also reused by the
+//! TUI driver, so `/help`, `/cost`, `/clear`, `/sessions` and
+//! plugin- or MCP-registered slashes work in both front-ends.
+//!
+//! [`ProgressHook`] surfaces tool calls inline (`→ Read(file=…)`)
+//! so the user sees what's happening; the binary registers it
+//! only in interactive mode so scripted `-p` runs stay quiet.
 
 use async_trait::async_trait;
 use rustyline::DefaultEditor;

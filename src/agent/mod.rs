@@ -1,3 +1,25 @@
+//! The agent loop — `Agent` ties together a `Provider`, a `Memory`,
+//! a `tools::Registry`, and the `Policy`/`Approver` gate into the
+//! think → call → observe loop the model drives.
+//!
+//! Two entry points:
+//! - [`Agent::run`] — one-shot prompt; returns the final assistant
+//!   text. Used by the `-p` CLI mode.
+//! - [`Agent::run_streaming`] — same loop but emits incremental
+//!   events (content chunks, tool starts/ends, usage updates) to a
+//!   user-supplied callback. Drives the TUI and the line-mode REPL.
+//!
+//! `Agent::with_*` builder methods layer on optional pieces
+//! (memory strategy, hook registry, MCP handles, plugin manifest,
+//! per-run turn cap). The builder is consumed by `pin_system_prompt`
+//! which seals in the system prompt before the first turn.
+//!
+//! Submodules:
+//! - [`memory`] — `Memory` trait and bundled implementations.
+//! - [`context`] — system-prompt builder (env, git, CLAUDE.md).
+//! - [`caps`] — model-capability table (context window, native
+//!   tools yes/no, streaming, etc.).
+
 use std::sync::Arc;
 
 use serde_json::{Value, json};

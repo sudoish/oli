@@ -1,3 +1,14 @@
+//! Error types — `AgentError` covers everything that can fail at
+//! the agent / harness boundary, from provider HTTP errors and
+//! tool I/O to config parsing and policy denials. `Result<T>` is
+//! the crate-wide alias.
+//!
+//! `ToolError` is a thin wrapper used by `Tool::call` impls so a
+//! tool can fail without having to teach `AgentError` about every
+//! tool-specific variant. The agent loop catches it and surfaces
+//! the message to the model as a tool-result error string,
+//! letting the model recover.
+
 use thiserror::Error;
 
 pub type Result<T> = std::result::Result<T, AgentError>;
