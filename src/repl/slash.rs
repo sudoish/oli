@@ -159,6 +159,7 @@ impl SlashRegistry {
         r.register(Model);
         r.register(Sessions);
         r.register(Plugins::new(reloader));
+        r.register(ConfigCmd);
         r.register(Diagnostics);
         r.register(Exit);
         r
@@ -829,6 +830,98 @@ impl SlashCommand for Exit {
     }
 }
 
+/// `/config reload` — re-read the config file (global +
+/// project-local) and apply changes to the running agent
+/// without restarting. Memory, transcript, system prompt,
+/// session token totals — all survive. The active provider gets
+/// rebuilt only if its `default_provider` or its provider-block
+/// config changed; the same is true for `[policy]` and the
+/// model id.
+pub struct ConfigCmd;
+
+#[async_trait]
+impl SlashCommand for ConfigCmd {
+    fn name(&self) -> &str {
+        "config"
+    }
+    fn description(&self) -> &str {
+        "config tools (`/config reload` to pick up edits to config.toml)"
+    }
+    async fn run(&self, args: &str, agent: &mut Agent) -> SlashOutcome {
+        let arg = args.trim();
+        match arg {
+            "reload" | "" => reload_config(agent).await,
+            other => SlashOutcome::Continue(Some(format!(
+                "unknown subcommand `{}`. try: /config reload",
+                other
+            ))),
+        }
+    }
+}
+
+async fn reload_config(agent: &mut Agent) -> SlashOutcome {
+    let new_cfg = match crate::config::Config::load_or_default() {
+        Ok(c) => std::sync::Arc::new(c),
+        Err(e) => {
+            return SlashOutcome::Continue(Some(format!("config reload failed: {}", e)));
+        }
+    };
+
+    // Pick the new active provider: if `default_provider`
+    // changed or the agent's current provider name vanished
+    // from the new config, switch to the new default.
+    let target_provider = if !agent.provider_name.is_empty()
+        && new_cfg.providers.contains_key(&agent.provider_name)
+    {
+        agent.provider_name.clone()
+    } else {
+        new_cfg.default_provider.clone()
+    };
+
+    let new_model = match new_cfg.model_for(&target_provider) {
+        Ok(m) => m,
+        Err(e) => return SlashOutcome::Continue(Some(format!("config reload failed: {}", e))),
+    };
+
+    let new_provider = match crate::providers::build(new_cfg.as_ref(), &target_provider) {
+        Ok(p) => p,
+        Err(e) => return SlashOutcome::Continue(Some(format!("config reload failed: {}", e))),
+    };
+
+    let mut changes: Vec<String> = Vec::new();
+    if agent.provider_name != target_provider {
+        changes.push(format!(
+            "provider: {} → {}",
+            if agent.provider_name.is_empty() {
+                "(none)"
+            } else {
+                &agent.provider_name
+            },
+            target_provider
+        ));
+    }
+    if agent.model != new_model {
+        changes.push(format!("model: {} → {}", agent.model, new_model));
+    }
+
+    agent.provider = new_provider;
+    agent.provider_name = target_provider;
+    agent.model = new_model.clone();
+    agent.caps = agent.resolve_caps(&new_model);
+    agent.policy = Box::new(crate::policy::ConfigPolicy::from_config(&new_cfg.policy));
+    agent.cfg = Some(new_cfg);
+    // last_usage doesn't survive a swap — the prior usage was
+    // measured against a different model/provider.
+    agent.last_usage = None;
+
+    let summary = if changes.is_empty() {
+        "config reloaded (no provider/model change)".to_string()
+    } else {
+        format!("config reloaded:\n  {}", changes.join("\n  "))
+    };
+    SlashOutcome::Continue(Some(summary))
+}
+
 /// `/diagnostics [clear]` — show the recent operational log
 /// (plugin warnings, MCP failures, provider quirks). Without args
 /// renders the tail; with `clear` empties the ring buffer.
@@ -890,6 +983,74 @@ mod tests {
         let mut agent = fresh_agent();
         let out = reg.dispatch("nope", &mut agent).await;
         assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn config_reload_picks_up_default_provider_change() {
+        // The agent starts pointing at provider "ollama" (model "llama"),
+        // then we write a config that switches the default to a fresh
+        // openai-compat block with a different model. /config reload
+        // should pick that up without losing memory.
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("config.toml");
+        std::fs::write(
+            &cfg_path,
+            r#"
+default_provider = "alt"
+
+[providers.alt]
+kind          = "openai-compat"
+base_url      = "http://example.invalid/v1"
+api_key       = "k"
+default_model = "alt-model"
+"#,
+        )
+        .unwrap();
+        // Layered loader probes XDG_CONFIG_HOME first; point it at our temp.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", dir.path());
+        }
+        // load_or_default uses XDG_CONFIG_HOME/oli/config.toml — relocate
+        // our seed file to that path.
+        let real_path = dir.path().join("oli").join("config.toml");
+        std::fs::create_dir_all(real_path.parent().unwrap()).unwrap();
+        std::fs::rename(&cfg_path, &real_path).unwrap();
+
+        let mut agent = fresh_agent();
+        agent.provider_name = "ollama".into();
+        agent.model = "llama".into();
+        // Stash a memory entry so we can verify it survives.
+        agent
+            .memory
+            .record(json!({"role":"user","content":"keep me"}))
+            .await;
+        let mem_len_before = agent.memory.len();
+
+        let reg = SlashRegistry::default_set();
+        let out = reg.dispatch("config reload", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(body)) => {
+                assert!(body.contains("provider:"));
+                assert!(body.contains("alt"));
+                assert!(body.contains("alt-model"));
+            }
+            _ => panic!("expected reload summary, got {:?}", out),
+        }
+        assert_eq!(agent.provider_name, "alt");
+        assert_eq!(agent.model, "alt-model");
+        // Memory survived.
+        assert_eq!(agent.memory.len(), mem_len_before);
+    }
+
+    #[tokio::test]
+    async fn config_reload_unknown_subcommand_surfaces_help() {
+        let mut agent = fresh_agent();
+        let reg = SlashRegistry::default_set();
+        let out = reg.dispatch("config nope", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(body)) => assert!(body.contains("/config reload")),
+            _ => panic!("expected help text, got {:?}", out),
+        }
     }
 
     #[tokio::test]
