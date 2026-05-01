@@ -16,7 +16,7 @@
 //!
 //! Submodules:
 //! - [`memory`] — `Memory` trait and bundled implementations.
-//! - [`context`] — system-prompt builder (env, git, CLAUDE.md).
+//! - [`context`] — system-prompt builder (env, git, AGENTS.md, CLAUDE.md).
 //! - [`caps`] — model-capability table (context window, native
 //!   tools yes/no, streaming, etc.).
 

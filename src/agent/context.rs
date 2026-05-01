@@ -15,10 +15,15 @@ Guidelines:
 
 const MAX_DIR_LISTING_ENTRIES: usize = 50;
 const MAX_PORCELAIN_LINES: usize = 20;
-const MAX_CLAUDE_MD_BYTES: usize = 16_000;
+const MAX_AGENT_CONTEXT_BYTES: usize = 16_000;
+
+// Project-level context files, read at every level walking up from cwd.
+// Order is the on-disk inclusion order at a given directory: AGENTS.md
+// (Codex/Cursor convention) first, then CLAUDE.md (Claude Code convention).
+const AGENT_CONTEXT_FILENAMES: &[&str] = &["AGENTS.md", "CLAUDE.md"];
 
 /// Discovers per-session environment context (cwd, OS, git state, project
-/// files, CLAUDE.md content) and renders it as a system prompt.
+/// files, AGENTS.md/CLAUDE.md content) and renders it as a system prompt.
 ///
 /// Splitting each section into a method keeps the unit tests targeted —
 /// a tempdir + a constructed builder can exercise any one piece without
@@ -49,7 +54,7 @@ impl SystemPromptBuilder {
             out.push_str("\n\n");
             out.push_str(&d);
         }
-        if let Some(c) = self.claude_md_section().await {
+        if let Some(c) = self.agent_context_section().await {
             out.push_str("\n\n");
             out.push_str(&c);
         }
@@ -130,11 +135,12 @@ impl SystemPromptBuilder {
         Some(body)
     }
 
-    async fn claude_md_section(&self) -> Option<String> {
+    async fn agent_context_section(&self) -> Option<String> {
         let mut sources: Vec<(PathBuf, String)> = Vec::new();
 
-        // Walk-up from cwd to root, collecting CLAUDE.md at each level.
-        // Reverse so root-first (broader) appears before cwd-level (narrower).
+        // Walk-up from cwd to root, collecting AGENTS.md/CLAUDE.md at each
+        // level. Reverse so root-first (broader) appears before cwd-level
+        // (narrower) — model reads scope from outermost to innermost.
         let mut walk: Vec<PathBuf> = Vec::new();
         let mut p: &Path = self.cwd.as_path();
         loop {
@@ -147,17 +153,22 @@ impl SystemPromptBuilder {
         walk.reverse();
 
         for dir in walk {
-            let candidate = dir.join("CLAUDE.md");
-            if let Ok(body) = tokio::fs::read_to_string(&candidate).await {
-                sources.push((candidate, body));
+            for name in AGENT_CONTEXT_FILENAMES {
+                let candidate = dir.join(name);
+                if let Ok(body) = tokio::fs::read_to_string(&candidate).await {
+                    sources.push((candidate, body));
+                }
             }
         }
 
-        // Global ~/.claude/CLAUDE.md last so it acts as user-level overlay.
+        // User-level overlays last. Mirror the conventions of each tool:
+        // Claude Code reads ~/.claude/CLAUDE.md, Codex reads ~/.codex/AGENTS.md.
         if let Some(home) = &self.home {
-            let global = home.join(".claude").join("CLAUDE.md");
-            if let Ok(body) = tokio::fs::read_to_string(&global).await {
-                sources.push((global, body));
+            for (subdir, name) in [(".claude", "CLAUDE.md"), (".codex", "AGENTS.md")] {
+                let global = home.join(subdir).join(name);
+                if let Ok(body) = tokio::fs::read_to_string(&global).await {
+                    sources.push((global, body));
+                }
             }
         }
 
@@ -165,14 +176,14 @@ impl SystemPromptBuilder {
             return None;
         }
 
-        let mut out = String::from("# CLAUDE.md");
+        let mut out = String::from("# Agent context");
         let mut total = 0usize;
         for (path, body) in sources {
             let header = format!("\n\n## {}\n", path.display());
             let body_trim = body.trim();
             let chunk_len = header.len() + body_trim.len();
 
-            if total + chunk_len <= MAX_CLAUDE_MD_BYTES {
+            if total + chunk_len <= MAX_AGENT_CONTEXT_BYTES {
                 out.push_str(&header);
                 out.push_str(body_trim);
                 total += chunk_len;
@@ -180,7 +191,7 @@ impl SystemPromptBuilder {
             }
 
             // Partial fit, then stop.
-            let remaining = MAX_CLAUDE_MD_BYTES.saturating_sub(total);
+            let remaining = MAX_AGENT_CONTEXT_BYTES.saturating_sub(total);
             if remaining > header.len() + 32 {
                 out.push_str(&header);
                 let body_room = remaining - header.len() - 32;
@@ -264,21 +275,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claude_md_reads_from_cwd() {
+    async fn agent_context_reads_claude_md_from_cwd() {
         let dir = tempdir().unwrap();
         tokio::fs::write(dir.path().join("CLAUDE.md"), "# Project\nbe terse")
             .await
             .unwrap();
 
         let b = builder_at(dir.path().to_path_buf(), None);
-        let s = b.claude_md_section().await.unwrap();
-        assert!(s.contains("# CLAUDE.md"));
+        let s = b.agent_context_section().await.unwrap();
+        assert!(s.contains("# Agent context"));
         assert!(s.contains("be terse"));
         assert!(s.contains("CLAUDE.md"));
     }
 
     #[tokio::test]
-    async fn claude_md_walks_up_to_parent_dirs_root_first() {
+    async fn agent_context_reads_agents_md_from_cwd() {
+        let dir = tempdir().unwrap();
+        tokio::fs::write(dir.path().join("AGENTS.md"), "# Agents\nuse pnpm")
+            .await
+            .unwrap();
+
+        let b = builder_at(dir.path().to_path_buf(), None);
+        let s = b.agent_context_section().await.unwrap();
+        assert!(s.contains("# Agent context"));
+        assert!(s.contains("use pnpm"));
+        assert!(s.contains("AGENTS.md"));
+    }
+
+    #[tokio::test]
+    async fn agent_context_includes_both_files_when_present_agents_first() {
+        let dir = tempdir().unwrap();
+        tokio::fs::write(dir.path().join("AGENTS.md"), "AGENTS-BODY")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("CLAUDE.md"), "CLAUDE-BODY")
+            .await
+            .unwrap();
+
+        let b = builder_at(dir.path().to_path_buf(), None);
+        let s = b.agent_context_section().await.unwrap();
+        let a_pos = s.find("AGENTS-BODY").unwrap();
+        let c_pos = s.find("CLAUDE-BODY").unwrap();
+        assert!(
+            a_pos < c_pos,
+            "AGENTS.md should appear before CLAUDE.md at the same level (alphabetical)"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_context_walks_up_to_parent_dirs_root_first() {
         let root = tempdir().unwrap();
         let nested = root.path().join("a/b");
         tokio::fs::create_dir_all(&nested).await.unwrap();
@@ -290,17 +335,31 @@ mod tests {
             .unwrap();
 
         let b = builder_at(nested.clone(), None);
-        let s = b.claude_md_section().await.unwrap();
+        let s = b.agent_context_section().await.unwrap();
         let root_pos = s.find("ROOT-LEVEL").unwrap();
         let nested_pos = s.find("NESTED-LEVEL").unwrap();
         assert!(
             root_pos < nested_pos,
-            "root-level CLAUDE.md should appear before nested one"
+            "root-level file should appear before nested one"
         );
     }
 
     #[tokio::test]
-    async fn claude_md_reads_global_via_home() {
+    async fn agent_context_walks_up_for_agents_md() {
+        let root = tempdir().unwrap();
+        let nested = root.path().join("a/b");
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        tokio::fs::write(root.path().join("AGENTS.md"), "ROOT-AGENTS")
+            .await
+            .unwrap();
+
+        let b = builder_at(nested, None);
+        let s = b.agent_context_section().await.unwrap();
+        assert!(s.contains("ROOT-AGENTS"));
+    }
+
+    #[tokio::test]
+    async fn agent_context_reads_global_claude_md_via_home() {
         let dir = tempdir().unwrap();
         let home = tempdir().unwrap();
         tokio::fs::create_dir(home.path().join(".claude"))
@@ -314,16 +373,35 @@ mod tests {
         .unwrap();
 
         let b = builder_at(dir.path().to_path_buf(), Some(home.path().to_path_buf()));
-        let s = b.claude_md_section().await.unwrap();
+        let s = b.agent_context_section().await.unwrap();
         assert!(s.contains("GLOBAL-USER-RULES"));
     }
 
     #[tokio::test]
-    async fn claude_md_section_is_none_when_nothing_found() {
+    async fn agent_context_reads_global_codex_agents_md_via_home() {
+        let dir = tempdir().unwrap();
+        let home = tempdir().unwrap();
+        tokio::fs::create_dir(home.path().join(".codex"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            home.path().join(".codex").join("AGENTS.md"),
+            "GLOBAL-AGENT-RULES",
+        )
+        .await
+        .unwrap();
+
+        let b = builder_at(dir.path().to_path_buf(), Some(home.path().to_path_buf()));
+        let s = b.agent_context_section().await.unwrap();
+        assert!(s.contains("GLOBAL-AGENT-RULES"));
+    }
+
+    #[tokio::test]
+    async fn agent_context_section_is_none_when_nothing_found() {
         let dir = tempdir().unwrap();
         let home = tempdir().unwrap();
         let b = builder_at(dir.path().to_path_buf(), Some(home.path().to_path_buf()));
-        assert!(b.claude_md_section().await.is_none());
+        assert!(b.agent_context_section().await.is_none());
     }
 
     #[tokio::test]
