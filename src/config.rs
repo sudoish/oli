@@ -277,7 +277,7 @@ impl Config {
     }
 }
 
-fn default_config_path() -> Option<PathBuf> {
+pub fn default_config_path() -> Option<PathBuf> {
     let dir = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
@@ -287,7 +287,7 @@ fn default_config_path() -> Option<PathBuf> {
 /// Walk up from `cwd` looking for `.oli/config.toml`. Returns the
 /// nearest one (innermost wins). We do not merge multiple project
 /// configs along the walk — repos that nest config get the closest one.
-fn find_project_config(cwd: &Path) -> Option<PathBuf> {
+pub fn find_project_config(cwd: &Path) -> Option<PathBuf> {
     let mut p: &Path = cwd;
     loop {
         let candidate = p.join(".oli").join("config.toml");

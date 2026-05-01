@@ -26,7 +26,7 @@ mod completion;
 mod driver;
 mod event;
 mod hints;
-mod history;
+pub mod history;
 mod hook;
 mod markdown;
 mod terminal;

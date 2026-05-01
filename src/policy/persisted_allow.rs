@@ -132,7 +132,7 @@ fn flush(path: &Path, set: &HashSet<String>) -> std::io::Result<()> {
     std::fs::write(path, json)
 }
 
-fn default_path() -> Option<PathBuf> {
+pub fn default_path() -> Option<PathBuf> {
     let base = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
