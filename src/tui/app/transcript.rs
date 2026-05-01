@@ -175,6 +175,11 @@ impl App {
         self.note_arrival(lines);
     }
 
+    pub fn on_slash_finished(&mut self) {
+        self.mode = Mode::Idle;
+        self.cancel_tx = None;
+    }
+
     /// Drop the most recent UserPrompt and every transcript item
     /// that came after it. Returns the body of the popped prompt
     /// for the caller (e.g. so Ctrl+E edit-and-rerun can re-load

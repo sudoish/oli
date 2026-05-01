@@ -41,6 +41,11 @@ pub enum UiEvent {
     /// A slash command produced human-readable text for the
     /// transcript (slash output, errors, hints).
     SystemNote(String),
+    /// The driver finished dispatching a slash command. Slash
+    /// commands don't go through the turn lifecycle, but the UI
+    /// flipped to Thinking on submit — this resets it back to Idle
+    /// and clears the cancel sender.
+    SlashFinished,
     /// `/exit` (or equivalent) routed through the driver. The UI
     /// quits cleanly.
     Quit,

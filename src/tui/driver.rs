@@ -155,6 +155,7 @@ async fn handle_slash(
     if trimmed == "help" || trimmed.starts_with("help ") {
         let body = crate::repl::slash::render_help(registry);
         let _ = ui_tx.send(UiEvent::SystemNote(body));
+        let _ = ui_tx.send(UiEvent::SlashFinished);
         return;
     }
 
@@ -166,6 +167,7 @@ async fn handle_slash(
         Some(SlashOutcome::Continue(None)) => {}
         Some(SlashOutcome::Exit) => {
             let _ = ui_tx.send(UiEvent::Quit);
+            return;
         }
         Some(SlashOutcome::Rebuild {
             removed_names,
@@ -188,4 +190,5 @@ async fn handle_slash(
             )));
         }
     }
+    let _ = ui_tx.send(UiEvent::SlashFinished);
 }

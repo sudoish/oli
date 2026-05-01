@@ -201,6 +201,7 @@ fn handle_event(
         UiEvent::TurnError(msg) => app.on_turn_error(&msg),
         UiEvent::TurnCancelled => app.on_turn_cancelled(),
         UiEvent::SystemNote(body) => app.on_system_note(body),
+        UiEvent::SlashFinished => app.on_slash_finished(),
         UiEvent::Quit => app.request_quit(),
         UiEvent::ToolStart {
             id,

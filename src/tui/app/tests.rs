@@ -6,7 +6,7 @@
 
 use super::*;
 use crossterm::event::KeyCode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 fn key(code: KeyCode) -> KeyEvent {
     KeyEvent::new(code, KeyModifiers::NONE)
@@ -270,6 +270,24 @@ fn tool_start_flips_mode_to_tool_running() {
         Mode::ToolRunning { tool, .. } => assert_eq!(tool, "grep"),
         other => panic!("expected ToolRunning, got {:?}", std::mem::discriminant(other)),
     }
+}
+
+#[test]
+fn slash_finished_resets_mode_and_clears_cancel_tx() {
+    // Regression: /model (and other slash commands) used to leave
+    // the UI stuck in Mode::Thinking forever because the driver
+    // only emitted SystemNote and never signalled completion.
+    let mut app = App::new();
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    app.set_cancel_sender(tx);
+    app.mode = Mode::Thinking {
+        since: Instant::now(),
+    };
+    app.on_system_note("current model: foo".into());
+    assert!(matches!(app.mode, Mode::Thinking { .. }));
+    app.on_slash_finished();
+    assert!(matches!(app.mode, Mode::Idle));
+    assert!(app.cancel_tx.is_none());
 }
 
 #[test]
