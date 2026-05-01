@@ -33,6 +33,12 @@ use syntect::parsing::SyntaxSet;
 #[cfg(feature = "syntax-highlight")]
 use syntect::util::LinesWithEndings;
 
+/// Foreground color for inline code (text wrapped in backticks).
+/// Chosen to be visible on both dark and light terminals without
+/// the harsh inverse-video look of `Modifier::REVERSED`. Promote
+/// to a theme field when configurable themes land.
+const INLINE_CODE_FG: Color = Color::Cyan;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Theme {
     Dark,
@@ -170,7 +176,11 @@ impl Renderer {
             s = s.add_modifier(Modifier::CROSSED_OUT);
         }
         if self.code > 0 {
-            s = s.add_modifier(Modifier::REVERSED);
+            // Soft cyan foreground — distinct enough to read as
+            // code, gentler on the eyes than `REVERSED`. Kept
+            // theme-agnostic for now; a configurable highlight
+            // color can land later (see specs/formatting.md U5).
+            s = s.fg(INLINE_CODE_FG);
         }
         s
     }
@@ -546,10 +556,12 @@ mod tests {
     }
 
     #[test]
-    fn inline_code_uses_reversed_modifier() {
+    fn inline_code_uses_soft_cyan_foreground() {
         let lines = render_dark("call `Read` to load");
         let span = first_span_with_text(&lines, "Read").expect("code span");
-        assert!(span.style.add_modifier.contains(Modifier::REVERSED));
+        // Soft cyan replaces the harsh REVERSED inverse-video.
+        assert_eq!(span.style.fg, Some(INLINE_CODE_FG));
+        assert!(!span.style.add_modifier.contains(Modifier::REVERSED));
     }
 
     #[test]

@@ -72,6 +72,51 @@ fn empty_or_whitespace_submission_is_a_noop() {
 }
 
 #[test]
+fn typing_slash_auto_opens_completion_popup() {
+    let mut app = App::new();
+    app.set_slash_meta(vec![
+        ("clear".into(), String::new()),
+        ("cost".into(), String::new()),
+        ("model".into(), String::new()),
+    ]);
+    type_str(&mut app, "/c");
+    let menu = app.completion.as_ref().expect("popup should auto-open");
+    assert_eq!(menu.candidates, vec!["clear".to_string(), "cost".to_string()]);
+}
+
+#[test]
+fn accepting_completion_replaces_typed_prefix_not_appends_to_it() {
+    // Regression: typing /mod then accepting /model used to produce
+    // "/mod/model" because delete_str was deleting forward from a
+    // cursor that sat at end-of-input.
+    let mut app = App::new();
+    app.set_slash_meta(vec![
+        ("model".into(), String::new()),
+        ("mode".into(), String::new()),
+    ]);
+    type_str(&mut app, "/mod");
+    assert!(app.completion.is_some(), "popup should be open");
+    // Accept whatever's first in the menu (alphabetically: mode).
+    app.on_completion_key(key(KeyCode::Enter));
+    let buf = input_string(&app);
+    assert!(
+        buf == "/mode " || buf == "/model ",
+        "expected /<pick> with trailing space, got {:?}",
+        buf
+    );
+}
+
+#[test]
+fn typing_past_slash_args_closes_completion_popup() {
+    let mut app = App::new();
+    app.set_slash_meta(vec![("model".into(), String::new())]);
+    type_str(&mut app, "/model");
+    assert!(app.completion.is_some());
+    type_str(&mut app, " arg");
+    assert!(app.completion.is_none());
+}
+
+#[test]
 fn esc_clears_input_when_no_completion_open() {
     let mut app = App::new();
     type_str(&mut app, "draft");
@@ -186,7 +231,7 @@ fn streaming_lifecycle_appends_chunks_to_active_assistant_item() {
     assert_eq!(app.transcript.len(), prior + 1);
     assert!(matches!(app.mode, Mode::Thinking { .. }));
     app.on_content_chunk("hello");
-    assert!(matches!(app.mode, Mode::Streaming));
+    assert!(matches!(app.mode, Mode::Streaming { .. }));
     app.on_content_chunk(" world");
     match &app.transcript[prior] {
         TranscriptItem::Assistant { body, done } => {
@@ -213,6 +258,49 @@ fn tool_start_closes_active_assistant_and_pushes_running_card() {
         }
         _ => panic!(),
     }
+}
+
+#[test]
+fn tool_start_flips_mode_to_tool_running() {
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_content_chunk("partial");
+    app.on_tool_start(1, "grep".into(), "pattern=foo".into());
+    match &app.mode {
+        Mode::ToolRunning { tool, .. } => assert_eq!(tool, "grep"),
+        other => panic!("expected ToolRunning, got {:?}", std::mem::discriminant(other)),
+    }
+}
+
+#[test]
+fn tool_done_returns_to_thinking_when_no_tools_pending() {
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_start(1, "grep".into(), "".into());
+    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true);
+    assert!(matches!(app.mode, Mode::Thinking { .. }));
+}
+
+#[test]
+fn tool_done_stays_in_tool_running_when_other_tools_pending() {
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_start(1, "grep".into(), "".into());
+    app.on_tool_start(2, "read".into(), "".into());
+    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true);
+    // Tool 2 is still running; mode should remain ToolRunning.
+    assert!(matches!(app.mode, Mode::ToolRunning { .. }));
+}
+
+#[test]
+fn content_chunk_after_tool_done_flips_to_streaming() {
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_start(1, "grep".into(), "".into());
+    app.on_tool_done(1, Duration::from_millis(1), "ok".into(), true);
+    assert!(matches!(app.mode, Mode::Thinking { .. }));
+    app.on_content_chunk("here's what I found");
+    assert!(matches!(app.mode, Mode::Streaming { .. }));
 }
 
 #[test]
