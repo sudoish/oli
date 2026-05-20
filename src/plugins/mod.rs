@@ -114,7 +114,12 @@ pub struct HostShared {
     /// and `ctx:set_state`. Each plugin gets its own bag at load time
     /// (HostShared is cloned per plugin); state survives across calls
     /// within the same session and resets at process exit.
-    pub state: Arc<Mutex<HashMap<String, Value>>>,
+    ///
+    /// This is a `std::sync::Mutex` (not tokio's) because `get_state` /
+    /// `set_state` are exposed as sync Lua functions, and tokio's
+    /// `blocking_lock` panics when called from inside a runtime — which
+    /// is exactly where every plugin callback runs.
+    pub state: Arc<std::sync::Mutex<HashMap<String, Value>>>,
     /// Subagent spawner backing `ctx:prompt`. None when the loader is
     /// invoked without a parent harness (tests).
     pub spawner: Option<Arc<dyn SubagentSpawner>>,
@@ -258,7 +263,7 @@ async fn load_one(
         tools: tools_for_host,
         plugin_ctx: ToolContext::new(),
         plugin_id: plugin_id.clone(),
-        state: Arc::new(Mutex::new(HashMap::new())),
+        state: Arc::new(std::sync::Mutex::new(HashMap::new())),
         spawner,
     };
 
@@ -507,11 +512,10 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
     }
 
     // ctx:get_state(key) — synchronous read from the plugin's state bag.
-    // Uses `blocking_lock` because the function is exposed sync to Lua.
     {
         let state = host.state.clone();
         let f = lua.create_function(move |lua, (_self, key): (Table, String)| {
-            let bag = state.blocking_lock();
+            let bag = state.lock().expect("plugin state mutex poisoned");
             match bag.get(&key) {
                 Some(v) => lua.to_value(v),
                 None => Ok(LuaValue::Nil),
@@ -526,7 +530,7 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
         let f =
             lua.create_function(move |lua, (_self, key, value): (Table, String, LuaValue)| {
                 let v: Value = lua.from_value(value)?;
-                let mut bag = state.blocking_lock();
+                let mut bag = state.lock().expect("plugin state mutex poisoned");
                 bag.insert(key, v);
                 Ok(())
             })?;
@@ -1321,6 +1325,43 @@ return p
         }
     }
 
+    #[tokio::test]
+    async fn ctx_set_state_and_get_state_work_from_inside_a_hook() {
+        // Regression: ctx:set_state used to call tokio's blocking_lock
+        // from a sync Lua callback running inside an async coroutine,
+        // which panics. The state mutex is now std::sync::Mutex.
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("counter.lua"),
+            r#"
+local p = { name = "counter" }
+p.hooks = {
+  pre_tool_use = function(event, ctx)
+    local n = ctx:get_state("calls") or 0
+    ctx:set_state("calls", n + 1)
+  end,
+}
+return p
+            "#,
+        )
+        .unwrap();
+        let mut out = LoadedPlugins::default();
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
+        let hook = &out.hooks[0];
+
+        // Fire the hook three times; each call should increment the bag.
+        for _ in 0..3 {
+            let payload = HookPayload::PreToolUse {
+                tool: "Bash",
+                args: &json!({}),
+            };
+            assert!(matches!(hook.handle(&payload).await, HookOutcome::Continue));
+        }
+        // No panic — that's the regression. (Reading the final count
+        // back out from Rust would require exposing host.state through
+        // the Hook trait; the no-panic assertion is the contract.)
+    }
+
     // ---------- examples/plugins/ — verifying the shipped examples ----------
 
     fn examples_plugins_dir() -> PathBuf {
@@ -1433,5 +1474,57 @@ return p
             hook.handle(&clean).await,
             HookOutcome::Continue
         ));
+
+        // Non-Bash tool output passes through even if it contains a
+        // key-shaped string — e.g. the model reading a sample config.
+        let read_result = HookPayload::PostToolUse {
+            tool: "Read",
+            args: &json!({}),
+            result: "# example config\napi_key = sk-ant-fakefake\n",
+        };
+        assert!(matches!(
+            hook.handle(&read_result).await,
+            HookOutcome::Continue
+        ));
+    }
+
+    #[tokio::test]
+    async fn examples_safety_net_counts_blocks_via_state() {
+        let out = load_examples().await;
+        let hook = out
+            .hooks
+            .iter()
+            .find(|h| h.name() == "safety_net")
+            .expect("safety_net hook");
+
+        // Fire three blocked Bash calls. State increments via ctx:set_state.
+        // This is the path that used to panic under tokio's blocking_lock.
+        for _ in 0..3 {
+            let payload = HookPayload::PreToolUse {
+                tool: "Bash",
+                args: &json!({"command": "rm -rf /"}),
+            };
+            let outcome = hook.handle(&payload).await;
+            assert!(matches!(outcome, HookOutcome::Skip(_)));
+        }
+
+        // Read the count back through the plugin's slash command.
+        let slash = out
+            .slash_commands
+            .iter()
+            .find(|s| s.name() == "safety-net-stats")
+            .expect("safety-net-stats slash command");
+        let mut agent = crate::Agent::new(
+            Box::new(crate::providers::fake::FakeProvider::new(vec![])),
+            crate::tools::Registry::new(),
+            String::new(),
+        );
+        let outcome = slash.run("", &mut agent).await;
+        match outcome {
+            crate::repl::slash::SlashOutcome::Continue(Some(msg)) => {
+                assert!(msg.contains("3 command(s)"), "got: {}", msg);
+            }
+            other => panic!("expected Continue(Some(_)), got {:?}", other),
+        }
     }
 }

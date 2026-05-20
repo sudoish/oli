@@ -1,11 +1,10 @@
 -- WordCount: a tool that reads a file via the host's built-in Read
--- tool and reports word/line/character counts.
+-- tool and reports word/line/character counts (wc -w / -l / -c).
 --
 -- Demonstrates:
 --   * registering a plugin tool with a JSON-Schema parameter spec
 --   * composing built-in tools via ctx:tool(name, args)
---   * returning a Lua table so the harness JSON-encodes the result
---     for the model
+--   * returning a Lua table — the harness JSON-encodes it for the model
 
 local plugin = { name = "word-count", version = "0.1.0" }
 
@@ -26,17 +25,22 @@ plugin.tools = {
         return { error = "file_path is required" }
       end
 
+      -- ctx:tool returns the host tool's result as a string. Read returns
+      -- the file body on success; on failure it returns a string starting
+      -- with "Error reading ..." rather than throwing — we have to detect
+      -- that ourselves or we'll happily count words in the error message.
       local body = ctx:tool("Read", { file_path = path })
+      if body:sub(1, 14) == "Error reading " then
+        return { error = body }
+      end
 
       local words = 0
-      for _ in string.gmatch(body, "%S+") do
+      for _ in string.gmatch(body, "%S+") do  -- maximal runs of non-whitespace
         words = words + 1
       end
 
-      -- `wc -l` semantics: count newline characters. A trailing
-      -- newline-less line isn't counted, matching the shell tool.
       local lines = 0
-      for _ in string.gmatch(body, "\n") do
+      for _ in string.gmatch(body, "\n") do   -- wc -l counts newlines
         lines = lines + 1
       end
 
@@ -44,7 +48,7 @@ plugin.tools = {
         file = path,
         words = words,
         lines = lines,
-        characters = #body,
+        characters = #body,  -- # on a Lua string returns byte length
       }
     end,
   },
