@@ -177,4 +177,75 @@ mod tests {
         assert_eq!(tool.description(), "the description");
         assert_eq!(tool.parameters()["properties"]["q"]["type"], "string");
     }
+
+    /// `examples/subprocess/format_json.py` is the user-facing template
+    /// for "register an external binary as a tool". Treat it as part of
+    /// the public API and verify the JSON-over-stdio contract end-to-end.
+    /// Skips automatically when `python3` isn't on PATH (rare on dev
+    /// machines, but possible in stripped-down CI).
+    #[tokio::test]
+    async fn example_format_json_subprocess_round_trip() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/subprocess/format_json.py");
+        let tool = SubprocessTool::from_config(&SubprocessToolConfig {
+            name: "FormatJson".into(),
+            command: "python3".into(),
+            args: vec![script.to_string_lossy().into()],
+            description: "test".into(),
+            parameters: json!({"type":"object","properties":{}}),
+        });
+        let ctx = ToolContext::new();
+        let out = tool
+            .run(json!({"json": "{\"b\":1,\"a\":2}", "indent": 2}), &ctx)
+            .await
+            .unwrap();
+        let trimmed = out.trim();
+        assert!(trimmed.starts_with('{'), "got {:?}", trimmed);
+        // sort_keys=True puts "a" before "b".
+        let a_pos = trimmed.find("\"a\"").expect("contains a");
+        let b_pos = trimmed.find("\"b\"").expect("contains b");
+        assert!(a_pos < b_pos, "keys not sorted: {}", trimmed);
+    }
+
+    #[tokio::test]
+    async fn example_format_json_subprocess_surfaces_schema_errors() {
+        if std::process::Command::new("python3")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| !s.success())
+            .unwrap_or(true)
+        {
+            eprintln!("skipping: python3 not available");
+            return;
+        }
+
+        let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("examples/subprocess/format_json.py");
+        let tool = SubprocessTool::from_config(&SubprocessToolConfig {
+            name: "FormatJson".into(),
+            command: "python3".into(),
+            args: vec![script.to_string_lossy().into()],
+            description: "test".into(),
+            parameters: json!({"type":"object","properties":{}}),
+        });
+        let ctx = ToolContext::new();
+        // Missing `json` arg → script exits 2 with a stderr message.
+        let out = tool.run(json!({}), &ctx).await.unwrap();
+        assert!(out.contains("exited 2"), "got {}", out);
+        assert!(out.contains("`json`"), "got {}", out);
+    }
 }
