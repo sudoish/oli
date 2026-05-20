@@ -165,10 +165,10 @@ pub async fn run(
             Err(_) => None,
         };
         if let Some(ev) = first {
-            handle_event(&mut app, ev, &cmd_tx, &pending_approval);
+            handle_event(&mut app, ev, &cmd_tx, &tx, &pending_approval);
         }
         while let Ok(ev) = rx.try_recv() {
-            handle_event(&mut app, ev, &cmd_tx, &pending_approval);
+            handle_event(&mut app, ev, &cmd_tx, &tx, &pending_approval);
         }
         if app.should_quit {
             break;
@@ -189,10 +189,11 @@ fn handle_event(
     app: &mut App,
     ev: UiEvent,
     cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
     pending_approval: &PendingApproval,
 ) {
     match ev {
-        UiEvent::Key(key) => on_key(app, key, cmd_tx, pending_approval),
+        UiEvent::Key(key) => on_key(app, key, cmd_tx, ui_tx, pending_approval),
         UiEvent::Resize => {}
         UiEvent::Mouse(m) => on_mouse(app, m),
         UiEvent::TurnStarted => app.on_turn_started(),
@@ -247,6 +248,47 @@ fn handle_event(
                 }
             }
         }
+        UiEvent::WizardOllamaProbed(probe) => {
+            if let Some(w) = app.wizard_mut() {
+                w.daemon = match probe {
+                    crate::wizard_init::OllamaProbe::Down { reason } => {
+                        crate::tui::wizard::DaemonStatus::Down(reason)
+                    }
+                    crate::wizard_init::OllamaProbe::Up { models } => {
+                        crate::tui::wizard::DaemonStatus::Up { models }
+                    }
+                };
+                w.reconcile_pull_status();
+            }
+        }
+        UiEvent::WizardOllamaPullEvent(ev) => {
+            if let Some(w) = app.wizard_mut() {
+                w.pull = match ev {
+                    crate::wizard_init::PullEvent::Phase(phase) => {
+                        crate::tui::wizard::PullStatus::InProgress {
+                            phase,
+                            completed: 0,
+                            total: 0,
+                        }
+                    }
+                    crate::wizard_init::PullEvent::Progress {
+                        phase,
+                        completed,
+                        total,
+                    } => crate::tui::wizard::PullStatus::InProgress {
+                        phase,
+                        completed,
+                        total,
+                    },
+                    crate::wizard_init::PullEvent::Done => {
+                        crate::tui::wizard::PullStatus::Done
+                    }
+                    crate::wizard_init::PullEvent::Error(msg) => {
+                        crate::tui::wizard::PullStatus::Failed(msg)
+                    }
+                };
+            }
+        }
     }
 }
 
@@ -254,6 +296,7 @@ fn on_key(
     app: &mut App,
     key: crossterm::event::KeyEvent,
     cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
     pending_approval: &PendingApproval,
 ) {
     // Overlay short-circuits. While any modal is up, the user's
@@ -287,7 +330,7 @@ fn on_key(
             return;
         }
         Some(Overlay::Wizard(_)) => {
-            handle_wizard_key(app, key);
+            handle_wizard_key(app, key, ui_tx);
             return;
         }
         None => {}
@@ -660,8 +703,12 @@ fn handle_sessions_picker_key(app: &mut App, key: crossterm::event::KeyEvent) {
     }
 }
 
-fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
-    use crate::tui::wizard::WizardStep;
+fn handle_wizard_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    ui_tx: &mpsc::UnboundedSender<UiEvent>,
+) {
+    use crate::tui::wizard::{DaemonStatus, PullStatus, WizardStep};
 
     let step = app.wizard().map(|w| w.step.clone());
     let Some(step) = step else { return };
@@ -689,10 +736,76 @@ fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
                 KeyCode::Esc => app.close_wizard(),
                 KeyCode::Up => w.navigate_provider(-1),
                 KeyCode::Down => w.navigate_provider(1),
-                KeyCode::Enter => w.advance(),
+                KeyCode::Enter => {
+                    w.advance();
+                    // Entering CheckDaemon auto-fires the probe.
+                    if matches!(w.step, WizardStep::CheckDaemon)
+                        && matches!(w.daemon, DaemonStatus::Unchecked)
+                    {
+                        let base = w.current_provider().base_url().to_string();
+                        spawn_ollama_probe(ui_tx.clone(), base);
+                        if let Some(ww) = app.wizard_mut() {
+                            ww.daemon = DaemonStatus::Probing;
+                        }
+                    }
+                }
                 _ => {}
             }
         }
+        WizardStep::CheckDaemon => match key.code {
+            KeyCode::Esc => app.close_wizard(),
+            KeyCode::Backspace => {
+                if let Some(w) = app.wizard_mut() {
+                    w.step_back();
+                }
+            }
+            KeyCode::Char('r') | KeyCode::Char('R') => {
+                let w = app.wizard_mut().unwrap();
+                let base = w.current_provider().base_url().to_string();
+                w.daemon = DaemonStatus::Probing;
+                spawn_ollama_probe(ui_tx.clone(), base);
+            }
+            KeyCode::Enter => {
+                if let Some(w) = app.wizard_mut() {
+                    w.advance();
+                }
+            }
+            _ => {}
+        },
+        WizardStep::PullModel => match key.code {
+            KeyCode::Esc => app.close_wizard(),
+            KeyCode::Backspace => {
+                if let Some(w) = app.wizard_mut() {
+                    w.step_back();
+                }
+            }
+            KeyCode::Char('p') | KeyCode::Char('P') => {
+                let w = app.wizard_mut().unwrap();
+                if matches!(
+                    w.pull,
+                    PullStatus::Idle | PullStatus::Failed(_)
+                ) && matches!(w.daemon, DaemonStatus::Up { .. })
+                {
+                    let base = w.current_provider().base_url().to_string();
+                    let model = w.current_provider().default_model().to_string();
+                    w.pull = PullStatus::InProgress {
+                        phase: "starting".into(),
+                        completed: 0,
+                        total: 0,
+                    };
+                    spawn_ollama_pull(ui_tx.clone(), base, model);
+                }
+            }
+            KeyCode::Enter => {
+                let w = app.wizard_mut().unwrap();
+                // Block the user from advancing while a pull is in
+                // flight — they'll lose progress visibility.
+                if !matches!(w.pull, PullStatus::InProgress { .. }) {
+                    w.advance();
+                }
+            }
+            _ => {}
+        },
         WizardStep::EnterApiKey => {
             let w = app.wizard_mut().unwrap();
             match key.code {
@@ -722,12 +835,42 @@ fn handle_wizard_key(app: &mut App, key: crossterm::event::KeyEvent) {
             _ => {}
         },
         WizardStep::Saved { .. } => {
-            // Any key dismisses the post-state. Surfaces the
-            // appropriate hint as a SystemNote (already done at
-            // save-time).
             app.close_wizard();
         }
     }
+}
+
+fn spawn_ollama_probe(
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    base_url: String,
+) {
+    tokio::spawn(async move {
+        let probe = crate::wizard_init::probe_ollama(
+            &base_url,
+            std::time::Duration::from_secs(2),
+        )
+        .await;
+        let _ = ui_tx.send(UiEvent::WizardOllamaProbed(probe));
+    });
+}
+
+fn spawn_ollama_pull(
+    ui_tx: mpsc::UnboundedSender<UiEvent>,
+    base_url: String,
+    model: String,
+) {
+    tokio::spawn(async move {
+        let tx = ui_tx.clone();
+        let result = crate::wizard_init::pull_model(&base_url, &model, move |ev| {
+            let _ = tx.send(UiEvent::WizardOllamaPullEvent(ev));
+        })
+        .await;
+        if let Err(msg) = result {
+            let _ = ui_tx.send(UiEvent::WizardOllamaPullEvent(
+                crate::wizard_init::PullEvent::Error(msg),
+            ));
+        }
+    });
 }
 
 fn save_wizard(app: &mut App) {
