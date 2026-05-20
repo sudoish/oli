@@ -97,6 +97,14 @@ pub enum UiEvent {
         args: Value,
         reason: String,
     },
+
+    // ----- Wizard async events (Ollama onboarding) -----
+    /// Background Ollama probe finished — render loop updates
+    /// `WizardState::daemon`.
+    WizardOllamaProbed(crate::wizard_init::OllamaProbe),
+    /// One chunk from a streaming model pull. Updates
+    /// `WizardState::pull` so the progress bar advances.
+    WizardOllamaPullEvent(crate::wizard_init::PullEvent),
 }
 
 /// User's response to an approval modal. The `Always*` variants

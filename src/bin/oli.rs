@@ -91,6 +91,19 @@ enum Cmd {
         /// Overwrite an existing config file instead of refusing.
         #[arg(long)]
         force: bool,
+
+        /// Skip the Ollama daemon probe + model-pull offer (only
+        /// meaningful with `--provider ollama`). Useful in CI /
+        /// container builds where the daemon isn't reachable
+        /// from the build step but will be at runtime.
+        #[arg(long)]
+        skip_ollama_check: bool,
+
+        /// Auto-pull the chosen Ollama model if it isn't already
+        /// present. Without this flag, the command prints a
+        /// suggested `ollama pull` and exits without downloading.
+        #[arg(long)]
+        pull: bool,
     },
 }
 
@@ -102,7 +115,9 @@ async fn main() {
             provider,
             api_key,
             force,
-        }) => init_command(provider, api_key, force),
+            skip_ollama_check,
+            pull,
+        }) => init_command(provider, api_key, force, skip_ollama_check, pull).await,
         None => run(args).await,
     };
     if let Err(e) = result {
@@ -114,8 +129,15 @@ async fn main() {
 /// Headless `oli init`. Writes the same config the TUI wizard
 /// produces, falling back to stdin prompts for fields not given
 /// on the CLI. Refuses to clobber an existing file unless
-/// `--force` is set.
-fn init_command(provider: Option<String>, api_key: Option<String>, force: bool) -> Result<()> {
+/// `--force` is set. For Ollama, also probes the local daemon
+/// and (with `--pull`) downloads the default model.
+async fn init_command(
+    provider: Option<String>,
+    api_key: Option<String>,
+    force: bool,
+    skip_ollama_check: bool,
+    pull: bool,
+) -> Result<()> {
     use oli::wizard_init::{WizardProvider, config_path, render_toml, save};
     use std::io::Write;
 
@@ -125,7 +147,6 @@ fn init_command(provider: Option<String>, api_key: Option<String>, force: bool) 
         )
     })?;
 
-    // Resolve provider — flag if given, prompt otherwise.
     let provider = match provider.as_deref() {
         Some(name) => WizardProvider::from_name(name).ok_or_else(|| {
             oli::error::AgentError::Config(format!(
@@ -136,7 +157,6 @@ fn init_command(provider: Option<String>, api_key: Option<String>, force: bool) 
         None => prompt_provider()?,
     };
 
-    // Resolve API key — flag if given, prompt for paid providers.
     let api_key = if provider.needs_api_key() {
         match api_key {
             Some(k) if !k.trim().is_empty() => k,
@@ -156,8 +176,113 @@ fn init_command(provider: Option<String>, api_key: Option<String>, force: bool) 
     if !provider.needs_api_key() {
         let _ = writeln!(stdout, "  (Ollama: api_key field is a placeholder)");
     }
+
+    if matches!(provider, WizardProvider::Ollama) && !skip_ollama_check {
+        ollama_post_init(provider, pull).await?;
+    }
+
     let _ = writeln!(stdout, "Run `oli` to start.");
     Ok(())
+}
+
+async fn ollama_post_init(
+    provider: oli::wizard_init::WizardProvider,
+    auto_pull: bool,
+) -> Result<()> {
+    use oli::wizard_init::{
+        OllamaProbe, PullEvent, has_pulled_model, probe_ollama, pull_model,
+    };
+    use std::io::Write;
+    use std::time::Duration;
+
+    let mut stdout = std::io::stdout();
+    let model = provider.default_model();
+    let base_url = provider.base_url();
+
+    let _ = writeln!(stdout, "Checking Ollama at {} ...", base_url);
+    let _ = stdout.flush();
+    let probe = probe_ollama(base_url, Duration::from_secs(2)).await;
+    match &probe {
+        OllamaProbe::Down { reason } => {
+            let _ = writeln!(stdout, "  ⚠ Ollama not reachable: {}", reason);
+            let _ = writeln!(
+                stdout,
+                "    install:  https://ollama.com/download   (then `ollama serve`)"
+            );
+            let _ = writeln!(
+                stdout,
+                "    once running:  ollama pull {}",
+                model
+            );
+            return Ok(());
+        }
+        OllamaProbe::Up { models } => {
+            let _ = writeln!(
+                stdout,
+                "  ✓ daemon reachable ({} model{} installed)",
+                models.len(),
+                if models.len() == 1 { "" } else { "s" }
+            );
+        }
+    }
+
+    if has_pulled_model(&probe, model) {
+        let _ = writeln!(stdout, "  ✓ {} already pulled", model);
+        return Ok(());
+    }
+
+    if !auto_pull {
+        let _ = writeln!(
+            stdout,
+            "  ⚠ {} is not pulled. Run `oli init --provider ollama --pull --force`",
+            model
+        );
+        let _ = writeln!(stdout, "    or  `ollama pull {}` to download it.", model);
+        return Ok(());
+    }
+
+    let _ = writeln!(stdout, "Pulling {} (this can take a few minutes) ...", model);
+    let _ = stdout.flush();
+    let mut last_pct: i32 = -1;
+    pull_model(base_url, model, |ev| match ev {
+        PullEvent::Phase(p) => {
+            let _ = writeln!(std::io::stdout(), "  · {}", p);
+        }
+        PullEvent::Progress { phase, completed, total } => {
+            let pct = ((completed as f64 / total as f64) * 100.0) as i32;
+            if pct != last_pct {
+                last_pct = pct;
+                let _ = writeln!(
+                    std::io::stdout(),
+                    "  · {} {}% ({} / {})",
+                    phase,
+                    pct,
+                    human_bytes(completed),
+                    human_bytes(total)
+                );
+            }
+        }
+        PullEvent::Done => {
+            let _ = writeln!(std::io::stdout(), "  ✓ pulled {}", model);
+        }
+        PullEvent::Error(e) => {
+            let _ = writeln!(std::io::stdout(), "  ✗ {}", e);
+        }
+    })
+    .await
+    .map_err(oli::error::AgentError::Config)?;
+    Ok(())
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{:.1}{}", size, UNITS[unit])
 }
 
 fn prompt_provider() -> Result<oli::wizard_init::WizardProvider> {

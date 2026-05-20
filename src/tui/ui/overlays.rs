@@ -17,7 +17,7 @@ use crate::tui::app::{
     SessionsPickerState,
 };
 use crate::tui::hints;
-use crate::tui::wizard::{WizardProvider, WizardState, WizardStep};
+use crate::tui::wizard::{DaemonStatus, PullStatus, WizardProvider, WizardState, WizardStep};
 
 use super::{centered_rect, clip_to_width};
 
@@ -420,10 +420,12 @@ pub(super) fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState) {
     f.render_widget(Clear, modal);
 
     let title = match &w.step {
-        WizardStep::Welcome => " Setup (1/4)  Welcome ",
-        WizardStep::PickProvider => " Setup (2/4)  Choose provider ",
-        WizardStep::EnterApiKey => " Setup (3/4)  API key ",
-        WizardStep::Confirm => " Setup (4/4)  Confirm ",
+        WizardStep::Welcome => " Setup  Welcome ",
+        WizardStep::PickProvider => " Setup  Choose provider ",
+        WizardStep::CheckDaemon => " Setup  Check Ollama daemon ",
+        WizardStep::PullModel => " Setup  Pull model ",
+        WizardStep::EnterApiKey => " Setup  API key ",
+        WizardStep::Confirm => " Setup  Confirm ",
         WizardStep::Saved { .. } => " Setup  Saved ",
     };
     let block = Block::default()
@@ -450,6 +452,14 @@ pub(super) fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState) {
         WizardStep::PickProvider => (
             provider_lines(w),
             "  [↑↓] choose   [Enter] continue   [Esc] cancel",
+        ),
+        WizardStep::CheckDaemon => (
+            check_daemon_lines(w),
+            "  [R] retry probe   [Enter] continue   [Backspace] back   [Esc] cancel",
+        ),
+        WizardStep::PullModel => (
+            pull_model_lines(w),
+            pull_model_legend(w),
         ),
         WizardStep::EnterApiKey => (
             api_key_lines(w),
@@ -614,4 +624,177 @@ fn confirm_lines(w: &WizardState) -> Vec<Line<'static>> {
         )));
     }
     out
+}
+
+fn check_daemon_lines(w: &WizardState) -> Vec<Line<'static>> {
+    let base = w.current_provider().base_url();
+    let mut out = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("  Probing Ollama daemon at {} ...", base),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+    ];
+    match &w.daemon {
+        DaemonStatus::Unchecked | DaemonStatus::Probing => {
+            out.push(Line::from(Span::styled(
+                "  · waiting for /api/tags response ...".to_string(),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+        DaemonStatus::Up { models } => {
+            out.push(Line::from(Span::styled(
+                format!(
+                    "  ✓ daemon reachable ({} model{} installed)",
+                    models.len(),
+                    if models.len() == 1 { "" } else { "s" }
+                ),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        DaemonStatus::Down(reason) => {
+            out.push(Line::from(Span::styled(
+                format!("  ⚠ Ollama not reachable: {}", reason),
+                Style::default()
+                    .fg(Color::Red)
+                    .add_modifier(Modifier::BOLD),
+            )));
+            out.push(Line::raw(""));
+            out.push(Line::from(Span::styled(
+                "  Install from https://ollama.com/download then run `ollama serve`.".to_string(),
+                Style::default().fg(Color::White),
+            )));
+            out.push(Line::from(Span::styled(
+                "  Press [R] to retry, or [Enter] to save the config anyway.".to_string(),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    out
+}
+
+fn pull_model_lines(w: &WizardState) -> Vec<Line<'static>> {
+    let model = w.current_provider().default_model();
+    let mut out = vec![
+        Line::raw(""),
+        Line::from(Span::styled(
+            format!("  Default model: {}", model),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+    ];
+    match &w.pull {
+        PullStatus::AlreadyPresent => {
+            out.push(Line::from(Span::styled(
+                "  ✓ already pulled — ready to use.".to_string(),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        PullStatus::Idle => {
+            if matches!(w.daemon, DaemonStatus::Up { .. }) {
+                out.push(Line::from(Span::styled(
+                    "  Not yet pulled. Press [P] to download (~4.5GB) or [Enter] to skip.".to_string(),
+                    Style::default().fg(Color::White),
+                )));
+            } else {
+                out.push(Line::from(Span::styled(
+                    "  (skipped — daemon unreachable; pull later via `ollama pull`)"
+                        .to_string(),
+                    Style::default().fg(Color::DarkGray),
+                )));
+            }
+        }
+        PullStatus::InProgress {
+            phase,
+            completed,
+            total,
+        } => {
+            out.push(Line::from(Span::styled(
+                format!("  · {}", phase),
+                Style::default().fg(Color::Yellow),
+            )));
+            if *total > 0 {
+                let pct = ((*completed as f64 / *total as f64) * 100.0).clamp(0.0, 100.0);
+                out.push(Line::from(Span::styled(
+                    format!(
+                        "    {:.1}%  ({} / {})",
+                        pct,
+                        human_bytes(*completed),
+                        human_bytes(*total)
+                    ),
+                    Style::default().fg(Color::White),
+                )));
+                out.push(Line::from(Span::styled(
+                    progress_bar(pct, 40),
+                    Style::default().fg(Color::Green),
+                )));
+            }
+        }
+        PullStatus::Done => {
+            out.push(Line::from(Span::styled(
+                "  ✓ pull complete.".to_string(),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )));
+        }
+        PullStatus::Failed(msg) => {
+            out.push(Line::from(Span::styled(
+                format!("  ✗ pull failed: {}", msg),
+                Style::default().fg(Color::Red),
+            )));
+            out.push(Line::from(Span::styled(
+                "  Press [P] to retry, or [Enter] to continue without it.".to_string(),
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+    }
+    out
+}
+
+fn pull_model_legend(w: &WizardState) -> &'static str {
+    match &w.pull {
+        PullStatus::InProgress { .. } => {
+            "  pulling — please wait   [Esc] cancel wizard"
+        }
+        PullStatus::AlreadyPresent | PullStatus::Done => {
+            "  [Enter] continue   [Backspace] back   [Esc] cancel"
+        }
+        _ => "  [P] pull   [Enter] skip   [Backspace] back   [Esc] cancel",
+    }
+}
+
+fn human_bytes(n: u64) -> String {
+    const UNITS: &[&str] = &["B", "KB", "MB", "GB", "TB"];
+    let mut size = n as f64;
+    let mut unit = 0;
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+    format!("{:.1}{}", size, UNITS[unit])
+}
+
+fn progress_bar(pct: f64, width: usize) -> String {
+    let filled = ((pct / 100.0) * width as f64).round() as usize;
+    let filled = filled.min(width);
+    let mut s = String::with_capacity(width + 2);
+    s.push_str("    [");
+    for _ in 0..filled {
+        s.push('█');
+    }
+    for _ in filled..width {
+        s.push('░');
+    }
+    s.push(']');
+    s
 }
