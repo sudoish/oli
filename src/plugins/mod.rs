@@ -1320,4 +1320,118 @@ return p
             assert!(matches!(h.handle(&stop).await, HookOutcome::Continue));
         }
     }
+
+    // ---------- examples/plugins/ — verifying the shipped examples ----------
+
+    fn examples_plugins_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/plugins")
+    }
+
+    /// Load every example plugin against a registry seeded with the
+    /// built-ins the examples expect (`Read`). Examples must stay
+    /// loadable as the runtime evolves — if an API rename breaks them,
+    /// this test catches it.
+    async fn load_examples() -> LoadedPlugins {
+        let mut reg = Registry::new();
+        reg.register(crate::tools::read::Read);
+        let host = Arc::new(Mutex::new(reg));
+        let mut out = LoadedPlugins::default();
+        load_dir(&examples_plugins_dir(), host, None, &mut out).await;
+        out
+    }
+
+    #[tokio::test]
+    async fn examples_all_load_without_diagnostics() {
+        let out = load_examples().await;
+        let names: Vec<&str> = out.manifest.iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"word-count"), "got {:?}", names);
+        assert!(names.contains(&"safety-net"), "got {:?}", names);
+        assert!(names.contains(&"redact-secrets"), "got {:?}", names);
+    }
+
+    #[tokio::test]
+    async fn examples_word_count_tool_counts_a_real_file() {
+        let out = load_examples().await;
+        let tool = out
+            .tools
+            .iter()
+            .find(|t| t.name() == "WordCount")
+            .expect("WordCount tool from word_count.lua");
+
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("sample.txt");
+        std::fs::write(&path, "one two three\nfour five six\n").unwrap();
+
+        let ctx = ToolContext::new();
+        let result = tool
+            .run(json!({ "file_path": path.to_str().unwrap() }), &ctx)
+            .await
+            .unwrap();
+        let v: Value = serde_json::from_str(&result).expect("table return is JSON-encoded");
+        assert_eq!(v["words"], 6);
+        assert_eq!(v["lines"], 2);
+        assert_eq!(v["characters"], 28);
+    }
+
+    #[tokio::test]
+    async fn examples_safety_net_blocks_rm_rf_root() {
+        let out = load_examples().await;
+        let hook = out
+            .hooks
+            .iter()
+            .find(|h| h.name() == "safety_net")
+            .expect("safety_net pre_tool_use hook");
+
+        let payload = HookPayload::PreToolUse {
+            tool: "Bash",
+            args: &json!({"command": "rm -rf /"}),
+        };
+        match hook.handle(&payload).await {
+            HookOutcome::Skip(s) => assert!(s.contains("filesystem root"), "got {}", s),
+            other => panic!("expected Skip, got {:?}", other),
+        }
+
+        // Innocent commands still flow through.
+        let ok = HookPayload::PreToolUse {
+            tool: "Bash",
+            args: &json!({"command": "ls -la"}),
+        };
+        assert!(matches!(hook.handle(&ok).await, HookOutcome::Continue));
+    }
+
+    #[tokio::test]
+    async fn examples_redact_secrets_masks_api_keys_in_results() {
+        let out = load_examples().await;
+        let hook = out
+            .hooks
+            .iter()
+            .find(|h| h.name() == "redact_secrets")
+            .expect("redact_secrets post_tool_use hook");
+
+        let payload = HookPayload::PostToolUse {
+            tool: "Bash",
+            args: &json!({}),
+            result: "ANTHROPIC_API_KEY=sk-ant-abc123 and GH=ghp_xyz789",
+        };
+        match hook.handle(&payload).await {
+            HookOutcome::Replace(v) => {
+                let s = v.as_str().expect("replacement is a string");
+                assert!(s.contains("[REDACTED]"), "expected redaction, got {}", s);
+                assert!(!s.contains("sk-ant-abc123"));
+                assert!(!s.contains("ghp_xyz789"));
+            }
+            other => panic!("expected Replace, got {:?}", other),
+        }
+
+        // Clean output isn't rewritten.
+        let clean = HookPayload::PostToolUse {
+            tool: "Bash",
+            args: &json!({}),
+            result: "nothing sensitive here",
+        };
+        assert!(matches!(
+            hook.handle(&clean).await,
+            HookOutcome::Continue
+        ));
+    }
 }
