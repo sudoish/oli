@@ -1,4 +1,14 @@
+<div align="center">
+
 # oli
+
+⚠️ **Experimental Project** ⚠️
+
+*This is a purely experimental project aimed at learning the components of a coding agent. Not intended for production use.*
+
+---
+
+</div>
 
 A minimal, hackable, single-binary terminal coding agent.
 
