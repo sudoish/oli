@@ -5,12 +5,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph, Wrap};
 
 use crate::tui::app::{App, ToolCardState, TranscriptItem};
 use crate::tui::markdown;
+use crate::tui::theme::Theme;
 
 use super::spinner_glyph;
 
@@ -74,8 +75,8 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
             let badge = Paragraph::new(Line::from(Span::styled(
                 label,
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(app.theme.selected_fg)
+                    .bg(app.theme.match_highlight)
                     .add_modifier(Modifier::BOLD),
             )));
             f.render_widget(badge, badge_area);
@@ -89,16 +90,15 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
 /// terminal. `rule_width` controls the horizontal-rule glyph count
 /// inserted between user→assistant turn boundaries.
 pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'static>> {
+    let theme = &app.theme;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let items = &app.transcript;
     for (i, item) in items.iter().enumerate() {
         let is_active = app.active_assistant == Some(i);
         match item {
             TranscriptItem::UserPrompt { body } => {
-                // Header `you ▐` — mirror of the assistant's `▌ oli`,
-                // pinned to the right edge of the inner pane.
                 let header_text = "you ";
-                let header_chars = header_text.chars().count() as u16 + 1; // +1 for ▐
+                let header_chars = header_text.chars().count() as u16 + 1;
                 let header_pad = rule_width.saturating_sub(header_chars) as usize;
                 let mut header_spans: Vec<Span<'static>> = Vec::with_capacity(3);
                 if header_pad > 0 {
@@ -107,20 +107,17 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                 header_spans.push(Span::styled(
                     header_text.to_string(),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.user)
                         .add_modifier(Modifier::BOLD),
                 ));
                 header_spans.push(Span::styled(
                     "▐".to_string(),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.user)
                         .add_modifier(Modifier::BOLD),
                 ));
                 lines.push(Line::from(header_spans));
 
-                // Body chunks right-aligned with a 2-col right
-                // gutter — mirrors the 2-col left gutter assistant
-                // body uses under `▌ oli`.
                 let body_right_gutter: u16 = 2;
                 let body_total_w = rule_width.saturating_sub(body_right_gutter);
                 let bubble_width = bubble_width_for(rule_width);
@@ -132,10 +129,7 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                         if pad > 0 {
                             spans.push(Span::raw(" ".repeat(pad)));
                         }
-                        spans.push(Span::styled(
-                            chunk,
-                            Style::default().fg(Color::White),
-                        ));
+                        spans.push(Span::styled(chunk, Style::default().fg(theme.fg)));
                         lines.push(Line::from(spans));
                     }
                 }
@@ -144,23 +138,17 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                 lines.push(Line::from(Span::styled(
                     "▌ oli",
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )));
                 if body.is_empty() && is_active {
                     lines.push(Line::from(Span::styled(
                         "  · waiting for first token",
                         Style::default()
-                            .fg(Color::DarkGray)
+                            .fg(theme.dim)
                             .add_modifier(Modifier::ITALIC),
                     )));
                 } else {
-                    // Re-parse the current body each frame.
-                    // pulldown-cmark on a few KB of prose is
-                    // microsecond-fast; mid-stream un-closed
-                    // tokens render as literal text. Each
-                    // markdown line gets a 2-space gutter so it
-                    // visually nests under the `▌ oli` header.
                     for md_line in markdown::render(body, app.markdown_theme) {
                         let mut spans: Vec<Span<'static>> =
                             Vec::with_capacity(md_line.spans.len() + 1);
@@ -176,7 +164,7 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                     last.spans.push(Span::styled(
                         "▍",
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(theme.accent)
                             .add_modifier(Modifier::SLOW_BLINK),
                     ));
                 }
@@ -186,7 +174,7 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                     lines.push(Line::from(Span::styled(
                         format!("  {}", body_line),
                         Style::default()
-                            .fg(Color::DarkGray)
+                            .fg(theme.dim)
                             .add_modifier(Modifier::ITALIC),
                     )));
                 }
@@ -197,20 +185,17 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                 state,
                 ..
             } => {
-                lines.push(render_tool_card_line(tool, args_preview, state));
-                if let Some(detail) = render_tool_card_detail(state) {
+                lines.push(render_tool_card_line(tool, args_preview, state, theme));
+                if let Some(detail) = render_tool_card_detail(state, theme) {
                     lines.push(detail);
                 }
             }
         }
-        // Trailing separator between items. User→Assistant
-        // transitions get a dim horizontal rule (turn boundary);
-        // everything else gets a blank line.
         let next = items.get(i + 1);
         let user_to_assistant = matches!(item, TranscriptItem::UserPrompt { .. })
             && matches!(next, Some(TranscriptItem::Assistant { .. }));
         if user_to_assistant {
-            lines.push(separator_rule(rule_width));
+            lines.push(separator_rule(rule_width, theme));
         } else {
             lines.push(Line::raw(""));
         }
@@ -304,12 +289,9 @@ pub(super) fn anchor_to_bottom(
 /// Dim horizontal rule used between user→assistant turn
 /// boundaries. Width is the inner width of the transcript pane so
 /// the rule visually spans the full gutter.
-fn separator_rule(width: u16) -> Line<'static> {
+fn separator_rule(width: u16, theme: &Theme) -> Line<'static> {
     let glyphs: String = std::iter::repeat('─').take(width.max(1) as usize).collect();
-    Line::from(Span::styled(
-        glyphs,
-        Style::default().fg(Color::DarkGray),
-    ))
+    Line::from(Span::styled(glyphs, Style::default().fg(theme.dim)))
 }
 
 /// Header line of a tool card:
@@ -318,12 +300,13 @@ fn render_tool_card_line(
     tool: &str,
     args_preview: &str,
     state: &ToolCardState,
+    theme: &Theme,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let arrow_color = match state {
-        ToolCardState::Running { .. } => Color::Yellow,
-        ToolCardState::Done { ok: true, .. } => Color::Green,
-        ToolCardState::Done { ok: false, .. } => Color::Red,
+        ToolCardState::Running { .. } => theme.tool_running,
+        ToolCardState::Done { ok: true, .. } => theme.tool_ok,
+        ToolCardState::Done { ok: false, .. } => theme.tool_err,
     };
     spans.push(Span::styled(
         "  → ",
@@ -334,13 +317,13 @@ fn render_tool_card_line(
     spans.push(Span::styled(
         format!("{:<7}", tool),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
         args_preview.to_string(),
-        Style::default().fg(Color::White),
+        Style::default().fg(theme.fg),
     ));
     spans.push(Span::raw("  "));
     match state {
@@ -348,18 +331,18 @@ fn render_tool_card_line(
             let elapsed = started_at.elapsed().as_secs_f32();
             spans.push(Span::styled(
                 format!("{} {:.1}s", spinner_glyph(elapsed), elapsed),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.tool_running),
             ));
         }
         ToolCardState::Done { duration, ok, .. } => {
             spans.push(Span::styled(
                 format!("{:.2}s", duration.as_secs_f32()),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.dim),
             ));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
                 if *ok { "✓" } else { "✗" },
-                Style::default().fg(if *ok { Color::Green } else { Color::Red }),
+                Style::default().fg(if *ok { theme.tool_ok } else { theme.tool_err }),
             ));
         }
     }
@@ -369,7 +352,7 @@ fn render_tool_card_line(
 /// Optional detail line under a card. Running cards show no
 /// detail; done cards show their summary indented under the
 /// header.
-fn render_tool_card_detail(state: &ToolCardState) -> Option<Line<'static>> {
+fn render_tool_card_detail(state: &ToolCardState, theme: &Theme) -> Option<Line<'static>> {
     match state {
         ToolCardState::Running { .. } => None,
         ToolCardState::Done { summary, ok, .. } => {
@@ -379,7 +362,7 @@ fn render_tool_card_detail(state: &ToolCardState) -> Option<Line<'static>> {
             Some(Line::from(Span::styled(
                 format!("    {}", summary),
                 Style::default()
-                    .fg(if *ok { Color::DarkGray } else { Color::Red })
+                    .fg(if *ok { theme.dim } else { theme.diff_removed })
                     .add_modifier(Modifier::ITALIC),
             )))
         }
