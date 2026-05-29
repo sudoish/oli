@@ -26,6 +26,7 @@ pub mod caps;
 mod completion;
 mod driver;
 mod event;
+pub mod fuzzy;
 mod hints;
 pub mod history;
 mod hook;
