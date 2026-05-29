@@ -151,6 +151,12 @@ pub struct App {
     /// forward history). Capped at SCROLL_HISTORY_CAP entries.
     pub scroll_positions: Vec<Option<u16>>,
     pub scroll_pos_cursor: usize,
+
+    /// Phase Y4: transcript index of the currently focused tool
+    /// card (Done state). None = no card focused. `{` / `}` cycle
+    /// among Done cards; `Enter` (on empty input) toggles the
+    /// focused card's `expanded` flag; `Esc` clears focus.
+    pub focused_card_idx: Option<usize>,
 }
 
 /// Position-stack depth for Ctrl+O / Ctrl+I jumps. The spec's
@@ -200,6 +206,7 @@ impl Default for App {
             turn_line_indices: Vec::new(),
             scroll_positions: Vec::new(),
             scroll_pos_cursor: 0,
+            focused_card_idx: None,
         }
     }
 }
@@ -330,6 +337,17 @@ impl App {
                 self.jump_to_next_turn();
                 return SubmitAction::None;
             }
+            // Card-focus nav (Y4): `{` / `}` cycle among Done
+            // tool cards. Same empty-input guard as `[` / `]` so
+            // typing those characters mid-prompt still works.
+            KeyCode::Char('{') if !ctrl && !alt && self.is_input_empty() => {
+                self.focus_prev_card();
+                return SubmitAction::None;
+            }
+            KeyCode::Char('}') if !ctrl && !alt && self.is_input_empty() => {
+                self.focus_next_card();
+                return SubmitAction::None;
+            }
             // Position-stack jumps (X3): Ctrl+O steps back through
             // recorded scroll positions, Ctrl+I steps forward. In
             // legacy terminals Ctrl+I is indistinguishable from
@@ -355,6 +373,15 @@ impl App {
                 self.input.insert_newline();
                 self.refresh_completion_on_edit();
             }
+            // Y4: Enter with a focused card and empty input toggles
+            // expand/collapse on the card. Falls through to submit
+            // when input has content (so a focused card doesn't
+            // hijack the natural prompt-submit flow).
+            KeyCode::Enter
+                if self.focused_card_idx.is_some() && self.is_input_empty() =>
+            {
+                self.toggle_focused_card_expanded();
+            }
             KeyCode::Enter => return self.submit(),
             KeyCode::Tab if !ctrl && !alt => {
                 self.open_or_advance_completion();
@@ -379,6 +406,10 @@ impl App {
             KeyCode::Esc => {
                 if self.completion.is_some() {
                     self.completion = None;
+                } else if self.focused_card_idx.is_some() {
+                    // Y4: clear card focus first; a second Esc still
+                    // clears the input as before.
+                    self.clear_card_focus();
                 } else {
                     self.clear_input();
                 }
