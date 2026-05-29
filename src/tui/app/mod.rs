@@ -26,7 +26,7 @@ pub use overlay::{
 };
 #[allow(unused_imports)]
 pub use search::SearchState;
-pub use transcript::{ToolCardState, TranscriptItem};
+pub use transcript::{ToolCardState, TranscriptItem, committable_count};
 
 pub enum Mode {
     Idle,
@@ -157,6 +157,14 @@ pub struct App {
     /// among Done cards; `Enter` (on empty input) toggles the
     /// focused card's `expanded` flag; `Esc` clears focus.
     pub focused_card_idx: Option<usize>,
+
+    /// Inline-mode scrollback watermark: count of leading transcript
+    /// items already flushed to native scrollback via
+    /// `Terminal::insert_before`. Items `[0, committed)` live in the
+    /// host's scrollback; `[committed, len)` render in the viewport.
+    /// Stays `0` in fullscreen mode (the commit step never runs), so
+    /// the viewport renders the whole transcript exactly as before.
+    pub committed: usize,
 }
 
 /// Position-stack depth for Ctrl+O / Ctrl+I jumps. The spec's
@@ -207,6 +215,7 @@ impl Default for App {
             scroll_positions: Vec::new(),
             scroll_pos_cursor: 0,
             focused_card_idx: None,
+            committed: 0,
         }
     }
 }

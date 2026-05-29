@@ -14,7 +14,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 
 use transcript::TRANSCRIPT_H_PAD;
 
@@ -64,6 +64,26 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Some(Overlay::Search(_)) => {}
         None => {}
     }
+}
+
+/// Inline mode: build the lines + exact wrapped height for flushing
+/// transcript items `range` to native scrollback via
+/// `Terminal::insert_before`. Rendered at full width with no block
+/// padding so `Paragraph::line_count(width)` matches the eventual
+/// render wrap exactly — the scrollback buffer is sized to the row and
+/// leaves neither trailing blank gaps nor clipped lines. Returns
+/// `(lines, height)`; the caller renders the same `lines` with the
+/// same `Wrap` inside the `insert_before` closure.
+pub fn committed_scrollback(
+    app: &App,
+    width: u16,
+    range: std::ops::Range<usize>,
+) -> (Vec<Line<'static>>, u16) {
+    let lines = transcript::build_transcript_lines_range(app, width, range);
+    let height = Paragraph::new(lines.clone())
+        .wrap(Wrap { trim: false })
+        .line_count(width) as u16;
+    (lines, height)
 }
 
 /// Truncate `s` to `max` Unicode characters, appending `…` when
