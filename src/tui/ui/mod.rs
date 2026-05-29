@@ -308,21 +308,33 @@ pub(super) fn render_activity_strip_left(app: &App) -> Vec<Span<'static>> {
 }
 
 /// Right half of the activity strip — cancel hint while busy,
-/// suppressed while an approval modal is up (the modal owns the
-/// keyboard) and while idle.
+/// navigation hints while idle, suppressed while an approval modal
+/// is up (the modal owns the keyboard).
 pub(super) fn render_activity_strip_right(app: &App) -> Vec<Span<'static>> {
     if app.approval().is_some() {
         return Vec::new();
     }
-    if matches!(app.mode, Mode::Idle) {
+    let text = context_hint_text(&app.mode);
+    if text.is_empty() {
         return Vec::new();
     }
     vec![Span::styled(
-        "Esc to cancel ".to_string(),
+        format!("{} ", text),
         Style::default()
             .fg(app.theme.dim)
             .add_modifier(Modifier::ITALIC),
     )]
+}
+
+/// Pick a context-appropriate hint line for the right-side of the
+/// activity strip (X4). Idle shows navigation hints; Streaming /
+/// ToolRunning surface the cancel keys. Empty string suppresses.
+pub(super) fn context_hint_text(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Idle => "[/]: turns · Ctrl+F: search · Ctrl+R: history",
+        Mode::Thinking { .. } | Mode::Streaming { .. } => "Esc to cancel",
+        Mode::ToolRunning { .. } => "Esc cancel · Ctrl+C hard cancel",
+    }
 }
 
 /// Search bar — swaps in for the activity strip while the Search
@@ -598,10 +610,24 @@ mod tests {
     }
 
     #[test]
-    fn activity_strip_right_is_empty_when_idle() {
+    fn activity_strip_right_shows_idle_nav_hints() {
+        // X4: idle mode advertises the nav keybindings on the right
+        // side of the activity strip.
         let app = app_with_status(StatusModel::default());
         let spans = render_activity_strip_right(&app);
-        assert!(spans.is_empty());
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("[/]"), "got: {}", combined);
+        assert!(combined.contains("search"), "got: {}", combined);
+    }
+
+    #[test]
+    fn activity_strip_right_shows_hard_cancel_hint_while_tool_running() {
+        let mut app = app_with_status(StatusModel::default());
+        app.on_turn_started();
+        app.on_tool_start(1, "grep".into(), "".into());
+        let spans = render_activity_strip_right(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("Ctrl+C"), "got: {}", combined);
     }
 
     #[test]
