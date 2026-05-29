@@ -17,12 +17,33 @@ Every keyboard affordance and slash command in one place. Linked from
 | `oli --strict -p "..."`                            | One-shot, deny every `Ask` policy decision (unattended-safe scripted runs).  |
 | `oli --max-turns N`                                | Cap turns for this run (overrides `[agent].max_turns` config).               |
 | `oli --plain`                                      | Force the line-mode REPL even on a TTY.                                      |
+| `oli --inline`                                     | Render TUI inline in the host buffer (no alt-screen). Buffer-terminals.      |
+| `oli --fullscreen`                                 | Force alt-screen even when auto-detection would pick inline mode.            |
 | `oli init`                                         | Interactive `~/.config/oli/config.toml` setup on stdin.                      |
 | `oli init --provider ollama`                       | Headless config bootstrap; defaults for everything.                          |
 | `oli init --provider openrouter --api-key sk-...`  | Full non-interactive bootstrap.                                              |
 | `oli init --provider ollama --force`               | Overwrite an existing config file.                                           |
 
 ## TUI
+
+### Viewport modes
+
+oli renders in one of two modes, picked by `--inline` / `--fullscreen`,
+then `[ui].viewport`, then auto-detection.
+
+- **Fullscreen** (default in a fresh terminal): owns the screen via
+  alternate-screen, mouse capture on, focus events on. Exiting
+  restores the prior terminal contents.
+- **Inline** (default inside Neovim `:terminal`, VSCode integrated
+  terminal, Emacs `term`): renders in a fixed block in the host
+  buffer, no alt-screen, no mouse capture. The transcript stays as
+  normal scrollback when oli exits. Use the **host buffer's** scroll
+  affordances to scroll past the inline block; PgUp/PgDn inside oli
+  still scroll oli's transcript.
+
+Mouse-wheel ownership in inline mode: the host buffer owns the
+wheel by default (so editor / VSCode scroll works). Set
+`[ui].mouse = true` (or pass `--fullscreen`) to let oli capture it.
 
 ### Input box
 
@@ -131,6 +152,9 @@ listing.
 | `XDG_CONFIG_HOME` | Override the `~/.config` root for all oli files.                                      |
 | `RUST_LOG`        | Stderr threshold for the diagnostics shim. `info` (default) / `warn` / `error` etc.  |
 | `COLORFGBG`       | Auto-detect light vs dark terminal theme for the markdown renderer.                   |
+| `NVIM`, `NVIM_LISTEN_ADDRESS` | Detected at startup → oli treats the host as a buffer-terminal (inline mode, no OSC52, no DA queries, no mouse capture). |
+| `TERM_PROGRAM=vscode`, `VSCODE_INJECTION` | Same: detected as buffer-terminal. |
+| `INSIDE_EMACS`    | Detected as buffer-terminal (Emacs `term`).                                           |
 
 ## Build features
 
