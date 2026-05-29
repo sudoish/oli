@@ -39,7 +39,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_status(f, chunks[0], app);
     transcript::draw_transcript(f, chunks[1], app);
-    draw_activity_strip(f, chunks[2], app);
+    if app.search().is_some() {
+        draw_search_bar(f, chunks[2], app);
+    } else {
+        draw_activity_strip(f, chunks[2], app);
+    }
     draw_input(f, chunks[3], app);
 
     if app.completion.is_some() {
@@ -56,9 +60,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Some(Overlay::HistorySearch(s)) => overlays::draw_history_search(f, area, s, app),
         Some(Overlay::CopyFallback(s)) => overlays::draw_copy_fallback(f, area, s, &app.theme),
         Some(Overlay::Wizard(s)) => overlays::draw_wizard(f, area, s),
-        // Search bar is rendered inline by draw_transcript (it
-        // doesn't sit on top of the transcript as a centered
-        // modal — it's a thin bar above the input box).
+        // Search bar replaces the activity strip; rendered above.
         Some(Overlay::Search(_)) => {}
         None => {}
     }
@@ -323,6 +325,80 @@ pub(super) fn render_activity_strip_right(app: &App) -> Vec<Span<'static>> {
     )]
 }
 
+/// Search bar — swaps in for the activity strip while the Search
+/// overlay is active. Left side shows the query with a cursor; right
+/// side shows match counter + key legend.
+fn draw_search_bar(f: &mut Frame, area: Rect, app: &App) {
+    let left = render_search_bar_left(app);
+    let right = render_search_bar_right(app);
+    let left_w = spans_width(&left) as u16;
+    let right_w = spans_width(&right) as u16;
+    let inner_width = area.width.saturating_sub(TRANSCRIPT_H_PAD * 2);
+    let mut spans = left;
+    let pad = inner_width.saturating_sub(left_w + right_w);
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad as usize)));
+    }
+    spans.extend(right);
+    let bar = Paragraph::new(Line::from(spans))
+        .block(Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD)));
+    f.render_widget(bar, area);
+}
+
+/// Left half of the search bar — `🔍 <query>▏`. Returns no-op
+/// spans (single space) if the overlay isn't active, so call sites
+/// can rely on the function being total.
+pub(super) fn render_search_bar_left(app: &App) -> Vec<Span<'static>> {
+    let Some(state) = app.search() else {
+        return Vec::new();
+    };
+    let theme = &app.theme;
+    vec![
+        Span::styled(
+            " 🔍 ".to_string(),
+            Style::default()
+                .fg(theme.match_highlight)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(state.query.clone(), Style::default().fg(theme.fg)),
+        Span::styled(
+            "▏".to_string(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]
+}
+
+/// Right half of the search bar — `n/N · n/N next · Esc dismiss`.
+/// When there are no matches, shows `no matches` instead of a counter.
+pub(super) fn render_search_bar_right(app: &App) -> Vec<Span<'static>> {
+    let Some(state) = app.search() else {
+        return Vec::new();
+    };
+    let theme = &app.theme;
+    let count = app.search_match_count;
+    let counter = if count == 0 {
+        if state.query.is_empty() {
+            "type to search ".to_string()
+        } else {
+            "no matches ".to_string()
+        }
+    } else {
+        let cur = state.current.min(count.saturating_sub(1)) + 1;
+        format!("{}/{} ", cur, count)
+    };
+    vec![
+        Span::styled(counter, Style::default().fg(theme.accent)),
+        Span::styled(
+            "· n/N next · Esc dismiss ".to_string(),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ]
+}
+
 /// Pick a frame of a 10-step braille spinner from elapsed seconds.
 /// Hand-rolled so we don't drag in `indicatif`.
 pub(super) fn spinner_glyph(secs: f32) -> char {
@@ -538,6 +614,61 @@ mod tests {
         );
         let spans = render_activity_strip_right(&app);
         assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn search_bar_left_is_empty_when_overlay_is_closed() {
+        let app = app_with_status(StatusModel::default());
+        let spans = render_search_bar_left(&app);
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn search_bar_left_renders_glyph_query_and_cursor() {
+        let mut app = app_with_status(StatusModel::default());
+        app.open_search();
+        app.search_push_char('h');
+        app.search_push_char('i');
+        let spans = render_search_bar_left(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("🔍"));
+        assert!(combined.contains("hi"));
+        // Cursor glyph appears at the end of the query.
+        assert!(combined.contains("▏"));
+    }
+
+    #[test]
+    fn search_bar_right_shows_type_to_search_when_query_empty() {
+        let mut app = app_with_status(StatusModel::default());
+        app.open_search();
+        let spans = render_search_bar_right(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("type to search"));
+        assert!(combined.contains("Esc dismiss"));
+    }
+
+    #[test]
+    fn search_bar_right_shows_no_matches_when_count_is_zero() {
+        let mut app = app_with_status(StatusModel::default());
+        app.open_search();
+        app.search_push_char('z');
+        // search_match_count stays 0 — renderer caches it; without a render
+        // pass, we simulate the empty-results case.
+        let spans = render_search_bar_right(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("no matches"));
+    }
+
+    #[test]
+    fn search_bar_right_shows_one_indexed_counter_when_matches_exist() {
+        let mut app = app_with_status(StatusModel::default());
+        app.open_search();
+        app.search_push_char('x');
+        app.search_match_count = 3;
+        // current is zero-indexed internally; should display as 1/3.
+        let spans = render_search_bar_right(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("1/3"), "got: {}", combined);
     }
 }
 
