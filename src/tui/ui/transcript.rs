@@ -33,12 +33,36 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     let height = area.height.saturating_sub(TRANSCRIPT_BOTTOM_PAD);
     let max = total.saturating_sub(height);
     app.note_scroll_metrics(max, height);
-    let offset = match app.scroll_manual {
-        None => max,
-        Some(o) => o.min(max),
-    };
     let detached = app.is_scroll_detached();
     let unread = app.unread_lines;
+
+    // Search overlay (X2): when active, highlight every match in
+    // the rendered lines, cache the match count on App so the
+    // key handler can cycle, and scroll the focused match into
+    // view (overrides `app.scroll_manual` while search is open).
+    let search_query = app.search().map(|s| (s.query.clone(), s.current));
+    let (lines, scroll_override) = if let Some((q, cur)) = search_query.as_ref() {
+        let (highlighted, match_idxs) =
+            apply_search_highlight(lines, q, app.theme.match_highlight, app.theme.selected_fg);
+        app.search_match_count = match_idxs.len();
+        let scroll = if match_idxs.is_empty() {
+            None
+        } else {
+            let focus = match_idxs[(*cur).min(match_idxs.len() - 1)] as u16;
+            // Place the matched line a few rows below the top of
+            // the pane so the user can read context above it.
+            Some(focus.saturating_sub(2).min(max))
+        };
+        (highlighted, scroll)
+    } else {
+        app.search_match_count = 0;
+        (lines, None)
+    };
+    let offset = match (scroll_override, app.scroll_manual) {
+        (Some(o), _) => o,
+        (None, None) => max,
+        (None, Some(o)) => o.min(max),
+    };
 
     // Chat-app anchoring: when the transcript is shorter than the
     // pane, push messages to the bottom by prepending blank lines.
@@ -286,6 +310,100 @@ pub(super) fn anchor_to_bottom(
     lines
 }
 
+/// Re-paint every `Line` so case-insensitive substring matches of
+/// `needle` are styled with `bg = highlight` / `fg = highlight_fg`.
+/// Returns the recolored lines and a vector of line indices that
+/// contained at least one match. Empty `needle` short-circuits to
+/// `(lines, vec![])` — search inactive, no recoloring.
+pub(super) fn apply_search_highlight(
+    lines: Vec<Line<'static>>,
+    needle: &str,
+    highlight: ratatui::style::Color,
+    highlight_fg: ratatui::style::Color,
+) -> (Vec<Line<'static>>, Vec<usize>) {
+    if needle.is_empty() {
+        return (lines, Vec::new());
+    }
+    let needle_lc = needle.to_lowercase();
+    let mut match_idxs = Vec::new();
+    let out: Vec<Line<'static>> = lines
+        .into_iter()
+        .enumerate()
+        .map(|(line_idx, line)| {
+            // Concatenate the line's text for a single
+            // substring scan. If it doesn't match, return the
+            // line untouched — preserves the original styling
+            // and avoids redundant Span splits.
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            if !text.to_lowercase().contains(&needle_lc) {
+                return line;
+            }
+            match_idxs.push(line_idx);
+            highlight_line_spans(line, &needle_lc, highlight, highlight_fg)
+        })
+        .collect();
+    (out, match_idxs)
+}
+
+/// Split a line's spans so every case-insensitive substring
+/// occurrence of `needle_lc` gets the highlight style applied. The
+/// non-match runs keep their original style.
+fn highlight_line_spans(
+    line: Line<'static>,
+    needle_lc: &str,
+    highlight: ratatui::style::Color,
+    highlight_fg: ratatui::style::Color,
+) -> Line<'static> {
+    let hl_style = Style::default()
+        .bg(highlight)
+        .fg(highlight_fg)
+        .add_modifier(Modifier::BOLD);
+
+    let mut new_spans: Vec<Span<'static>> = Vec::new();
+    for span in line.spans {
+        let span_text: &str = span.content.as_ref();
+        let span_lc = span_text.to_lowercase();
+        // ASCII (the overwhelming common case) preserves byte
+        // positions through `to_lowercase`. If the lowercased
+        // span's byte length changed (a non-ASCII codepoint
+        // folded to a different-width form), bail on the
+        // highlight for this span — keep it as-is to avoid
+        // slicing at a non-char-boundary.
+        if span_lc.len() != span_text.len() {
+            new_spans.push(span);
+            continue;
+        }
+        let mut cursor = 0usize;
+        while cursor < span_text.len() {
+            match span_lc[cursor..].find(needle_lc) {
+                None => {
+                    new_spans.push(Span::styled(
+                        span_text[cursor..].to_string(),
+                        span.style,
+                    ));
+                    break;
+                }
+                Some(rel) => {
+                    let start = cursor + rel;
+                    let end = start + needle_lc.len();
+                    if start > cursor {
+                        new_spans.push(Span::styled(
+                            span_text[cursor..start].to_string(),
+                            span.style,
+                        ));
+                    }
+                    new_spans.push(Span::styled(
+                        span_text[start..end].to_string(),
+                        hl_style,
+                    ));
+                    cursor = end;
+                }
+            }
+        }
+    }
+    Line::from(new_spans)
+}
+
 /// Dim horizontal rule used between user→assistant turn
 /// boundaries. Width is the inner width of the transcript pane so
 /// the rule visually spans the full gutter.
@@ -373,10 +491,92 @@ fn render_tool_card_detail(state: &ToolCardState, theme: &Theme) -> Option<Line<
 mod tests {
     use super::*;
     use crate::tui::app::App;
+    use ratatui::style::Color;
     use std::time::Duration;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn apply_search_highlight_empty_query_is_noop() {
+        let lines = vec![Line::from(Span::raw("hello world".to_string()))];
+        let (out, idxs) =
+            apply_search_highlight(lines.clone(), "", Color::Yellow, Color::Black);
+        assert!(idxs.is_empty());
+        assert_eq!(line_text(&out[0]), "hello world");
+    }
+
+    #[test]
+    fn apply_search_highlight_finds_substring_case_insensitive() {
+        let lines = vec![
+            Line::from(Span::raw("a panic happened".to_string())),
+            Line::from(Span::raw("ok".to_string())),
+            Line::from(Span::raw("PANIC again".to_string())),
+        ];
+        let (out, idxs) =
+            apply_search_highlight(lines, "panic", Color::Yellow, Color::Black);
+        assert_eq!(idxs, vec![0, 2]);
+        // The needle text round-trips and shares a single span
+        // with the highlight style.
+        let hl_present = |line: &Line<'_>| {
+            line.spans.iter().any(|s| {
+                s.style.bg == Some(Color::Yellow)
+                    && s.content.eq_ignore_ascii_case("panic")
+            })
+        };
+        assert!(hl_present(&out[0]));
+        assert!(hl_present(&out[2]));
+        // Untouched line keeps its original (single) span.
+        assert_eq!(out[1].spans.len(), 1);
+    }
+
+    #[test]
+    fn apply_search_highlight_splits_spans_across_styled_runs() {
+        // "hel" + "lo world" — a needle "ello" crosses both spans
+        // *texts* but each span is matched independently. So
+        // "hel" has no match; "lo world" has no "ello" either.
+        // For a true cross-span match we'd need pre-concatenated
+        // text; the current implementation explicitly scopes
+        // matches inside a single span. Document that here.
+        let line = Line::from(vec![
+            Span::styled("hel".to_string(), Style::default().fg(Color::Red)),
+            Span::styled("lo world".to_string(), Style::default().fg(Color::Blue)),
+        ]);
+        let (out, idxs) = apply_search_highlight(
+            vec![line],
+            "ello",
+            Color::Yellow,
+            Color::Black,
+        );
+        // The whole line *is* counted as a match (the
+        // concatenated text contains 'ello'), but no span got
+        // re-styled because no individual span contains it.
+        assert_eq!(idxs, vec![0]);
+        assert!(
+            out[0]
+                .spans
+                .iter()
+                .all(|s| s.style.bg != Some(Color::Yellow))
+        );
+    }
+
+    #[test]
+    fn apply_search_highlight_recolors_within_a_single_span() {
+        let line = Line::from(Span::styled(
+            "before MATCH after".to_string(),
+            Style::default().fg(Color::Red),
+        ));
+        let (out, idxs) =
+            apply_search_highlight(vec![line], "match", Color::Yellow, Color::Black);
+        assert_eq!(idxs, vec![0]);
+        // Three spans now: "before ", "MATCH", " after".
+        let texts: Vec<&str> = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(texts, vec!["before ", "MATCH", " after"]);
+        assert_eq!(out[0].spans[1].style.bg, Some(Color::Yellow));
+        // Non-match spans keep their original fg.
+        assert_eq!(out[0].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(out[0].spans[2].style.fg, Some(Color::Red));
     }
 
     fn has_rule(lines: &[Line<'_>]) -> bool {
