@@ -208,6 +208,22 @@ impl Capabilities {
     }
 }
 
+/// Whether the host supports OSC52 clipboard writes for `/copy N`.
+/// Priority order:
+///
+/// 1. Explicit config override (`[ui].osc52 = "on" | "off"`).
+/// 2. `"auto"` / unset ⇒ defer to `caps.osc52`.
+///
+/// Unknown values fall through to auto rather than erroring; a
+/// typo'd config still produces a working clipboard path.
+pub fn resolve_osc52(config: Option<&str>, caps_osc52: bool) -> bool {
+    match config.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("on") | Some("true") | Some("yes") => true,
+        Some("off") | Some("false") | Some("no") => false,
+        _ => caps_osc52,
+    }
+}
+
 /// Identify the host environment from env vars. The string is
 /// stable and intended for logging / `/diagnostics`; downstream
 /// behavioral checks should read the typed fields on `Capabilities`,
@@ -371,6 +387,43 @@ mod tests {
         let caps = Capabilities::detect_with_env(&env);
         assert!(caps.is_buffer_terminal);
         assert_eq!(caps.host, "emacs:term");
+    }
+
+    #[test]
+    fn resolve_osc52_config_override_wins_in_both_directions() {
+        // Force-on inside a buffer-terminal (user knows their host
+        // forwards OSC52, e.g. a tmux config we couldn't detect).
+        assert!(resolve_osc52(Some("on"), false));
+        // Force-off in an OSC52-capable terminal — user prefers the
+        // fallback modal so they can read the body before pasting.
+        assert!(!resolve_osc52(Some("off"), true));
+    }
+
+    #[test]
+    fn resolve_osc52_auto_defers_to_caps() {
+        // No config or explicit auto → caps value passes through.
+        assert!(resolve_osc52(None, true));
+        assert!(!resolve_osc52(None, false));
+        assert!(resolve_osc52(Some("auto"), true));
+        assert!(!resolve_osc52(Some("auto"), false));
+    }
+
+    #[test]
+    fn resolve_osc52_accepts_synonyms_and_ignores_case() {
+        assert!(resolve_osc52(Some("ON"), false));
+        assert!(resolve_osc52(Some("True"), false));
+        assert!(resolve_osc52(Some(" yes "), false));
+        assert!(!resolve_osc52(Some("OFF"), true));
+        assert!(!resolve_osc52(Some("false"), true));
+        assert!(!resolve_osc52(Some("no"), true));
+    }
+
+    #[test]
+    fn resolve_osc52_unknown_values_fall_through_to_caps() {
+        // Typo'd config: don't erase the user's clipboard path, just
+        // fall back to what we'd have picked automatically.
+        assert!(resolve_osc52(Some("bogus"), true));
+        assert!(!resolve_osc52(Some(""), false));
     }
 
     #[test]
