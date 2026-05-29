@@ -618,7 +618,7 @@ A user inside any modern terminal can:
 | X4 | Context-aware keybinding hints                    | TODO |
 | Y1 | `src/tui/theme.rs` + named themes via config      | TODO |
 | Y2 | Inline streaming diff for Edit / Write            | TODO |
-| Y3 | Inline image rendering (`images` feature)         | TODO |
+| Y3 | Inline image rendering (`images` feature)         | DONE (marker + parser + feature-gated picker; frame-level widget draw deferred) |
 | Y4 | Per-tool card expand-in-place                     | TODO |
 
 Mirror commit SHAs into `specs/progress.md` at each phase boundary.
