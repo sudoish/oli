@@ -104,6 +104,14 @@ pub struct UiConfig {
     /// OSC52 but we couldn't detect it, or vice versa.
     #[serde(default)]
     pub osc52: Option<String>,
+
+    /// Named theme for the TUI. One of `"dark"` (default),
+    /// `"light"`, `"dimmed"`, or `"auto"`. `"auto"` consults
+    /// `$COLORFGBG` and picks `light` on a light-background
+    /// terminal, otherwise `dark`. Unknown names fall back to
+    /// `dark`.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

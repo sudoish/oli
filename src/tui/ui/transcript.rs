@@ -161,7 +161,7 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                     // tokens render as literal text. Each
                     // markdown line gets a 2-space gutter so it
                     // visually nests under the `▌ oli` header.
-                    for md_line in markdown::render(body, app.theme) {
+                    for md_line in markdown::render(body, app.markdown_theme) {
                         let mut spans: Vec<Span<'static>> =
                             Vec::with_capacity(md_line.spans.len() + 1);
                         spans.push(Span::raw("  "));

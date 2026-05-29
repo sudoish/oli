@@ -32,6 +32,7 @@ pub mod history;
 mod hook;
 mod markdown;
 mod terminal;
+pub mod theme;
 mod ui;
 mod wizard;
 
@@ -70,6 +71,7 @@ pub async fn run(
     mouse_capture: bool,
     osc52_supported: bool,
     host_hint: String,
+    theme: theme::Theme,
 ) -> Result<()> {
     // Snapshot identity fields for the status bar before the
     // agent moves into the driver task. Branch is queried once
@@ -159,6 +161,7 @@ pub async fn run(
     app.set_status(initial_status);
     app.set_shown_hints(hints::load());
     app.set_clipboard_caps(osc52_supported, host_hint);
+    app.set_theme(theme);
     if !has_user_config() {
         app.open_wizard();
     }

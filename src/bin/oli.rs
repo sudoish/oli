@@ -533,6 +533,9 @@ async fn run(args: Args) -> Result<()> {
                         caps.osc52,
                     );
                     let host_hint = caps.host.clone();
+                    let theme = tui::theme::load(
+                        cfg.ui.theme.as_deref().unwrap_or("dark"),
+                    );
                     return tui::run(
                         agent,
                         plugin_slashes,
@@ -542,6 +545,7 @@ async fn run(args: Args) -> Result<()> {
                         mouse,
                         osc52,
                         host_hint,
+                        theme,
                     )
                     .await;
                 }

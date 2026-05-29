@@ -13,7 +13,8 @@ use tokio::sync::oneshot;
 use tui_textarea::{CursorMove, Input, Key as TaKey, TextArea};
 
 use crate::tui::completion::{self, CompletionContext};
-use crate::tui::markdown::Theme;
+use crate::tui::markdown::Theme as MarkdownTheme;
+use crate::tui::theme::Theme;
 
 mod overlay;
 mod transcript;
@@ -98,9 +99,17 @@ pub struct App {
     /// Cached transcript-pane height for PgUp/PgDn step size.
     pub scroll_viewport_height: u16,
 
-    /// Color theme for markdown / syntax-highlighted content.
-    /// Detected from `$COLORFGBG` at TUI startup; defaults to
-    /// dark on detection failure.
+    /// Light/dark mode hint for markdown / syntax-highlighted
+    /// content. Detected from `$COLORFGBG` at TUI startup;
+    /// defaults to dark on detection failure. Distinct from the
+    /// full UI color palette (`theme`) — syntect needs only a
+    /// binary light/dark choice.
+    pub markdown_theme: MarkdownTheme,
+
+    /// UI color palette. Resolved from `[ui].theme` at startup
+    /// (see `tui::theme::load`). Render functions pull every
+    /// semantic color from here so a theme swap recolors the
+    /// entire surface coherently.
     pub theme: Theme,
 
     /// Status-bar fields. Identity (model / session / branch /
@@ -153,7 +162,8 @@ impl Default for App {
             unread_lines: 0,
             scroll_max: 0,
             scroll_viewport_height: 0,
-            theme: Theme::Dark,
+            markdown_theme: MarkdownTheme::Dark,
+            theme: Theme::dark(),
             status: StatusModel::default(),
             slash_descriptions: HashMap::new(),
             shown_hints: HashSet::new(),
@@ -173,7 +183,7 @@ pub enum SubmitAction {
 impl App {
     pub fn new() -> Self {
         let mut app = Self::default();
-        app.theme = Theme::detect();
+        app.markdown_theme = MarkdownTheme::detect();
         app.transcript.push(TranscriptItem::System {
             body: "oli ready. type a message and press Enter (Shift+Enter for newline). \
                    /help for commands, Ctrl+D to exit."
@@ -228,6 +238,10 @@ impl App {
     /// Wire the OSC52 capability + host label set at TUI startup.
     /// The slash handler reads these to pick between writing the
     /// OSC52 escape or opening the copy-fallback modal.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
     pub fn set_clipboard_caps(&mut self, osc52_supported: bool, host_hint: String) {
         self.osc52_supported = osc52_supported;
         self.host_hint = host_hint;

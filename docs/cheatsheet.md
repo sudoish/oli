@@ -162,6 +162,7 @@ listing.
 | `~/.config/oli/tui-history.jsonl`          | Persistent prompt history (Up/Down + Ctrl+R search).                 |
 | `~/.config/oli/tui-hints.json`             | Hint ids the user has dismissed (faded onboarding tips).             |
 | `~/.config/oli/policy-allow.json`          | Fingerprints persisted via `[A]` on the approval modal.              |
+| `[ui].theme` in config                     | `"dark"` (default) / `"light"` / `"dimmed"` / `"auto"` (consults `$COLORFGBG`). |
 | `~/.config/oli/plugins/`                   | Lua plugin directory, scanned at startup and on `/plugins reload`.   |
 | `<project>/.oli/config.toml`               | Optional project-scoped overlay; layered on top of the global file.  |
 | `<project>/.oli/notes/`                    | Long-term notes store (`WriteNote`/`SearchNotes`/`ListNotes`).       |
