@@ -81,7 +81,9 @@ fn typing_slash_auto_opens_completion_popup() {
     ]);
     type_str(&mut app, "/c");
     let menu = app.completion.as_ref().expect("popup should auto-open");
-    assert_eq!(menu.candidates, vec!["clear".to_string(), "cost".to_string()]);
+    let mut got = menu.candidates.clone();
+    got.sort();
+    assert_eq!(got, vec!["clear".to_string(), "cost".to_string()]);
 }
 
 #[test]

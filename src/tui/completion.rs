@@ -103,39 +103,46 @@ pub fn slash_candidates(slash_names: &[String], query: &str) -> Vec<String> {
         .collect()
 }
 
-/// Path candidates are entries in `base_dir` whose name starts
-/// with `query` (case-sensitive — paths are case-sensitive on
-/// most filesystems). Hidden files (leading `.`) are surfaced
+/// Path candidates are entries in `base_dir` ranked by fuzzy
+/// match against `query`. Hidden files (leading `.`) are surfaced
 /// only when the query itself starts with `.`. Directories get a
-/// trailing `/` so the user knows they're traversable.
+/// trailing `/` so the user knows they're traversable. Empty query
+/// returns entries sorted alphabetically.
 pub fn path_candidates(base_dir: &Path, query: &str) -> Vec<String> {
     let read = match std::fs::read_dir(base_dir) {
         Ok(r) => r,
         Err(_) => return Vec::new(),
     };
     let want_hidden = query.starts_with('.');
-    let mut out: Vec<String> = Vec::new();
+    // Collect (raw_name, full_label) so we can fuzzy-rank by raw
+    // name (what the user sees) and emit the full relative path.
+    let mut entries: Vec<(String, String)> = Vec::new();
     for entry in read.flatten() {
         let raw = entry.file_name().to_string_lossy().to_string();
         if !want_hidden && raw.starts_with('.') {
             continue;
         }
-        if !raw.starts_with(query) {
-            continue;
-        }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let label = if is_dir { format!("{}/", raw) } else { raw };
-        // Re-prefix with the dir so accept-replacement gets the
-        // full relative path. `base_dir == "."` stays bare.
+        let label = if is_dir { format!("{}/", raw) } else { raw.clone() };
         let rel = if base_dir == Path::new(".") {
             label
         } else {
             format!("{}/{}", base_dir.display(), label)
         };
-        out.push(rel);
+        entries.push((raw, rel));
     }
-    out.sort();
-    out.truncate(20); // cap the popup; tons of files would overflow
+    if query.is_empty() {
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut out: Vec<String> = entries.into_iter().map(|(_, r)| r).collect();
+        out.truncate(20);
+        return out;
+    }
+    let ranked = fuzzy::rank(query, &entries, |(raw, _)| raw.as_str());
+    let mut out: Vec<String> = ranked
+        .into_iter()
+        .map(|(i, _)| entries[i].1.clone())
+        .collect();
+    out.truncate(20);
     out
 }
 
@@ -252,15 +259,34 @@ mod tests {
     }
 
     #[test]
-    fn path_candidates_lists_dir_entries_filtered_by_prefix() {
+    fn path_candidates_fuzzy_ranks_prefix_match_first() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("alpha.rs"), "").unwrap();
         std::fs::write(dir.path().join("beta.rs"), "").unwrap();
         std::fs::create_dir(dir.path().join("nested")).unwrap();
         let got = path_candidates(dir.path(), "a");
-        // `alpha.rs` matches; the dir doesn't (starts with `n`).
-        assert_eq!(got.len(), 1);
-        assert!(got[0].ends_with("alpha.rs"));
+        // Fuzzy: `alpha.rs` matches strongly (prefix), `beta.rs` matches
+        // weakly (contains `a`), `nested` doesn't match.
+        assert!(
+            got.first().map(|s| s.ends_with("alpha.rs")).unwrap_or(false),
+            "expected alpha.rs first, got {:?}",
+            got
+        );
+        assert!(!got.iter().any(|s| s.ends_with("nested/")));
+    }
+
+    #[test]
+    fn path_candidates_match_subsequence() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("main.rs"), "").unwrap();
+        std::fs::write(dir.path().join("server.rs"), "").unwrap();
+        let got = path_candidates(dir.path(), "mn");
+        // `mn` is a subsequence of `main.rs`.
+        assert!(
+            got.first().map(|s| s.ends_with("main.rs")).unwrap_or(false),
+            "expected main.rs first, got {:?}",
+            got
+        );
     }
 
     #[test]
