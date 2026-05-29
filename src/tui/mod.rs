@@ -47,6 +47,7 @@ use crossterm::event::{
     MouseEventKind,
 };
 use futures::StreamExt;
+use ratatui::widgets::{Paragraph, Widget, Wrap};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::agent::Agent;
@@ -167,6 +168,15 @@ pub async fn run(
         app.open_wizard();
     }
 
+    // Inline mode flushes finalized transcript items to the host's
+    // native scrollback before each draw (see `flush_committed`); the
+    // viewport then renders only the live tail. Fullscreen leaves
+    // `committed` at 0 and renders the whole transcript as before.
+    let inline = matches!(viewport, ViewportMode::Inline);
+
+    if inline {
+        flush_committed(&mut guard, &mut app)?;
+    }
     guard
             .terminal_mut()
             .draw(|f| ui::draw(f, &mut app))
@@ -187,6 +197,9 @@ pub async fn run(
         }
         if app.should_quit {
             break;
+        }
+        if inline {
+            flush_committed(&mut guard, &mut app)?;
         }
         guard
             .terminal_mut()
@@ -1120,6 +1133,39 @@ fn handle_approval_key(
             hints::save(&app.shown_hints);
         }
     }
+}
+
+/// Inline mode: flush newly-finalized transcript items to the host's
+/// native scrollback via `Terminal::insert_before`, advancing the
+/// `committed` watermark. The committed content leaves the ratatui-
+/// managed viewport entirely, so ratatui scrolls the host itself and
+/// `viewport_area` never desyncs — this is what eliminates the stale-
+/// row "floating leftover" orphaning. No-op when nothing new is final;
+/// `insert_before` is itself a no-op outside an inline viewport, so a
+/// stray call in fullscreen would be harmless too.
+fn flush_committed(guard: &mut TerminalGuard, app: &mut App) -> Result<()> {
+    let new_committed = app::committable_count(&app.transcript, app.committed);
+    if new_committed <= app.committed {
+        return Ok(());
+    }
+    let width = guard
+        .terminal_mut()
+        .size()
+        .map(|s| s.width)
+        .unwrap_or(80);
+    let (lines, height) = ui::committed_scrollback(app, width, app.committed..new_committed);
+    if height > 0 {
+        guard
+            .terminal_mut()
+            .insert_before(height, move |buf| {
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .render(buf.area, buf);
+            })
+            .map_err(io_err)?;
+    }
+    app.committed = new_committed;
+    Ok(())
 }
 
 fn io_err(e: std::io::Error) -> AgentError {

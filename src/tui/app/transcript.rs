@@ -52,6 +52,35 @@ pub enum ToolCardState {
     },
 }
 
+/// True when a transcript item has reached a terminal state and will
+/// never mutate again — safe to flush to native scrollback in inline
+/// mode. User prompts and system notes are final the moment they're
+/// pushed; an assistant message is final once `done`; a tool card is
+/// final once `Done` (Streaming/Running cards still change in place).
+fn is_final(item: &TranscriptItem) -> bool {
+    match item {
+        TranscriptItem::UserPrompt { .. } | TranscriptItem::System { .. } => true,
+        TranscriptItem::Assistant { done, .. } => *done,
+        TranscriptItem::ToolCard { state, .. } => matches!(state, ToolCardState::Done { .. }),
+    }
+}
+
+/// How many leading transcript items (starting at the `committed`
+/// watermark) are contiguously final and can be flushed to scrollback.
+///
+/// Walks forward from `committed` and stops at the first live item, so
+/// commit only ever advances over a contiguous final prefix — ordering
+/// into scrollback is preserved and a long turn flushes progressively
+/// as its finished sub-segments fall behind the live tail. Idempotent:
+/// re-running with the returned value advances nothing new.
+pub fn committable_count(items: &[TranscriptItem], committed: usize) -> usize {
+    let mut n = committed.min(items.len());
+    while n < items.len() && is_final(&items[n]) {
+        n += 1;
+    }
+    n
+}
+
 impl App {
     // ---------- driver-side event handlers ----------
 
@@ -305,6 +334,10 @@ impl App {
             _ => unreachable!(),
         };
         self.transcript.truncate(last_user_idx);
+        // Inline mode: a turn already flushed to scrollback can't be
+        // unprinted, but the watermark must not dangle past the now-
+        // shorter transcript or the commit step would skip live items.
+        self.committed = self.committed.min(self.transcript.len());
         self.active_assistant = None;
         self.active_tools.clear();
         Some(body)

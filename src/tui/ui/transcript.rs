@@ -121,10 +121,31 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
 /// terminal. `rule_width` controls the horizontal-rule glyph count
 /// inserted between user→assistant turn boundaries.
 pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'static>> {
+    // The viewport renders the live tail only. In fullscreen
+    // `committed` is always 0, so this is the whole transcript —
+    // identical to the pre-rework behavior. In inline mode items
+    // `[0, committed)` already live in native scrollback.
+    build_transcript_lines_range(app, rule_width, app.committed..app.transcript.len())
+}
+
+/// Render a contiguous range of transcript items to lines. Used by the
+/// viewport builder (`committed..len`) and the inline-mode scrollback
+/// flush (`old_committed..new_committed`). `range` selects which items
+/// are *emitted*; the full `app.transcript` slice stays accessible for
+/// lookahead (the trailing user→assistant separator peeks `i + 1`), so
+/// a range ending just before a live assistant still draws the rule
+/// that visually joins scrollback to the viewport.
+pub(super) fn build_transcript_lines_range(
+    app: &App,
+    rule_width: u16,
+    range: std::ops::Range<usize>,
+) -> Vec<Line<'static>> {
     let theme = &app.theme;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let items = &app.transcript;
-    for (i, item) in items.iter().enumerate() {
+    let end = range.end.min(items.len());
+    for i in range.start.min(end)..end {
+        let item = &items[i];
         let is_active = app.active_assistant == Some(i);
         match item {
             TranscriptItem::UserPrompt { body } => {
@@ -1109,6 +1130,50 @@ mod tests {
         });
         let lines = build_transcript_lines(&app, 40);
         assert!(user_turn_line_indices(&lines).is_empty());
+    }
+
+    #[test]
+    fn committed_watermark_hides_scrollback_items_from_viewport() {
+        // Inline mode: items below the `committed` watermark have been
+        // flushed to native scrollback, so the viewport builder must
+        // not re-emit them (re-emitting is what orphaned stale rows).
+        let mut app = App::new();
+        app.transcript = vec![
+            TranscriptItem::UserPrompt { body: "alpha".into() },
+            TranscriptItem::Assistant { body: "beta".into(), done: true },
+            TranscriptItem::UserPrompt { body: "gamma".into() },
+            TranscriptItem::Assistant { body: "delta".into(), done: true },
+        ];
+        app.committed = 2;
+        let text = build_transcript_lines(&app, 40)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!text.contains("alpha"), "scrollback item leaked: {text:?}");
+        assert!(!text.contains("beta"), "scrollback item leaked: {text:?}");
+        assert!(text.contains("gamma"));
+        assert!(text.contains("delta"));
+    }
+
+    #[test]
+    fn build_range_emits_only_requested_items() {
+        // The scrollback-flush path renders just `old..new`; confirm a
+        // sub-range emits only those items, not the whole transcript.
+        let mut app = App::new();
+        app.transcript = vec![
+            TranscriptItem::UserPrompt { body: "alpha".into() },
+            TranscriptItem::Assistant { body: "beta".into(), done: true },
+            TranscriptItem::UserPrompt { body: "gamma".into() },
+        ];
+        let text = build_transcript_lines_range(&app, 40, 0..1)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("alpha"));
+        assert!(!text.contains("beta"), "out-of-range item emitted: {text:?}");
+        assert!(!text.contains("gamma"), "out-of-range item emitted: {text:?}");
     }
 
     #[test]

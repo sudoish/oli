@@ -1077,3 +1077,113 @@ fn copy_fallback_scroll_is_bounded_at_zero() {
     app.copy_fallback_scroll_up();
     assert_eq!(app.copy_fallback().unwrap().scroll, 0);
 }
+
+// ---------- inline commit watermark (committable_count) ----------
+
+fn user(body: &str) -> TranscriptItem {
+    TranscriptItem::UserPrompt {
+        body: body.to_string(),
+    }
+}
+fn assistant(body: &str, done: bool) -> TranscriptItem {
+    TranscriptItem::Assistant {
+        body: body.to_string(),
+        done,
+    }
+}
+fn sys(body: &str) -> TranscriptItem {
+    TranscriptItem::System {
+        body: body.to_string(),
+    }
+}
+fn card_running() -> TranscriptItem {
+    TranscriptItem::ToolCard {
+        tool: "Read".into(),
+        args_preview: "(README.md)".into(),
+        state: ToolCardState::Running {
+            started_at: Instant::now(),
+        },
+    }
+}
+fn card_done() -> TranscriptItem {
+    TranscriptItem::ToolCard {
+        tool: "Read".into(),
+        args_preview: "(README.md)".into(),
+        state: ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "ok".into(),
+            ok: true,
+            full_output: String::new(),
+            expanded: false,
+        },
+    }
+}
+
+#[test]
+fn committable_count_empty_transcript_is_zero() {
+    assert_eq!(committable_count(&[], 0), 0);
+}
+
+#[test]
+fn committable_count_commits_all_when_every_item_is_final() {
+    let items = vec![user("hi"), assistant("hello", true), sys("note")];
+    assert_eq!(committable_count(&items, 0), 3);
+}
+
+#[test]
+fn committable_count_stops_at_first_live_item() {
+    // user(final) + assistant streaming(live) — only the prompt commits,
+    // exactly the after-submit case that orphaned the idle hint.
+    let items = vec![user("hi"), assistant("", false)];
+    assert_eq!(committable_count(&items, 0), 1);
+}
+
+#[test]
+fn committable_count_does_not_skip_past_a_live_item() {
+    // A live tool card mid-turn blocks commit of the finished assistant
+    // segment that follows it, preserving scrollback ordering.
+    let items = vec![
+        user("hi"),
+        assistant("thinking", true),
+        card_running(),
+        assistant("after tool", true),
+    ];
+    assert_eq!(committable_count(&items, 0), 2);
+}
+
+#[test]
+fn committable_count_advances_after_a_card_finishes() {
+    let mut items = vec![user("hi"), assistant("seg", true), card_running()];
+    assert_eq!(committable_count(&items, 0), 2);
+    // Card finishes → the whole prefix becomes committable.
+    items[2] = card_done();
+    assert_eq!(committable_count(&items, 2), 3);
+}
+
+#[test]
+fn committable_count_is_idempotent() {
+    let items = vec![user("hi"), assistant("hello", true)];
+    let n = committable_count(&items, 0);
+    assert_eq!(n, 2);
+    // Re-running from the returned watermark advances nothing.
+    assert_eq!(committable_count(&items, n), 2);
+}
+
+#[test]
+fn committable_count_clamps_committed_over_len() {
+    // Defensive: a stale watermark past the end never panics.
+    let items = vec![user("hi")];
+    assert_eq!(committable_count(&items, 5), 1);
+}
+
+#[test]
+fn undo_clamps_committed_watermark() {
+    let mut app = App::new();
+    app.transcript = vec![user("hi"), assistant("hello", true)];
+    app.committed = 2; // both flushed to scrollback
+    app.undo_last_user_turn();
+    // Transcript truncated to before the user prompt; watermark must
+    // not dangle past the new length.
+    assert_eq!(app.transcript.len(), 0);
+    assert_eq!(app.committed, 0);
+}
