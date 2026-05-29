@@ -12,7 +12,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
@@ -92,12 +92,13 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     // branch + session, dropped right-to-left when the terminal
     // narrows. The live activity indicator lives in its own row
     // above the input (see `draw_activity_strip`).
+    let theme = &app.theme;
 
     let mut left = vec![Span::styled(
         format!(" {} ", TITLE),
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(theme.selected_fg)
+            .bg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )];
 
@@ -118,14 +119,14 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     for field in visible {
         left.push(Span::styled(
             "  • ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.dim),
         ));
         left.extend(field);
     }
 
     let bar = Paragraph::new(Line::from(left))
         .block(Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD)))
-        .style(Style::default().bg(Color::Reset));
+        .style(Style::default().bg(theme.bg));
     f.render_widget(bar, area);
 }
 
@@ -147,14 +148,13 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
 /// `Vec<Span>` so it can carry styled sub-fragments (e.g. the
 /// token gauge's color-graded number).
 fn build_status_fields(app: &App) -> Vec<Vec<Span<'static>>> {
+    let theme = &app.theme;
     let mut out: Vec<Vec<Span<'static>>> = Vec::new();
     // Model (highest priority — kept on the narrowest terminals).
     if !app.status.model.is_empty() {
         out.push(vec![Span::styled(
             app.status.model.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         )]);
     }
     // Token gauge with color thresholds.
@@ -163,7 +163,7 @@ fn build_status_fields(app: &App) -> Vec<Vec<Span<'static>>> {
     if let Some(branch) = &app.status.branch {
         out.push(vec![Span::styled(
             branch.clone(),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(theme.user),
         )]);
     }
     // Session id (truncated; the full id is from
@@ -173,7 +173,7 @@ fn build_status_fields(app: &App) -> Vec<Vec<Span<'static>>> {
         let short: String = short.chars().rev().collect();
         out.push(vec![Span::styled(
             format!("session …{}", short),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.dim),
         )]);
     }
     out
@@ -183,6 +183,7 @@ fn build_status_fields(app: &App) -> Vec<Vec<Span<'static>>> {
 /// green < 60%, amber 60–85%, red > 85%. Falls through to a
 /// plain dash when no usage is recorded yet.
 fn token_gauge_field(app: &App) -> Vec<Span<'static>> {
+    let theme = &app.theme;
     let used = app
         .status
         .last_usage
@@ -191,25 +192,25 @@ fn token_gauge_field(app: &App) -> Vec<Span<'static>> {
     let ctx = app.status.ctx_window.max(1);
     let ratio = used as f32 / ctx as f32;
     let color = if ratio >= 0.85 {
-        Color::Red
+        theme.gauge_danger
     } else if ratio >= 0.60 {
-        Color::Yellow
+        theme.gauge_warn
     } else {
-        Color::Green
+        theme.gauge_ok
     };
     let used_label = format_count(used);
     let ctx_label = format_count(ctx);
     if used == 0 {
         vec![Span::styled(
             format!("— / {} tok", ctx_label),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.dim),
         )]
     } else {
         vec![
             Span::styled(used_label, Style::default().fg(color)),
             Span::styled(
                 format!(" / {} tok", ctx_label),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.dim),
             ),
         ]
     }
@@ -255,25 +256,26 @@ fn draw_activity_strip(f: &mut Frame, area: Rect, app: &App) {
 
 /// Left half of the activity strip — the mode label.
 pub(super) fn render_activity_strip_left(app: &App) -> Vec<Span<'static>> {
+    let theme = &app.theme;
     if app.approval().is_some() {
         return vec![Span::styled(
             " ⏸ awaiting approval ".to_string(),
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(theme.selected_fg)
+                .bg(theme.tool_running)
                 .add_modifier(Modifier::BOLD),
         )];
     }
     match &app.mode {
         Mode::Idle => vec![Span::styled(
             " — ".to_string(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.dim),
         )],
         Mode::Thinking { since } => {
             let secs = since.elapsed().as_secs_f32();
             vec![Span::styled(
                 format!(" {} thinking · {:.1}s ", spinner_glyph(secs), secs),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.tool_running),
             )]
         }
         Mode::Streaming { since } => {
@@ -281,7 +283,7 @@ pub(super) fn render_activity_strip_left(app: &App) -> Vec<Span<'static>> {
             vec![Span::styled(
                 format!(" ▶ streaming · {:.1}s ", secs),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme.tool_ok)
                     .add_modifier(Modifier::BOLD),
             )]
         }
@@ -290,7 +292,7 @@ pub(super) fn render_activity_strip_left(app: &App) -> Vec<Span<'static>> {
             vec![Span::styled(
                 format!(" {} running {} · {:.1}s ", spinner_glyph(secs), tool, secs),
                 Style::default()
-                    .fg(Color::Magenta)
+                    .fg(theme.user)
                     .add_modifier(Modifier::BOLD),
             )]
         }
@@ -310,7 +312,7 @@ pub(super) fn render_activity_strip_right(app: &App) -> Vec<Span<'static>> {
     vec![Span::styled(
         "Esc to cancel ".to_string(),
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(app.theme.dim)
             .add_modifier(Modifier::ITALIC),
     )]
 }
@@ -333,6 +335,7 @@ mod tests {
     use super::*;
     use crate::providers::Usage;
     use crate::tui::app::StatusModel;
+    use ratatui::style::Color;
 
     #[test]
     fn completion_line_with_no_positions_is_single_span() {
@@ -533,11 +536,12 @@ mod tests {
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
+    let theme = &app.theme;
     let busy = app.is_busy();
     let (border_color, title) = if busy {
-        (Color::DarkGray, " ▶ input (busy — Ctrl+C to cancel) ")
+        (theme.dim, " ▶ input (busy — Ctrl+C to cancel) ")
     } else {
-        (Color::Cyan, " ▶ input ")
+        (theme.border, " ▶ input ")
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -555,7 +559,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         let body = Paragraph::new(Line::from(Span::styled(
             "(waiting for response — Ctrl+C cancels)".to_string(),
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme.dim)
                 .add_modifier(Modifier::ITALIC),
         )));
         f.render_widget(body, inner);
@@ -615,14 +619,15 @@ fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect,
         height: popup_height,
     };
 
+    let theme = &app.theme;
     f.render_widget(Clear, popup_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(theme.border))
         .title(Line::from(Span::styled(
             " complete ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
     let inner = block.inner(popup_area);
@@ -645,17 +650,15 @@ fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect,
             let is_selected = i == menu.selected;
             let base_style = if is_selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(theme.selected_fg)
+                    .bg(theme.selected_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.fg)
             };
-            let match_style = if is_selected {
-                base_style.fg(Color::Magenta).add_modifier(Modifier::BOLD)
-            } else {
-                base_style.fg(Color::Yellow).add_modifier(Modifier::BOLD)
-            };
+            let match_style = base_style
+                .fg(theme.match_highlight)
+                .add_modifier(Modifier::BOLD);
             let prefix = if is_selected { "▌ " } else { "  " };
             let positions = menu.match_positions.get(i).cloned().unwrap_or_default();
             build_completion_line(prefix, name, &positions, base_style, match_style)
