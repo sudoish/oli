@@ -26,6 +26,11 @@ pub enum CompletionKind {
 pub struct CompletionMenu {
     pub kind: CompletionKind,
     pub candidates: Vec<String>,
+    /// Char-index positions inside each candidate's displayed label
+    /// (`candidates[i]`) that contributed to the fuzzy match. Used
+    /// by the popup renderer to highlight matched characters.
+    /// Empty inner vec = no highlight (empty query or no match info).
+    pub match_positions: Vec<Vec<u32>>,
     pub selected: usize,
     /// Byte offset on the active line where the trigger char
     /// (`/` or `@`) lives. The substring from there to the

@@ -335,6 +335,34 @@ mod tests {
     use crate::tui::app::StatusModel;
 
     #[test]
+    fn completion_line_with_no_positions_is_single_span() {
+        let base = Style::default().fg(Color::White);
+        let highlight = Style::default().fg(Color::Yellow);
+        let line = build_completion_line("  ", "sessions", &[], base, highlight);
+        // Prefix span + body span = 2.
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[1].content, "sessions");
+    }
+
+    #[test]
+    fn completion_line_splits_around_match_positions() {
+        let base = Style::default().fg(Color::White);
+        let highlight = Style::default().fg(Color::Yellow);
+        // Highlight chars 0 ("s") and 4 ("i") in "sessions" → "s" + "essi" + "ons"... but
+        // actually 4 maps to "i" → so we expect:
+        //   prefix("  ") + match("s") + base("ess") + match("i") + base("ons")
+        let line = build_completion_line("  ", "sessions", &[0, 4], base, highlight);
+        assert_eq!(line.spans.len(), 5);
+        assert_eq!(line.spans[0].content, "  ");
+        assert_eq!(line.spans[1].content, "s");
+        assert_eq!(line.spans[1].style, highlight);
+        assert_eq!(line.spans[2].content, "ess");
+        assert_eq!(line.spans[3].content, "i");
+        assert_eq!(line.spans[3].style, highlight);
+        assert_eq!(line.spans[4].content, "ons");
+    }
+
+    #[test]
     fn format_count_renders_units_at_thresholds() {
         assert_eq!(format_count(42), "42");
         assert_eq!(format_count(9_999), "9999");
@@ -615,7 +643,7 @@ fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect,
         .take(visible as usize)
         .map(|(i, name)| {
             let is_selected = i == menu.selected;
-            let style = if is_selected {
+            let base_style = if is_selected {
                 Style::default()
                     .fg(Color::Black)
                     .bg(Color::Cyan)
@@ -623,16 +651,49 @@ fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect,
             } else {
                 Style::default().fg(Color::White)
             };
-            Line::from(Span::styled(
-                if is_selected {
-                    format!("▌ {}", name)
-                } else {
-                    format!("  {}", name)
-                },
-                style,
-            ))
+            let match_style = if is_selected {
+                base_style.fg(Color::Magenta).add_modifier(Modifier::BOLD)
+            } else {
+                base_style.fg(Color::Yellow).add_modifier(Modifier::BOLD)
+            };
+            let prefix = if is_selected { "▌ " } else { "  " };
+            let positions = menu.match_positions.get(i).cloned().unwrap_or_default();
+            build_completion_line(prefix, name, &positions, base_style, match_style)
         })
         .collect();
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
+}
+
+/// Build a `Line` for one completion row, with characters at
+/// `match_positions` (char indices into `name`) styled with
+/// `match_style` and everything else with `base_style`.
+fn build_completion_line<'a>(
+    prefix: &'a str,
+    name: &'a str,
+    match_positions: &[u32],
+    base_style: Style,
+    match_style: Style,
+) -> Line<'a> {
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    spans.push(Span::styled(prefix.to_string(), base_style));
+    if match_positions.is_empty() {
+        spans.push(Span::styled(name.to_string(), base_style));
+        return Line::from(spans);
+    }
+    let mut buf = String::new();
+    let mut buf_style = base_style;
+    for (ci, ch) in name.chars().enumerate() {
+        let is_match = match_positions.contains(&(ci as u32));
+        let style = if is_match { match_style } else { base_style };
+        if style != buf_style && !buf.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut buf), buf_style));
+        }
+        buf_style = style;
+        buf.push(ch);
+    }
+    if !buf.is_empty() {
+        spans.push(Span::styled(buf, buf_style));
+    }
+    Line::from(spans)
 }

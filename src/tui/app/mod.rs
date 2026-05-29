@@ -516,6 +516,14 @@ impl App {
             self.completion = None;
             return;
         }
+        let match_positions: Vec<Vec<u32>> = if ctx.query.is_empty() {
+            candidates.iter().map(|_| Vec::new()).collect()
+        } else {
+            candidates
+                .iter()
+                .map(|c| crate::tui::fuzzy::match_positions(&ctx.query, c))
+                .collect()
+        };
         let prior_selected = self
             .completion
             .as_ref()
@@ -525,6 +533,7 @@ impl App {
         self.completion = Some(CompletionMenu {
             kind: ctx.kind,
             candidates,
+            match_positions,
             selected: prior_selected,
             replace_start_byte: ctx.replace_start_byte,
         });
