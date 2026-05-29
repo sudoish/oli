@@ -215,7 +215,14 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                 state,
                 ..
             } => {
-                lines.push(render_tool_card_line(tool, args_preview, state, theme));
+                let focused = app.focused_card_idx == Some(i);
+                lines.push(render_tool_card_line(
+                    tool,
+                    args_preview,
+                    state,
+                    theme,
+                    focused,
+                ));
                 lines.extend(render_tool_card_detail(tool, state, theme));
             }
         }
@@ -438,6 +445,7 @@ fn render_tool_card_line(
     args_preview: &str,
     state: &ToolCardState,
     theme: &Theme,
+    focused: bool,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let arrow_color = match state {
@@ -446,10 +454,15 @@ fn render_tool_card_line(
         ToolCardState::Done { ok: true, .. } => theme.tool_ok,
         ToolCardState::Done { ok: false, .. } => theme.tool_err,
     };
+    // Y4: focused cards get a leading ▍ sidebar in the accent color
+    // — the same focus glyph used elsewhere in the TUI — so the
+    // user can see which card the {/} cursor is on and `Enter`
+    // will expand/collapse.
+    let leader = if focused { "▍ → " } else { "  → " };
     spans.push(Span::styled(
-        "  → ",
+        leader.to_string(),
         Style::default()
-            .fg(arrow_color)
+            .fg(if focused { theme.accent } else { arrow_color })
             .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::styled(
@@ -528,18 +541,63 @@ fn render_tool_card_detail(
                 .collect()
         }
         ToolCardState::Running { .. } => Vec::new(),
-        ToolCardState::Done { summary, ok, .. } => {
-            if summary.is_empty() {
-                return Vec::new();
+        ToolCardState::Done {
+            summary,
+            ok,
+            full_output,
+            expanded,
+            ..
+        } => {
+            if *expanded {
+                expanded_output_lines(full_output, theme, *ok)
+            } else if summary.is_empty() {
+                Vec::new()
+            } else {
+                vec![Line::from(Span::styled(
+                    format!("    {}", summary),
+                    Style::default()
+                        .fg(if *ok { theme.dim } else { theme.diff_removed })
+                        .add_modifier(Modifier::ITALIC),
+                ))]
             }
-            vec![Line::from(Span::styled(
-                format!("    {}", summary),
-                Style::default()
-                    .fg(if *ok { theme.dim } else { theme.diff_removed })
-                    .add_modifier(Modifier::ITALIC),
-            ))]
         }
     }
+}
+
+/// Y4: cap an expanded card's body at 40 lines and emit each line
+/// dim-indented under the header, with a trailing "+N more" hint
+/// when the cap was hit. Empty output renders a single italic
+/// "(no output)" line so the expand gesture isn't silent.
+const EXPANDED_LINE_CAP: usize = 40;
+
+fn expanded_output_lines(full_output: &str, theme: &Theme, ok: bool) -> Vec<Line<'static>> {
+    let trimmed = full_output.trim_end_matches('\n');
+    if trimmed.is_empty() {
+        return vec![Line::from(Span::styled(
+            "    (no output)".to_string(),
+            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+        ))];
+    }
+    let all: Vec<&str> = trimmed.lines().collect();
+    let total = all.len();
+    let body_color = if ok { theme.fg } else { theme.diff_removed };
+    let mut out: Vec<Line<'static>> = all
+        .iter()
+        .take(EXPANDED_LINE_CAP)
+        .map(|s| {
+            Line::from(vec![
+                Span::raw("    ".to_string()),
+                Span::styled(s.to_string(), Style::default().fg(body_color)),
+            ])
+        })
+        .collect();
+    if total > EXPANDED_LINE_CAP {
+        out.push(Line::from(Span::styled(
+            format!("    … +{} more lines", total - EXPANDED_LINE_CAP),
+            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+        )));
+    }
+    out
 }
 
 /// Extract up to 6 lines of streamed content from partial JSON for
@@ -753,6 +811,8 @@ mod tests {
                 duration: Duration::ZERO,
                 summary: "ok".into(),
                 ok: true,
+                full_output: String::new(),
+                expanded: false,
             },
         });
         let lines = build_transcript_lines(&app, 40);
@@ -1098,9 +1158,145 @@ mod tests {
             duration: Duration::from_millis(120),
             summary: "wrote 3 lines".into(),
             ok: true,
+            full_output: String::new(),
+            expanded: false,
         };
         let detail = render_tool_card_detail("Write", &state, &theme);
         assert_eq!(detail.len(), 1);
         assert_eq!(line_text(&detail[0]), "    wrote 3 lines");
+    }
+
+    #[test]
+    fn render_tool_card_line_focused_renders_sidebar_glyph() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "ok".into(),
+            ok: true,
+            full_output: String::new(),
+            expanded: false,
+        };
+        let unfocused = render_tool_card_line("Read", "x", &state, &theme, false);
+        let focused = render_tool_card_line("Read", "x", &state, &theme, true);
+        assert!(line_text(&unfocused).starts_with("  → "));
+        assert!(line_text(&focused).starts_with("▍ → "));
+    }
+
+    #[test]
+    fn render_tool_card_detail_expanded_done_shows_full_output_indented() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "3 lines".into(),
+            ok: true,
+            full_output: "line1\nline2\nline3".into(),
+            expanded: true,
+        };
+        let detail = render_tool_card_detail("Read", &state, &theme);
+        assert_eq!(detail.len(), 3);
+        assert_eq!(line_text(&detail[0]), "    line1");
+        assert_eq!(line_text(&detail[1]), "    line2");
+        assert_eq!(line_text(&detail[2]), "    line3");
+    }
+
+    #[test]
+    fn render_tool_card_detail_expanded_caps_at_40_lines_with_hint() {
+        let theme = Theme::dark();
+        let body: String = (1..=50)
+            .map(|i| format!("L{}\n", i))
+            .collect();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "50 lines".into(),
+            ok: true,
+            full_output: body,
+            expanded: true,
+        };
+        let detail = render_tool_card_detail("Read", &state, &theme);
+        // 40 content lines + 1 hint line.
+        assert_eq!(detail.len(), 41);
+        assert_eq!(line_text(&detail[0]), "    L1");
+        assert_eq!(line_text(&detail[39]), "    L40");
+        assert_eq!(line_text(&detail[40]), "    … +10 more lines");
+    }
+
+    #[test]
+    fn render_tool_card_detail_expanded_empty_output_shows_placeholder() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "ok".into(),
+            ok: true,
+            full_output: String::new(),
+            expanded: true,
+        };
+        let detail = render_tool_card_detail("Bash", &state, &theme);
+        assert_eq!(detail.len(), 1);
+        assert_eq!(line_text(&detail[0]), "    (no output)");
+    }
+
+    #[test]
+    fn render_tool_card_detail_collapsed_done_still_shows_summary_when_full_output_present() {
+        // The summary line stays visible while the card is
+        // collapsed — full_output is hidden until the user expands.
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "12 lines".into(),
+            ok: true,
+            full_output: "a\nb\nc".into(),
+            expanded: false,
+        };
+        let detail = render_tool_card_detail("Read", &state, &theme);
+        assert_eq!(detail.len(), 1);
+        assert_eq!(line_text(&detail[0]), "    12 lines");
+    }
+
+    #[test]
+    fn build_transcript_lines_renders_focused_card_with_sidebar() {
+        let mut app = App::new();
+        app.transcript.clear();
+        app.transcript.push(TranscriptItem::ToolCard {
+            tool: "Read".into(),
+            args_preview: "a.rs".into(),
+            state: ToolCardState::Done {
+                duration: Duration::from_millis(1),
+                summary: "1 line".into(),
+                ok: true,
+                full_output: "hello".into(),
+                expanded: false,
+            },
+        });
+        // Sanity: unfocused renders the `  → ` leader.
+        let lines = build_transcript_lines(&app, 40);
+        assert!(lines.iter().any(|l| line_text(l).starts_with("  → ")));
+        // Focus the card and re-render: leader flips to `▍ → `.
+        app.focused_card_idx = Some(0);
+        let lines = build_transcript_lines(&app, 40);
+        assert!(lines.iter().any(|l| line_text(l).starts_with("▍ → ")));
+    }
+
+    #[test]
+    fn build_transcript_lines_renders_expanded_full_output_under_focused_card() {
+        let mut app = App::new();
+        app.transcript.clear();
+        app.transcript.push(TranscriptItem::ToolCard {
+            tool: "Read".into(),
+            args_preview: "a.rs".into(),
+            state: ToolCardState::Done {
+                duration: Duration::from_millis(1),
+                summary: "3 lines".into(),
+                ok: true,
+                full_output: "alpha\nbeta\ngamma".into(),
+                expanded: true,
+            },
+        });
+        let lines = build_transcript_lines(&app, 40);
+        let texts: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(texts.iter().any(|t| t == "    alpha"));
+        assert!(texts.iter().any(|t| t == "    beta"));
+        assert!(texts.iter().any(|t| t == "    gamma"));
+        // Summary is NOT rendered when expanded — full_output replaces it.
+        assert!(!texts.iter().any(|t| t == "    3 lines"));
     }
 }

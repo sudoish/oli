@@ -44,6 +44,11 @@ pub enum ToolCardState {
         duration: Duration,
         summary: String,
         ok: bool,
+        /// Phase Y4: captured tool output (truncated to a sane cap
+        /// at the hook boundary; `expanded` toggles whether the
+        /// renderer shows it under the card).
+        full_output: String,
+        expanded: bool,
     },
 }
 
@@ -198,13 +203,22 @@ impl App {
         self.note_arrival(2);
     }
 
-    pub fn on_tool_done(&mut self, id: u64, duration: Duration, summary: String, ok: bool) {
+    pub fn on_tool_done(
+        &mut self,
+        id: u64,
+        duration: Duration,
+        summary: String,
+        ok: bool,
+        full_output: String,
+    ) {
         if let Some(idx) = self.active_tools.remove(&id) {
             if let Some(TranscriptItem::ToolCard { state, .. }) = self.transcript.get_mut(idx) {
                 *state = ToolCardState::Done {
                     duration,
                     summary,
                     ok,
+                    full_output,
+                    expanded: false,
                 };
             }
         }
@@ -415,6 +429,91 @@ impl App {
                 self.scroll_manual = Some(idx);
             }
         }
+    }
+
+    // ---------- Phase Y4: tool-card focus + expand ----------
+
+    /// Transcript indices of every Done tool card, in document
+    /// order. Streaming and Running cards are skipped — only
+    /// finished cards have anything meaningful to expand.
+    fn done_card_indices(&self) -> Vec<usize> {
+        self.transcript
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| match item {
+                TranscriptItem::ToolCard {
+                    state: ToolCardState::Done { .. },
+                    ..
+                } => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// `{` — focus the previous Done card. With no current focus,
+    /// lands on the *last* card (most recent). Wraps to the last
+    /// card on overshoot to make repeated taps feel natural.
+    pub fn focus_prev_card(&mut self) {
+        let cards = self.done_card_indices();
+        if cards.is_empty() {
+            return;
+        }
+        let new_idx = match self.focused_card_idx {
+            None => *cards.last().unwrap(),
+            Some(current) => {
+                let pos = cards.iter().position(|&i| i == current);
+                match pos {
+                    Some(0) | None => *cards.last().unwrap(),
+                    Some(p) => cards[p - 1],
+                }
+            }
+        };
+        self.focused_card_idx = Some(new_idx);
+    }
+
+    /// `}` — focus the next Done card. With no current focus,
+    /// lands on the *first* card. Wraps to the first card on
+    /// overshoot.
+    pub fn focus_next_card(&mut self) {
+        let cards = self.done_card_indices();
+        if cards.is_empty() {
+            return;
+        }
+        let new_idx = match self.focused_card_idx {
+            None => cards[0],
+            Some(current) => {
+                let pos = cards.iter().position(|&i| i == current);
+                match pos {
+                    Some(p) if p + 1 < cards.len() => cards[p + 1],
+                    _ => cards[0],
+                }
+            }
+        };
+        self.focused_card_idx = Some(new_idx);
+    }
+
+    /// `Esc` (when a card is focused) — clear the focus.
+    pub fn clear_card_focus(&mut self) {
+        self.focused_card_idx = None;
+    }
+
+    /// `Enter` (with input empty + a focused Done card) — toggle
+    /// the focused card's `expanded` flag. No-op if the focus
+    /// points at something that's no longer Done (e.g. a card got
+    /// reset; defensive).
+    pub fn toggle_focused_card_expanded(&mut self) -> bool {
+        let Some(idx) = self.focused_card_idx else {
+            return false;
+        };
+        let Some(TranscriptItem::ToolCard {
+            state: ToolCardState::Done { expanded, .. },
+            ..
+        }) = self.transcript.get_mut(idx)
+        else {
+            return false;
+        };
+        *expanded = !*expanded;
+        true
     }
 
     /// Record the current scroll position on the back-stack. Called

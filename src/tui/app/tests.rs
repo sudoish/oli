@@ -297,7 +297,7 @@ fn tool_done_returns_to_thinking_when_no_tools_pending() {
     let mut app = App::new();
     app.on_turn_started();
     app.on_tool_start(1, "grep".into(), "".into());
-    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true);
+    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true, String::new());
     assert!(matches!(app.mode, Mode::Thinking { .. }));
 }
 
@@ -307,7 +307,7 @@ fn tool_done_stays_in_tool_running_when_other_tools_pending() {
     app.on_turn_started();
     app.on_tool_start(1, "grep".into(), "".into());
     app.on_tool_start(2, "read".into(), "".into());
-    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true);
+    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true, String::new());
     // Tool 2 is still running; mode should remain ToolRunning.
     assert!(matches!(app.mode, Mode::ToolRunning { .. }));
 }
@@ -317,7 +317,7 @@ fn content_chunk_after_tool_done_flips_to_streaming() {
     let mut app = App::new();
     app.on_turn_started();
     app.on_tool_start(1, "grep".into(), "".into());
-    app.on_tool_done(1, Duration::from_millis(1), "ok".into(), true);
+    app.on_tool_done(1, Duration::from_millis(1), "ok".into(), true, String::new());
     assert!(matches!(app.mode, Mode::Thinking { .. }));
     app.on_content_chunk("here's what I found");
     assert!(matches!(app.mode, Mode::Streaming { .. }));
@@ -425,7 +425,7 @@ fn tool_start_upgrades_matching_streaming_card_to_running() {
         _ => panic!("expected ToolCard at slot {}", streaming_idx),
     }
     // ToolDone for id=7 must close this exact card.
-    app.on_tool_done(7, Duration::from_millis(1), "ok".into(), true);
+    app.on_tool_done(7, Duration::from_millis(1), "ok".into(), true, String::new());
     match &app.transcript[streaming_idx] {
         TranscriptItem::ToolCard { state, .. } => {
             assert!(matches!(state, ToolCardState::Done { .. }));
@@ -457,7 +457,7 @@ fn assistant_continuation_after_tool_creates_a_new_item() {
     app.on_turn_started();
     app.on_content_chunk("first ");
     app.on_tool_start(1, "Read".into(), "x".into());
-    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true);
+    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true, String::new());
     app.on_content_chunk("second");
     let bodies: Vec<&str> = app
         .transcript
@@ -773,7 +773,7 @@ fn undo_pops_the_last_user_prompt_and_returns_its_body() {
     app.on_content_chunk("...");
     // Simulate a tool round mid-turn.
     app.on_tool_start(1, "Read".into(), "x".into());
-    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true);
+    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true, String::new());
     app.on_content_chunk("more");
     app.on_turn_finished("");
 
@@ -910,6 +910,159 @@ fn copy_fallback_close_clears_overlay() {
     assert!(app.copy_fallback().is_some());
     app.close_copy_fallback();
     assert!(app.copy_fallback().is_none());
+}
+
+// ---------- Phase Y4: card focus + expand ----------
+
+fn push_done_card(app: &mut App, tool: &str, full_output: &str) {
+    use crate::tui::app::transcript::ToolCardState;
+    app.transcript.push(TranscriptItem::ToolCard {
+        tool: tool.into(),
+        args_preview: "".into(),
+        state: ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "ok".into(),
+            ok: true,
+            full_output: full_output.into(),
+            expanded: false,
+        },
+    });
+}
+
+#[test]
+fn focus_prev_card_lands_on_last_when_no_focus() {
+    let mut app = App::new();
+    app.transcript.clear();
+    push_done_card(&mut app, "Read", "");
+    push_done_card(&mut app, "Bash", "");
+    push_done_card(&mut app, "Edit", "");
+    app.focus_prev_card();
+    assert_eq!(app.focused_card_idx, Some(2));
+}
+
+#[test]
+fn focus_next_card_lands_on_first_when_no_focus() {
+    let mut app = App::new();
+    app.transcript.clear();
+    push_done_card(&mut app, "Read", "");
+    push_done_card(&mut app, "Bash", "");
+    app.focus_next_card();
+    assert_eq!(app.focused_card_idx, Some(0));
+}
+
+#[test]
+fn focus_next_card_advances_through_cards_then_wraps() {
+    let mut app = App::new();
+    app.transcript.clear();
+    push_done_card(&mut app, "A", "");
+    push_done_card(&mut app, "B", "");
+    push_done_card(&mut app, "C", "");
+    app.focus_next_card();
+    assert_eq!(app.focused_card_idx, Some(0));
+    app.focus_next_card();
+    assert_eq!(app.focused_card_idx, Some(1));
+    app.focus_next_card();
+    assert_eq!(app.focused_card_idx, Some(2));
+    app.focus_next_card();
+    assert_eq!(app.focused_card_idx, Some(0));
+}
+
+#[test]
+fn focus_prev_card_walks_backward_then_wraps() {
+    let mut app = App::new();
+    app.transcript.clear();
+    push_done_card(&mut app, "A", "");
+    push_done_card(&mut app, "B", "");
+    push_done_card(&mut app, "C", "");
+    app.focus_prev_card();
+    assert_eq!(app.focused_card_idx, Some(2));
+    app.focus_prev_card();
+    assert_eq!(app.focused_card_idx, Some(1));
+    app.focus_prev_card();
+    assert_eq!(app.focused_card_idx, Some(0));
+    app.focus_prev_card();
+    assert_eq!(app.focused_card_idx, Some(2));
+}
+
+#[test]
+fn focus_nav_skips_non_done_cards_and_interleaves_with_other_items() {
+    use crate::tui::app::transcript::ToolCardState;
+    let mut app = App::new();
+    app.transcript.clear();
+    push_done_card(&mut app, "Read", "");
+    app.transcript.push(TranscriptItem::Assistant {
+        body: "thinking".into(),
+        done: true,
+    });
+    // A Running card — should be skipped.
+    app.transcript.push(TranscriptItem::ToolCard {
+        tool: "Bash".into(),
+        args_preview: "".into(),
+        state: ToolCardState::Running {
+            started_at: std::time::Instant::now(),
+        },
+    });
+    push_done_card(&mut app, "Write", "");
+    app.focus_next_card();
+    assert_eq!(app.focused_card_idx, Some(0)); // Read
+    app.focus_next_card();
+    assert_eq!(app.focused_card_idx, Some(3)); // Write — skipped Running
+}
+
+#[test]
+fn focus_nav_no_op_when_no_done_cards() {
+    let mut app = App::new();
+    app.transcript.clear();
+    app.focus_next_card();
+    assert_eq!(app.focused_card_idx, None);
+    app.focus_prev_card();
+    assert_eq!(app.focused_card_idx, None);
+}
+
+#[test]
+fn toggle_focused_card_expanded_flips_state() {
+    use crate::tui::app::transcript::ToolCardState;
+    let mut app = App::new();
+    app.transcript.clear();
+    push_done_card(&mut app, "Read", "line1\nline2");
+    app.focus_next_card();
+    assert!(app.toggle_focused_card_expanded());
+    let expanded_after_first = matches!(
+        &app.transcript[0],
+        TranscriptItem::ToolCard {
+            state: ToolCardState::Done { expanded: true, .. },
+            ..
+        }
+    );
+    assert!(expanded_after_first);
+    assert!(app.toggle_focused_card_expanded());
+    let expanded_after_second = matches!(
+        &app.transcript[0],
+        TranscriptItem::ToolCard {
+            state: ToolCardState::Done { expanded: false, .. },
+            ..
+        }
+    );
+    assert!(expanded_after_second);
+}
+
+#[test]
+fn toggle_focused_card_expanded_no_op_without_focus() {
+    let mut app = App::new();
+    app.transcript.clear();
+    push_done_card(&mut app, "Read", "x");
+    assert!(!app.toggle_focused_card_expanded());
+}
+
+#[test]
+fn clear_card_focus_drops_the_focus_pointer() {
+    let mut app = App::new();
+    app.transcript.clear();
+    push_done_card(&mut app, "Read", "");
+    app.focus_next_card();
+    assert_eq!(app.focused_card_idx, Some(0));
+    app.clear_card_focus();
+    assert_eq!(app.focused_card_idx, None);
 }
 
 #[test]

@@ -314,7 +314,7 @@ pub(super) fn render_activity_strip_right(app: &App) -> Vec<Span<'static>> {
     if app.approval().is_some() {
         return Vec::new();
     }
-    let text = context_hint_text(&app.mode);
+    let text = context_hint_text(app);
     if text.is_empty() {
         return Vec::new();
     }
@@ -329,9 +329,15 @@ pub(super) fn render_activity_strip_right(app: &App) -> Vec<Span<'static>> {
 /// Pick a context-appropriate hint line for the right-side of the
 /// activity strip (X4). Idle shows navigation hints; Streaming /
 /// ToolRunning surface the cancel keys. Empty string suppresses.
-pub(super) fn context_hint_text(mode: &Mode) -> &'static str {
-    match mode {
-        Mode::Idle => "[/]: turns · Ctrl+F: search · Ctrl+R: history",
+///
+/// Y4: when a tool card is focused, swap the Idle hint for one
+/// that surfaces the expand/dismiss keys.
+pub(super) fn context_hint_text(app: &App) -> &'static str {
+    if app.focused_card_idx.is_some() && matches!(app.mode, Mode::Idle) {
+        return "Enter: expand · {/}: cards · Esc: clear focus";
+    }
+    match app.mode {
+        Mode::Idle => "[/]: turns · {/}: cards · Ctrl+F: search",
         Mode::Thinking { .. } | Mode::Streaming { .. } => "Esc to cancel",
         Mode::ToolRunning { .. } => "Esc cancel · Ctrl+C hard cancel",
     }
@@ -695,6 +701,22 @@ mod tests {
         let spans = render_search_bar_right(&app);
         let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(combined.contains("1/3"), "got: {}", combined);
+    }
+
+    #[test]
+    fn context_hint_idle_advertises_card_keys() {
+        let app = app_with_status(StatusModel::default());
+        let hint = context_hint_text(&app);
+        assert!(hint.contains("{/}"), "got: {}", hint);
+    }
+
+    #[test]
+    fn context_hint_with_focused_card_swaps_to_expand_legend() {
+        let mut app = app_with_status(StatusModel::default());
+        app.focused_card_idx = Some(0);
+        let hint = context_hint_text(&app);
+        assert!(hint.contains("Enter: expand"), "got: {}", hint);
+        assert!(hint.contains("Esc"), "got: {}", hint);
     }
 }
 
