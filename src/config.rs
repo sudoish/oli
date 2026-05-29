@@ -69,6 +69,23 @@ pub struct Config {
     /// each entry the user adds becomes a connected server at startup.
     #[serde(default)]
     pub mcp: McpConfig,
+
+    /// `[ui]` section — terminal-UI preferences shared by the TUI and
+    /// (where relevant) the line-mode REPL. Optional; defaults match
+    /// the pre-W1 behavior.
+    #[serde(default)]
+    pub ui: UiConfig,
+}
+
+/// `[ui]` config block.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct UiConfig {
+    /// Which viewport mode the TUI should pick. One of `"auto"`,
+    /// `"fullscreen"`, `"inline"`. `"auto"` defers to capability
+    /// detection (currently always `"fullscreen"`; Phase W2 widens
+    /// this to choose `"inline"` inside buffer-terminals).
+    #[serde(default)]
+    pub viewport: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -232,6 +249,7 @@ impl Config {
             caps: Vec::new(),
             agent: AgentConfig::default(),
             mcp: McpConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 

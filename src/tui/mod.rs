@@ -53,13 +53,16 @@ use crate::tui::app::{Mode, SubmitAction};
 use crate::tui::approver::{PendingApproval, TuiApprover};
 use crate::tui::driver::AgentCommand;
 use crate::tui::event::{ApprovalResponse, UiEvent};
-use crate::tui::terminal::TerminalGuard;
+use crate::tui::terminal::{TerminalGuard, ViewportMode};
+
+pub use crate::tui::terminal::{ViewportChoice, ViewportMode as Viewport, resolve_mode};
 
 pub async fn run(
     mut agent: Agent,
     plugin_slashes: Vec<Box<dyn SlashCommand>>,
     reloader: Option<Arc<PluginReloader>>,
     session_id: Option<String>,
+    viewport: ViewportMode,
 ) -> Result<()> {
     // Snapshot identity fields for the status bar before the
     // agent moves into the driver task. Branch is queried once
@@ -74,7 +77,11 @@ pub async fn run(
         session_usage: Default::default(),
     };
 
-    let mut guard = TerminalGuard::enter()
+    // Mouse capture is meaningful only in fullscreen mode for W1;
+    // Phase W3 widens this so inline mode can opt in via `[ui].mouse`
+    // or `/mouse on`. Default: capture in fullscreen, off in inline.
+    let mouse_capture = matches!(viewport, ViewportMode::Fullscreen);
+    let mut guard = TerminalGuard::enter(viewport, mouse_capture)
         .map_err(|e| AgentError::Provider(format!("tui init: {}", e)))?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<UiEvent>();
