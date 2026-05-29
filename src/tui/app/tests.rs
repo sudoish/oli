@@ -324,6 +324,134 @@ fn content_chunk_after_tool_done_flips_to_streaming() {
 }
 
 #[test]
+fn tool_args_chunk_pushes_streaming_card_on_first_chunk() {
+    // Phase Y2: while the model is streaming a tool call (before
+    // PreToolUse dispatches it), we surface a streaming card carrying
+    // the accumulated JSON so the renderer can show a diff peek.
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_content_chunk("I'll edit foo.rs");
+    app.on_tool_args_chunk("toolu_1".into(), "Edit".into(), "{\"file_path".into());
+    match app.transcript.last().unwrap() {
+        TranscriptItem::ToolCard { tool, state, .. } => {
+            assert_eq!(tool, "Edit");
+            match state {
+                ToolCardState::Streaming {
+                    provider_tool_id,
+                    accumulated_json,
+                } => {
+                    assert_eq!(provider_tool_id, "toolu_1");
+                    assert_eq!(accumulated_json, "{\"file_path");
+                }
+                _ => panic!("expected Streaming state"),
+            }
+        }
+        _ => panic!("expected a ToolCard, got {:?}", app.transcript.last()),
+    }
+    // The active assistant item should be sealed off when streaming
+    // tool-args begins (same as on_tool_start), so the next content
+    // chunk starts a fresh Assistant item.
+    assert!(app.active_assistant.is_none());
+}
+
+#[test]
+fn tool_args_chunk_updates_accumulated_json_on_subsequent_chunks() {
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_args_chunk("toolu_1".into(), "Edit".into(), "{\"file_path".into());
+    app.on_tool_args_chunk(
+        "toolu_1".into(),
+        "Edit".into(),
+        "{\"file_path\":\"src/foo.rs\"".into(),
+    );
+    // One card, with the updated accumulated_json — no duplicate push.
+    let cards: Vec<_> = app
+        .transcript
+        .iter()
+        .filter(|i| matches!(i, TranscriptItem::ToolCard { .. }))
+        .collect();
+    assert_eq!(cards.len(), 1);
+    match cards[0] {
+        TranscriptItem::ToolCard {
+            state: ToolCardState::Streaming { accumulated_json, .. },
+            ..
+        } => {
+            assert_eq!(accumulated_json, "{\"file_path\":\"src/foo.rs\"");
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn tool_args_chunk_separate_provider_ids_create_separate_cards() {
+    // The model can compose multiple tool calls in a single turn; each
+    // streams under its own provider_tool_id and gets its own card.
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_args_chunk("toolu_1".into(), "Edit".into(), "{".into());
+    app.on_tool_args_chunk("toolu_2".into(), "Write".into(), "{".into());
+    let cards: Vec<_> = app
+        .transcript
+        .iter()
+        .filter(|i| matches!(i, TranscriptItem::ToolCard { .. }))
+        .collect();
+    assert_eq!(cards.len(), 2);
+}
+
+#[test]
+fn tool_start_upgrades_matching_streaming_card_to_running() {
+    // After streaming completes, the agent dispatches the tool and
+    // ToolStart fires. The matching Streaming card should upgrade
+    // in-place — same transcript index, state flips to Running, the
+    // active_tools map is registered so the eventual ToolDone finds
+    // the right slot.
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_args_chunk("toolu_1".into(), "Edit".into(), "{\"file_path".into());
+    let streaming_idx = app.transcript.len() - 1;
+    let len_before = app.transcript.len();
+
+    app.on_tool_start(7, "Edit".into(), "file_path=src/foo.rs".into());
+
+    assert_eq!(app.transcript.len(), len_before, "no duplicate push");
+    match &app.transcript[streaming_idx] {
+        TranscriptItem::ToolCard { tool, state, .. } => {
+            assert_eq!(tool, "Edit");
+            assert!(
+                matches!(state, ToolCardState::Running { .. }),
+                "state should have flipped to Running",
+            );
+        }
+        _ => panic!("expected ToolCard at slot {}", streaming_idx),
+    }
+    // ToolDone for id=7 must close this exact card.
+    app.on_tool_done(7, Duration::from_millis(1), "ok".into(), true);
+    match &app.transcript[streaming_idx] {
+        TranscriptItem::ToolCard { state, .. } => {
+            assert!(matches!(state, ToolCardState::Done { .. }));
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn tool_start_with_no_streaming_card_still_pushes_running_card() {
+    // Providers that don't emit ToolArgsChunk (or models that compose
+    // tool calls atomically) still work — no Streaming card means the
+    // existing push-new-Running-card path runs unchanged.
+    let mut app = App::new();
+    app.on_turn_started();
+    app.on_tool_start(1, "Read".into(), "file_path=x".into());
+    match app.transcript.last().unwrap() {
+        TranscriptItem::ToolCard { tool, state, .. } => {
+            assert_eq!(tool, "Read");
+            assert!(matches!(state, ToolCardState::Running { .. }));
+        }
+        _ => panic!(),
+    }
+}
+
+#[test]
 fn assistant_continuation_after_tool_creates_a_new_item() {
     let mut app = App::new();
     app.on_turn_started();

@@ -443,6 +443,7 @@ fn render_tool_card_line(
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let arrow_color = match state {
+        ToolCardState::Streaming { .. } => theme.tool_running,
         ToolCardState::Running { .. } => theme.tool_running,
         ToolCardState::Done { ok: true, .. } => theme.tool_ok,
         ToolCardState::Done { ok: false, .. } => theme.tool_err,
@@ -466,6 +467,15 @@ fn render_tool_card_line(
     ));
     spans.push(Span::raw("  "));
     match state {
+        ToolCardState::Streaming { .. } => {
+            // Card is mid-stream — show a single static glyph + the
+            // word "streaming". No timer because the call hasn't been
+            // dispatched yet; PreToolUse hasn't fired.
+            spans.push(Span::styled(
+                "⠿ streaming…",
+                Style::default().fg(theme.tool_running),
+            ));
+        }
         ToolCardState::Running { started_at } => {
             let elapsed = started_at.elapsed().as_secs_f32();
             spans.push(Span::styled(
@@ -493,6 +503,9 @@ fn render_tool_card_line(
 /// header.
 fn render_tool_card_detail(state: &ToolCardState, theme: &Theme) -> Option<Line<'static>> {
     match state {
+        // Slice 3 swaps this branch for a 6-line diff peek. For now,
+        // streaming cards render with the header only.
+        ToolCardState::Streaming { .. } => None,
         ToolCardState::Running { .. } => None,
         ToolCardState::Done { summary, ok, .. } => {
             if summary.is_empty() {

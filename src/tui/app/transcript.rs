@@ -29,6 +29,16 @@ pub enum TranscriptItem {
 
 #[derive(Debug, Clone)]
 pub enum ToolCardState {
+    /// Phase Y2: the model is mid-stream composing this tool call;
+    /// `accumulated_json` is the raw JSON-so-far that the renderer
+    /// parses lenience-style for the diff peek. `provider_tool_id`
+    /// is the provider's stable id for the call (Anthropic
+    /// `tool_use.id`, OpenAI `tool_calls[].id`) — used to correlate
+    /// subsequent chunks with the same card.
+    Streaming {
+        provider_tool_id: String,
+        accumulated_json: String,
+    },
     Running { started_at: Instant },
     Done {
         duration: Duration,
@@ -94,6 +104,40 @@ impl App {
             tool: tool.clone(),
             since: started_at,
         };
+
+        // Y2: if the model streamed args for this call ahead of
+        // dispatch, a Streaming card with matching tool name is
+        // already sitting in the transcript. Upgrade it in place so
+        // the renderer keeps the same slot — avoids a card "jump"
+        // when ToolStart fires. Match by name on the most-recent
+        // Streaming card; sequential tool dispatch within a turn
+        // makes that unambiguous, the same pattern `TuiHook` uses for
+        // Pre/Post correlation.
+        let streaming_idx = self
+            .transcript
+            .iter()
+            .enumerate()
+            .rev()
+            .find_map(|(i, item)| match item {
+                TranscriptItem::ToolCard {
+                    tool: t,
+                    state: ToolCardState::Streaming { .. },
+                    ..
+                } if t == &tool => Some(i),
+                _ => None,
+            });
+        if let Some(idx) = streaming_idx {
+            if let Some(TranscriptItem::ToolCard {
+                state, args_preview: ap, ..
+            }) = self.transcript.get_mut(idx)
+            {
+                *state = ToolCardState::Running { started_at };
+                *ap = args_preview;
+            }
+            self.active_tools.insert(id, idx);
+            return;
+        }
+
         self.transcript.push(TranscriptItem::ToolCard {
             tool,
             args_preview,
@@ -104,14 +148,54 @@ impl App {
     }
 
     /// Phase Y2: a chunk of streaming-tool-args JSON arrived for a
-    /// not-yet-dispatched tool call. No-op stub until slice 4 wires up
-    /// the streaming-card transcript state.
+    /// not-yet-dispatched tool call. We push a `ToolCard` in
+    /// `Streaming` state on the first chunk for a given
+    /// `provider_tool_id`, then mutate `accumulated_json` on each
+    /// subsequent chunk. The card is upgraded to `Running` in
+    /// `on_tool_start` (which fires after `PreToolUse`).
     pub fn on_tool_args_chunk(
         &mut self,
-        _provider_tool_id: String,
-        _name: String,
-        _accumulated_json: String,
+        provider_tool_id: String,
+        name: String,
+        accumulated_json: String,
     ) {
+        // First chunk for any tool stream seals the active assistant
+        // item so the streaming card renders as a sibling, not an
+        // appendage of in-progress text. Same shape as on_tool_start.
+        if let Some(idx) = self.active_assistant.take() {
+            if let Some(TranscriptItem::Assistant { done, body, .. }) =
+                self.transcript.get_mut(idx)
+            {
+                if !body.is_empty() {
+                    *done = true;
+                }
+            }
+        }
+        // Find an existing Streaming card with the same provider id.
+        let existing = self
+            .transcript
+            .iter_mut()
+            .rev()
+            .find_map(|item| match item {
+                TranscriptItem::ToolCard {
+                    state: ToolCardState::Streaming { provider_tool_id: pid, accumulated_json: acc },
+                    ..
+                } if pid == &provider_tool_id => Some(acc),
+                _ => None,
+            });
+        if let Some(acc) = existing {
+            *acc = accumulated_json;
+            return;
+        }
+        self.transcript.push(TranscriptItem::ToolCard {
+            tool: name,
+            args_preview: String::new(),
+            state: ToolCardState::Streaming {
+                provider_tool_id,
+                accumulated_json,
+            },
+        });
+        self.note_arrival(2);
     }
 
     pub fn on_tool_done(&mut self, id: u64, duration: Duration, summary: String, ok: bool) {
