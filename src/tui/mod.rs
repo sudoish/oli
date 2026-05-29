@@ -22,6 +22,7 @@
 
 mod app;
 mod approver;
+pub mod caps;
 mod completion;
 mod driver;
 mod event;

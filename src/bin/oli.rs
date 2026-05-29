@@ -523,8 +523,9 @@ async fn run(args: Args) -> Result<()> {
                         .as_deref()
                         .map(tui::ViewportChoice::parse)
                         .unwrap_or_default();
+                    let caps = tui::caps::Capabilities::detect();
                     let viewport =
-                        tui::resolve_mode(flag, cfg_choice, tui::Viewport::Fullscreen);
+                        tui::resolve_mode(flag, cfg_choice, caps.auto_viewport());
                     return tui::run(
                         agent,
                         plugin_slashes,
