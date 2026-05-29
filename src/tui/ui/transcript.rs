@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph, Wrap};
 
 use crate::tui::app::{App, ToolCardState, TranscriptItem};
+use crate::tui::image::{ImageMarker, can_render_images, parse_image_marker};
 use crate::tui::markdown;
 use crate::tui::theme::Theme;
 
@@ -578,6 +579,16 @@ fn expanded_output_lines(full_output: &str, theme: &Theme, ok: bool) -> Vec<Line
             Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
         ))];
     }
+    // Phase Y3: an `[Image: ...]` marker gets its own polished render
+    // — show the basename, dimensions, and format as a chip, plus a
+    // hint about the rendering path. Without `--features images` the
+    // hint says how to enable the protocol; with the feature on we
+    // note the protocol we'd use. Actual inline image widget
+    // rendering is deferred to a follow-up (requires splitting the
+    // Paragraph + Image draw at the frame level).
+    if let Some(marker) = parse_image_marker(trimmed) {
+        return image_marker_lines(&marker, theme);
+    }
     let all: Vec<&str> = trimmed.lines().collect();
     let total = all.len();
     let body_color = if ok { theme.fg } else { theme.diff_removed };
@@ -598,6 +609,74 @@ fn expanded_output_lines(full_output: &str, theme: &Theme, ok: bool) -> Vec<Line
         )));
     }
     out
+}
+
+/// Render an `[Image: ...]` marker as a multi-line chip inside an
+/// expanded tool card. The shape:
+///
+/// ```text
+///     🖼  cat.png
+///        1024x768 PNG
+///        /abs/path/to/cat.png
+///        inline render off — build with `--features images` …
+/// ```
+///
+/// (The emoji is a deliberate exception to the project's no-emoji
+/// rule: the spec calls out the image chip specifically as a visual
+/// affordance.) The fourth line is a `theme.dim` hint that varies
+/// with `cfg!(feature = "images")`. Future work: at the frame level,
+/// reserve `image_render_rect` and call into
+/// `tui::image::render::protocol_for` to draw the actual pixels.
+fn image_marker_lines(marker: &ImageMarker, theme: &Theme) -> Vec<Line<'static>> {
+    let basename = std::path::Path::new(&marker.path)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&marker.path)
+        .to_string();
+    let dims_line = match marker.dims {
+        Some((w, h)) => format!("    {}x{} {}", w, h, marker.format),
+        None => format!("    {} (dimensions unknown)", marker.format),
+    };
+    let hint = if cfg!(feature = "images") {
+        // The feature is on at build time, but renderer wiring is the
+        // remaining piece. Be honest in the hint.
+        "    images feature enabled — inline render coming soon"
+    } else {
+        "    inline render off — build with `--features images` to enable"
+    };
+    vec![
+        Line::from(Span::styled(
+            format!("    🖼  {}", basename),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            dims_line,
+            Style::default().fg(theme.fg),
+        )),
+        Line::from(Span::styled(
+            format!("    {}", marker.path),
+            Style::default().fg(theme.dim),
+        )),
+        Line::from(Span::styled(
+            hint.to_string(),
+            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+        )),
+    ]
+}
+
+/// Whether the inline image rendering path is active for the given
+/// `graphics` kind. Thin wrapper over `tui::image::can_render_images`
+/// so the renderer can ask the question without importing the image
+/// module everywhere. Wired up by the frame-level integration when it
+/// lands.
+#[allow(dead_code)]
+pub(super) fn should_render_image_inline(
+    graphics: crate::tui::caps::GraphicsKind,
+    _marker: &ImageMarker,
+) -> bool {
+    can_render_images(graphics)
 }
 
 /// Extract up to 6 lines of streamed content from partial JSON for
@@ -1233,6 +1312,73 @@ mod tests {
         let detail = render_tool_card_detail("Bash", &state, &theme);
         assert_eq!(detail.len(), 1);
         assert_eq!(line_text(&detail[0]), "    (no output)");
+    }
+
+    #[test]
+    fn render_tool_card_detail_expanded_image_marker_renders_chip() {
+        // Phase Y3: when full_output is a `[Image: ...]` marker (as
+        // emitted by `Read` for image files), the expanded body
+        // produces a 4-line chip — basename, dims+format, abs path,
+        // and a hint about the rendering path.
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "image".into(),
+            ok: true,
+            full_output: "[Image: /tmp/photo.png 1024x768 PNG]".into(),
+            expanded: true,
+        };
+        let detail = render_tool_card_detail("Read", &state, &theme);
+        assert_eq!(detail.len(), 4, "expected 4-line chip, got {:?}",
+            detail.iter().map(line_text).collect::<Vec<_>>());
+        assert!(line_text(&detail[0]).contains("photo.png"));
+        assert_eq!(line_text(&detail[1]), "    1024x768 PNG");
+        assert_eq!(line_text(&detail[2]), "    /tmp/photo.png");
+        // Last line is the hint; content varies with cfg!(feature = "images").
+        let hint = line_text(&detail[3]);
+        if cfg!(feature = "images") {
+            assert!(hint.contains("images feature enabled"), "got {hint}");
+        } else {
+            assert!(hint.contains("--features images"), "got {hint}");
+        }
+    }
+
+    #[test]
+    fn render_tool_card_detail_expanded_image_marker_unknown_dims() {
+        // `?x?` dim markers (e.g. WebP, or a broken header) still
+        // render the chip; the dims line says "dimensions unknown"
+        // rather than printing `?x?`.
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "image".into(),
+            ok: true,
+            full_output: "[Image: /a/b.jpg ?x? JPEG]".into(),
+            expanded: true,
+        };
+        let detail = render_tool_card_detail("Read", &state, &theme);
+        assert!(line_text(&detail[0]).contains("b.jpg"));
+        assert!(line_text(&detail[1]).contains("dimensions unknown"));
+    }
+
+    #[test]
+    fn render_tool_card_detail_expanded_image_marker_embedded_falls_through() {
+        // A `[Image: ...]` substring embedded inside other text is NOT
+        // an image marker — fall through to the normal line-by-line
+        // expansion.
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "x".into(),
+            ok: true,
+            full_output: "some text\n[Image: /tmp/x.png 1x1 PNG]".into(),
+            expanded: true,
+        };
+        let detail = render_tool_card_detail("Read", &state, &theme);
+        // Two literal output lines, no chip.
+        assert_eq!(detail.len(), 2);
+        assert_eq!(line_text(&detail[0]), "    some text");
+        assert!(line_text(&detail[1]).starts_with("    [Image: "));
     }
 
     #[test]

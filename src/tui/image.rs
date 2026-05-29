@@ -31,6 +31,7 @@ pub struct ImageMarker {
 impl ImageMarker {
     /// Short label suitable for a one-line summary. Used by the text
     /// fallback when image rendering is off or unavailable.
+    #[allow(dead_code)] // Public API; only the test currently calls it directly.
     pub fn summary(&self) -> String {
         let name = std::path::Path::new(&self.path)
             .file_name()
@@ -123,6 +124,7 @@ pub mod render {
     /// Decode the image and build a stateless `Protocol` sized to the
     /// given `area`. Returns `Err(_)` if decoding or protocol
     /// construction fails — callers fall back to the text marker.
+    #[allow(dead_code)] // Frame-level wiring lands in a follow-up.
     pub fn protocol_for(
         marker: &ImageMarker,
         graphics: GraphicsKind,
