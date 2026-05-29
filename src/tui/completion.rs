@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::tui::app::CompletionKind;
+use crate::tui::fuzzy;
 
 /// Result of inspecting a single line at a cursor position. `None`
 /// means "no completion available right here." `Some` carries
@@ -86,18 +87,20 @@ fn split_path_query(query: &str) -> (PathBuf, String) {
     }
 }
 
-/// Slash candidates are command names with the query as a prefix.
-/// Sorted by name; the registry is already sorted but we don't
-/// rely on that.
+/// Slash candidates ranked by fuzzy match against `query`. Empty
+/// query returns all names sorted alphabetically (predictable popup
+/// order). Non-empty query goes through `fuzzy::rank` so subsequence
+/// matches like `ssn` → `/sessions` work.
 pub fn slash_candidates(slash_names: &[String], query: &str) -> Vec<String> {
-    let q = query.to_ascii_lowercase();
-    let mut out: Vec<String> = slash_names
-        .iter()
-        .filter(|n| n.to_ascii_lowercase().starts_with(&q))
-        .cloned()
-        .collect();
-    out.sort();
-    out
+    if query.is_empty() {
+        let mut out: Vec<String> = slash_names.to_vec();
+        out.sort();
+        return out;
+    }
+    fuzzy::rank(query, slash_names, |s| s.as_str())
+        .into_iter()
+        .map(|(i, _)| slash_names[i].clone())
+        .collect()
 }
 
 /// Path candidates are entries in `base_dir` whose name starts
@@ -212,6 +215,27 @@ mod tests {
         let mut got = slash_candidates(&slashes, "co");
         got.sort();
         assert_eq!(got, vec!["compact".to_string(), "cost".to_string()]);
+    }
+
+    #[test]
+    fn slash_candidates_match_subsequence() {
+        let slashes: Vec<String> = ["help", "sessions", "model", "compact"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = slash_candidates(&slashes, "ssn");
+        // `ssn` is a subsequence of `sessions`.
+        assert_eq!(got.first().map(String::as_str), Some("sessions"));
+    }
+
+    #[test]
+    fn slash_candidates_prefer_exact_prefix() {
+        let slashes: Vec<String> = ["help", "help-debug"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let got = slash_candidates(&slashes, "help");
+        assert_eq!(got.first().map(String::as_str), Some("help"));
     }
 
     #[test]
