@@ -229,6 +229,11 @@ fn handle_event(
             summary,
             ok,
         } => app.on_tool_done(id, duration, summary, ok),
+        UiEvent::ToolArgsChunk {
+            provider_tool_id,
+            name,
+            accumulated_json,
+        } => app.on_tool_args_chunk(provider_tool_id, name, accumulated_json),
         UiEvent::ApprovalRequested {
             tool,
             args,

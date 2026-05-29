@@ -103,6 +103,17 @@ impl App {
         self.note_arrival(2);
     }
 
+    /// Phase Y2: a chunk of streaming-tool-args JSON arrived for a
+    /// not-yet-dispatched tool call. No-op stub until slice 4 wires up
+    /// the streaming-card transcript state.
+    pub fn on_tool_args_chunk(
+        &mut self,
+        _provider_tool_id: String,
+        _name: String,
+        _accumulated_json: String,
+    ) {
+    }
+
     pub fn on_tool_done(&mut self, id: u64, duration: Duration, summary: String, ok: bool) {
         if let Some(idx) = self.active_tools.remove(&id) {
             if let Some(TranscriptItem::ToolCard { state, .. }) = self.transcript.get_mut(idx) {
