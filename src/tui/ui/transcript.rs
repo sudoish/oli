@@ -753,6 +753,8 @@ mod tests {
                 duration: Duration::ZERO,
                 summary: "ok".into(),
                 ok: true,
+                full_output: String::new(),
+                expanded: false,
             },
         });
         let lines = build_transcript_lines(&app, 40);
@@ -1098,6 +1100,8 @@ mod tests {
             duration: Duration::from_millis(120),
             summary: "wrote 3 lines".into(),
             ok: true,
+            full_output: String::new(),
+            expanded: false,
         };
         let detail = render_tool_card_detail("Write", &state, &theme);
         assert_eq!(detail.len(), 1);

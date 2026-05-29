@@ -297,7 +297,7 @@ fn tool_done_returns_to_thinking_when_no_tools_pending() {
     let mut app = App::new();
     app.on_turn_started();
     app.on_tool_start(1, "grep".into(), "".into());
-    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true);
+    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true, String::new());
     assert!(matches!(app.mode, Mode::Thinking { .. }));
 }
 
@@ -307,7 +307,7 @@ fn tool_done_stays_in_tool_running_when_other_tools_pending() {
     app.on_turn_started();
     app.on_tool_start(1, "grep".into(), "".into());
     app.on_tool_start(2, "read".into(), "".into());
-    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true);
+    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true, String::new());
     // Tool 2 is still running; mode should remain ToolRunning.
     assert!(matches!(app.mode, Mode::ToolRunning { .. }));
 }
@@ -317,7 +317,7 @@ fn content_chunk_after_tool_done_flips_to_streaming() {
     let mut app = App::new();
     app.on_turn_started();
     app.on_tool_start(1, "grep".into(), "".into());
-    app.on_tool_done(1, Duration::from_millis(1), "ok".into(), true);
+    app.on_tool_done(1, Duration::from_millis(1), "ok".into(), true, String::new());
     assert!(matches!(app.mode, Mode::Thinking { .. }));
     app.on_content_chunk("here's what I found");
     assert!(matches!(app.mode, Mode::Streaming { .. }));
@@ -425,7 +425,7 @@ fn tool_start_upgrades_matching_streaming_card_to_running() {
         _ => panic!("expected ToolCard at slot {}", streaming_idx),
     }
     // ToolDone for id=7 must close this exact card.
-    app.on_tool_done(7, Duration::from_millis(1), "ok".into(), true);
+    app.on_tool_done(7, Duration::from_millis(1), "ok".into(), true, String::new());
     match &app.transcript[streaming_idx] {
         TranscriptItem::ToolCard { state, .. } => {
             assert!(matches!(state, ToolCardState::Done { .. }));
@@ -457,7 +457,7 @@ fn assistant_continuation_after_tool_creates_a_new_item() {
     app.on_turn_started();
     app.on_content_chunk("first ");
     app.on_tool_start(1, "Read".into(), "x".into());
-    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true);
+    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true, String::new());
     app.on_content_chunk("second");
     let bodies: Vec<&str> = app
         .transcript
@@ -773,7 +773,7 @@ fn undo_pops_the_last_user_prompt_and_returns_its_body() {
     app.on_content_chunk("...");
     // Simulate a tool round mid-turn.
     app.on_tool_start(1, "Read".into(), "x".into());
-    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true);
+    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true, String::new());
     app.on_content_chunk("more");
     app.on_turn_finished("");
 

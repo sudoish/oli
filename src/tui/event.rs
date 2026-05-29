@@ -75,6 +75,10 @@ pub enum UiEvent {
         duration: std::time::Duration,
         summary: String,
         ok: bool,
+        /// Phase Y4: full captured tool output, truncated at the
+        /// hook boundary. The renderer shows it on demand when the
+        /// card is focused + Enter.
+        full_output: String,
     },
 
     /// Phase Y2: provider emitted a chunk of streaming-tool-args JSON

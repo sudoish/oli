@@ -83,11 +83,13 @@ impl Hook for TuiHook {
                 if let Some(c) = popped {
                     let duration = c.started_at.elapsed();
                     let (summary, ok) = render_result_summary(tool, result);
+                    let full_output = truncate_full_output(result);
                     let _ = self.tx.send(UiEvent::ToolDone {
                         id: c.id,
                         duration,
                         summary,
                         ok,
+                        full_output,
                     });
                 }
             }
@@ -113,6 +115,28 @@ pub fn render_args_preview(args: &Value, max_len: usize) -> String {
         return String::new();
     }
     clip_one_line(&raw, max_len)
+}
+
+/// Phase Y4: cap the captured tool output so a single multi-MB
+/// Read or Bash result can't bloat the transcript struct. 16 KiB
+/// is comfortably above any sensible "show me the output" view —
+/// the renderer further caps at 40 lines when expanding.
+const FULL_OUTPUT_CAP: usize = 16 * 1024;
+
+pub fn truncate_full_output(result: &str) -> String {
+    if result.len() <= FULL_OUTPUT_CAP {
+        return result.to_string();
+    }
+    // Snap to a char boundary so the truncation point doesn't
+    // split a multi-byte UTF-8 sequence.
+    let mut cut = FULL_OUTPUT_CAP;
+    while cut > 0 && !result.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = String::with_capacity(cut + 64);
+    out.push_str(&result[..cut]);
+    out.push_str("\n…(truncated)");
+    out
 }
 
 fn clip_one_line(s: &str, max_len: usize) -> String {
@@ -318,6 +342,37 @@ mod tests {
         let result = "first line\nsecond line";
         let (s, _) = render_result_summary("MyCustom", result);
         assert_eq!(s, "first line");
+    }
+
+    #[test]
+    fn truncate_full_output_passes_through_short_strings() {
+        let s = "hello world\nline 2";
+        assert_eq!(truncate_full_output(s), s);
+    }
+
+    #[test]
+    fn truncate_full_output_caps_long_strings_with_marker() {
+        let s = "a".repeat(FULL_OUTPUT_CAP + 1000);
+        let out = truncate_full_output(&s);
+        assert!(out.ends_with("…(truncated)"));
+        // Within the cap + the marker tail, comfortably bounded.
+        assert!(out.len() <= FULL_OUTPUT_CAP + 32);
+    }
+
+    #[test]
+    fn truncate_full_output_snaps_to_char_boundary() {
+        // 4-byte UTF-8 emoji at the cap boundary: cut must back off
+        // to avoid producing invalid UTF-8 in the truncated slice.
+        let mut s = "a".repeat(FULL_OUTPUT_CAP - 2);
+        s.push('🦀'); // 4 bytes, straddles the cap
+        s.push_str(&"b".repeat(100));
+        let out = truncate_full_output(&s);
+        // Doesn't panic and is valid UTF-8 by construction (String).
+        assert!(out.ends_with("…(truncated)"));
+        // The 🦀 either lands fully inside or fully outside the
+        // truncation — never split.
+        let body = out.trim_end_matches("…(truncated)").trim_end_matches('\n');
+        assert!(body.is_char_boundary(body.len()));
     }
 
     #[test]

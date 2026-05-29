@@ -228,7 +228,8 @@ fn handle_event(
             duration,
             summary,
             ok,
-        } => app.on_tool_done(id, duration, summary, ok),
+            full_output,
+        } => app.on_tool_done(id, duration, summary, ok, full_output),
         UiEvent::ToolArgsChunk {
             provider_tool_id,
             name,

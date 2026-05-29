@@ -44,6 +44,11 @@ pub enum ToolCardState {
         duration: Duration,
         summary: String,
         ok: bool,
+        /// Phase Y4: captured tool output (truncated to a sane cap
+        /// at the hook boundary; `expanded` toggles whether the
+        /// renderer shows it under the card).
+        full_output: String,
+        expanded: bool,
     },
 }
 
@@ -198,13 +203,22 @@ impl App {
         self.note_arrival(2);
     }
 
-    pub fn on_tool_done(&mut self, id: u64, duration: Duration, summary: String, ok: bool) {
+    pub fn on_tool_done(
+        &mut self,
+        id: u64,
+        duration: Duration,
+        summary: String,
+        ok: bool,
+        full_output: String,
+    ) {
         if let Some(idx) = self.active_tools.remove(&id) {
             if let Some(TranscriptItem::ToolCard { state, .. }) = self.transcript.get_mut(idx) {
                 *state = ToolCardState::Done {
                     duration,
                     summary,
                     ok,
+                    full_output,
+                    expanded: false,
                 };
             }
         }
