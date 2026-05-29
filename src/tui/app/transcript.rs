@@ -6,7 +6,7 @@
 
 use std::time::{Duration, Instant};
 
-use super::{App, Mode};
+use super::{App, Mode, SCROLL_HISTORY_CAP};
 
 #[derive(Debug, Clone)]
 pub enum TranscriptItem {
@@ -280,5 +280,110 @@ impl App {
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_manual = None;
         self.unread_lines = 0;
+    }
+
+    /// Scroll so the previous user-turn header sits at (or near)
+    /// the top of the visible region. Uses
+    /// `turn_line_indices` cached by the transcript renderer.
+    /// No-op if there are no user turns or none lies above the
+    /// current view.
+    pub fn jump_to_prev_turn(&mut self) {
+        let current = self.scroll_manual.unwrap_or(self.scroll_max);
+        let target = self
+            .turn_line_indices
+            .iter()
+            .rev()
+            .copied()
+            .find(|idx| *idx < current);
+        if let Some(idx) = target {
+            self.record_scroll_position();
+            self.scroll_manual = Some(idx.min(self.scroll_max));
+        }
+    }
+
+    /// Counterpart of `jump_to_prev_turn`. Reattaches (scroll_manual
+    /// = None) when the next-turn target sits at or below the
+    /// natural bottom of the view.
+    pub fn jump_to_next_turn(&mut self) {
+        let current = self.scroll_manual.unwrap_or(self.scroll_max);
+        let target = self
+            .turn_line_indices
+            .iter()
+            .copied()
+            .find(|idx| *idx > current);
+        if let Some(idx) = target {
+            self.record_scroll_position();
+            if idx >= self.scroll_max {
+                self.scroll_manual = None;
+                self.unread_lines = 0;
+            } else {
+                self.scroll_manual = Some(idx);
+            }
+        }
+    }
+
+    /// Record the current scroll position on the back-stack. Called
+    /// by jump-class scroll changes (turn-jump, top/bottom) so
+    /// Ctrl+O can restore the prior view. Truncates any forward
+    /// history beyond the cursor (standard browser-history shape)
+    /// and caps total size at `SCROLL_HISTORY_CAP`.
+    pub fn record_scroll_position(&mut self) {
+        let pos = self.scroll_manual;
+        // Drop any forward history past the cursor.
+        self.scroll_positions.truncate(self.scroll_pos_cursor);
+        // Coalesce: no point recording the same position twice in a row.
+        if self.scroll_positions.last().copied() == Some(pos) {
+            return;
+        }
+        self.scroll_positions.push(pos);
+        if self.scroll_positions.len() > SCROLL_HISTORY_CAP {
+            // Drop the oldest entry to stay within cap. Cursor
+            // tracks the *end*, so it follows the truncation
+            // automatically.
+            self.scroll_positions.remove(0);
+        }
+        self.scroll_pos_cursor = self.scroll_positions.len();
+    }
+
+    /// Ctrl+O: step back through the position stack. The current
+    /// (unrecorded) position is pushed onto the stack on the first
+    /// back-jump so Ctrl+I can return to it.
+    pub fn jump_back_in_history(&mut self) {
+        if self.scroll_pos_cursor == 0 {
+            return;
+        }
+        // On the first back-jump after a free scroll, capture
+        // where the user currently is so forward-jump can return.
+        if self.scroll_pos_cursor == self.scroll_positions.len()
+            && self.scroll_positions.last().copied() != Some(self.scroll_manual)
+        {
+            self.scroll_positions.push(self.scroll_manual);
+            if self.scroll_positions.len() > SCROLL_HISTORY_CAP {
+                self.scroll_positions.remove(0);
+                self.scroll_pos_cursor = self.scroll_pos_cursor.saturating_sub(1);
+            }
+        }
+        self.scroll_pos_cursor = self.scroll_pos_cursor.saturating_sub(1);
+        if let Some(pos) = self.scroll_positions.get(self.scroll_pos_cursor).copied() {
+            self.scroll_manual = pos.map(|o| o.min(self.scroll_max));
+            if pos.is_none() {
+                self.unread_lines = 0;
+            }
+        }
+    }
+
+    /// Ctrl+I: step forward through the position stack. No-op when
+    /// already at the most recent entry.
+    pub fn jump_forward_in_history(&mut self) {
+        if self.scroll_pos_cursor + 1 >= self.scroll_positions.len() {
+            return;
+        }
+        self.scroll_pos_cursor += 1;
+        if let Some(pos) = self.scroll_positions.get(self.scroll_pos_cursor).copied() {
+            self.scroll_manual = pos.map(|o| o.min(self.scroll_max));
+            if pos.is_none() {
+                self.unread_lines = 0;
+            }
+        }
     }
 }

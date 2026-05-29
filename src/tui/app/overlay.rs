@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use super::App;
+use super::search::SearchState;
 
 /// What kind of in-flight completion is being offered.
 #[derive(Debug, Clone)]
@@ -26,6 +27,11 @@ pub enum CompletionKind {
 pub struct CompletionMenu {
     pub kind: CompletionKind,
     pub candidates: Vec<String>,
+    /// Char-index positions inside each candidate's displayed label
+    /// (`candidates[i]`) that contributed to the fuzzy match. Used
+    /// by the popup renderer to highlight matched characters.
+    /// Empty inner vec = no highlight (empty query or no match info).
+    pub match_positions: Vec<Vec<u32>>,
     pub selected: usize,
     /// Byte offset on the active line where the trigger char
     /// (`/` or `@`) lives. The substring from there to the
@@ -72,6 +78,30 @@ pub struct InlineHelpState {
     pub description: String,
 }
 
+/// `/copy N` fallback overlay. Shown instead of writing the OSC52
+/// escape when the host doesn't support it (Neovim `:terminal`,
+/// VSCode integrated terminal, generic xterm without OSC52
+/// allowlisted). The body is the verbatim assistant message; the
+/// user selects + copies via the host's normal selection
+/// affordances and dismisses with any key.
+#[derive(Debug, Clone)]
+pub struct CopyFallbackState {
+    /// Verbatim message body. Rendered as-is, no markdown reflow,
+    /// so what the user copies matches what they would have got
+    /// from OSC52.
+    pub body: String,
+    /// 1-based index of the assistant message the user asked to
+    /// copy (the `N` from `/copy N`). Displayed in the title.
+    pub index: usize,
+    /// Reason the fallback opened — usually `caps.host` from
+    /// Capabilities, plus a short note. Drives the title hint so
+    /// the user knows *why* the modal opened.
+    pub host_hint: String,
+    /// Scroll offset within the body, advanced by PgUp/PgDn so
+    /// long messages stay readable inside a small modal.
+    pub scroll: u16,
+}
+
 /// Ctrl-R history search overlay. Substring match (case-
 /// insensitive); newest matches first; arrow keys navigate;
 /// Enter loads the picked entry into the input; Esc cancels.
@@ -96,7 +126,12 @@ pub enum Overlay {
     HelpBrowser(HelpBrowserState),
     InlineHelp(InlineHelpState),
     HistorySearch(HistorySearchState),
+    CopyFallback(CopyFallbackState),
     Wizard(crate::tui::wizard::WizardState),
+    /// In-transcript search bar (Ctrl+F). Substring (case-
+    /// insensitive) match against the rendered transcript;
+    /// Enter / n / N cycle matches; Esc closes.
+    Search(SearchState),
 }
 
 impl App {
@@ -314,6 +349,93 @@ impl App {
         // Cap so the popup stays small even on huge histories.
         out.truncate(50);
         out
+    }
+
+    /// Open the `/copy N` fallback modal with the verbatim body
+    /// the user asked to copy. `host_hint` is the short label
+    /// (`caps.host`) so the title can explain *why* the fallback
+    /// opened. Closes any prior overlay first.
+    pub fn open_copy_fallback(&mut self, body: String, index: usize, host_hint: String) {
+        self.overlay = Some(Overlay::CopyFallback(CopyFallbackState {
+            body,
+            index,
+            host_hint,
+            scroll: 0,
+        }));
+    }
+
+    pub fn close_copy_fallback(&mut self) {
+        if matches!(self.overlay, Some(Overlay::CopyFallback(_))) {
+            self.overlay = None;
+        }
+    }
+
+    /// Test-only accessor for the active copy-fallback modal.
+    #[cfg(test)]
+    pub fn copy_fallback(&self) -> Option<&CopyFallbackState> {
+        match &self.overlay {
+            Some(Overlay::CopyFallback(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn copy_fallback_scroll_up(&mut self) {
+        if let Some(Overlay::CopyFallback(s)) = &mut self.overlay {
+            s.scroll = s.scroll.saturating_sub(5);
+        }
+    }
+
+    pub fn copy_fallback_scroll_down(&mut self) {
+        if let Some(Overlay::CopyFallback(s)) = &mut self.overlay {
+            s.scroll = s.scroll.saturating_add(5);
+        }
+    }
+
+    // ---------- in-transcript search ----------
+
+    pub fn search(&self) -> Option<&SearchState> {
+        match &self.overlay {
+            Some(Overlay::Search(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn open_search(&mut self) {
+        self.overlay = Some(Overlay::Search(SearchState::default()));
+    }
+
+    pub fn close_search(&mut self) {
+        if matches!(self.overlay, Some(Overlay::Search(_))) {
+            self.overlay = None;
+        }
+    }
+
+    pub fn search_push_char(&mut self, c: char) {
+        if let Some(Overlay::Search(s)) = &mut self.overlay {
+            s.query.push(c);
+            s.current = 0;
+        }
+    }
+
+    pub fn search_backspace(&mut self) {
+        if let Some(Overlay::Search(s)) = &mut self.overlay {
+            s.query.pop();
+            s.current = 0;
+        }
+    }
+
+    /// Step the focused match forward (`+1`) or backward (`-1`).
+    /// `match_count` is supplied by the renderer, which knows
+    /// how many lines matched the current query. No-op when zero.
+    pub fn search_navigate(&mut self, delta: i32, match_count: usize) {
+        if match_count == 0 {
+            return;
+        }
+        if let Some(Overlay::Search(s)) = &mut self.overlay {
+            let n = match_count as i32;
+            let next = (s.current as i32 + delta).rem_euclid(n);
+            s.current = next as usize;
+        }
     }
 
     pub fn open_inline_help(&mut self, name: &str) {

@@ -67,6 +67,20 @@ struct Args {
     #[arg(long)]
     plain: bool,
 
+    /// Render the TUI inline in the host buffer (no alt-screen,
+    /// no mouse capture by default). Recommended inside Neovim
+    /// `:terminal`, VSCode's integrated terminal, and similar
+    /// buffer-terminals. Overrides `[ui].viewport` from config.
+    /// Conflicts with `--fullscreen`.
+    #[arg(long, conflicts_with = "fullscreen")]
+    inline: bool,
+
+    /// Force the TUI into alternate-screen / fullscreen mode even
+    /// when capability detection or `[ui].viewport` would have
+    /// picked inline. Conflicts with `--inline`.
+    #[arg(long, conflicts_with = "inline")]
+    fullscreen: bool,
+
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
@@ -494,11 +508,44 @@ async fn run(args: Args) -> Result<()> {
             #[cfg(feature = "tui")]
             {
                 if use_tui {
+                    // Viewport resolution order: explicit CLI flag,
+                    // then `[ui].viewport`, then the W2 auto-detected
+                    // default. W1 hands `Fullscreen` as the auto
+                    // fallback — auto-mode lights up in W2.
+                    let flag = match (args.inline, args.fullscreen) {
+                        (true, _) => Some(tui::Viewport::Inline),
+                        (_, true) => Some(tui::Viewport::Fullscreen),
+                        _ => None,
+                    };
+                    let cfg_choice = cfg
+                        .ui
+                        .viewport
+                        .as_deref()
+                        .map(tui::ViewportChoice::parse)
+                        .unwrap_or_default();
+                    let caps = tui::caps::Capabilities::detect();
+                    let viewport =
+                        tui::resolve_mode(flag, cfg_choice, caps.auto_viewport());
+                    let mouse =
+                        tui::resolve_mouse(cfg.ui.mouse, caps.mouse, viewport);
+                    let osc52 = tui::caps::resolve_osc52(
+                        cfg.ui.osc52.as_deref(),
+                        caps.osc52,
+                    );
+                    let host_hint = caps.host.clone();
+                    let theme = tui::theme::load(
+                        cfg.ui.theme.as_deref().unwrap_or("dark"),
+                    );
                     return tui::run(
                         agent,
                         plugin_slashes,
                         Some(plugin_reloader),
                         session_id,
+                        viewport,
+                        mouse,
+                        osc52,
+                        host_hint,
+                        theme,
                     )
                     .await;
                 }

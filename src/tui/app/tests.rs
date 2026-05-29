@@ -81,7 +81,9 @@ fn typing_slash_auto_opens_completion_popup() {
     ]);
     type_str(&mut app, "/c");
     let menu = app.completion.as_ref().expect("popup should auto-open");
-    assert_eq!(menu.candidates, vec!["clear".to_string(), "cost".to_string()]);
+    let mut got = menu.candidates.clone();
+    got.sort();
+    assert_eq!(got, vec!["clear".to_string(), "cost".to_string()]);
 }
 
 #[test]
@@ -424,6 +426,147 @@ fn note_scroll_metrics_clamps_offset_when_max_shrinks() {
 }
 
 #[test]
+fn jump_to_prev_turn_moves_offset_to_last_turn_above_current() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 25, 60, 90];
+    app.scroll_manual = Some(70);
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(60));
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(25));
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(5));
+    // No turn above 5 → no-op.
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(5));
+}
+
+#[test]
+fn jump_to_prev_turn_when_attached_uses_scroll_max_as_current() {
+    // Attached (None) treats the natural bottom as "current".
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 25, 60, 90];
+    app.scroll_manual = None;
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(90));
+}
+
+#[test]
+fn jump_to_next_turn_advances_or_reattaches_when_past_max() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 25, 60, 90, 120];
+    app.scroll_manual = Some(10);
+    app.jump_to_next_turn();
+    assert_eq!(app.scroll_manual, Some(25));
+    app.jump_to_next_turn();
+    assert_eq!(app.scroll_manual, Some(60));
+    app.jump_to_next_turn();
+    assert_eq!(app.scroll_manual, Some(90));
+    // Next target is 120 which exceeds max=100 → reattach.
+    app.jump_to_next_turn();
+    assert_eq!(app.scroll_manual, None);
+}
+
+#[test]
+fn jump_keys_are_ignored_while_input_has_text() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 50];
+    app.scroll_manual = Some(70);
+    // Type a character first so `[` should land in the buffer
+    // instead of triggering the jump.
+    type_str(&mut app, "x");
+    app.on_key(key(KeyCode::Char('[')));
+    assert_eq!(input_string(&app), "x[");
+    assert_eq!(app.scroll_manual, Some(70));
+}
+
+#[test]
+fn jump_keys_fire_when_input_is_empty() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 50];
+    app.scroll_manual = Some(70);
+    app.on_key(key(KeyCode::Char('[')));
+    assert_eq!(app.scroll_manual, Some(50));
+    // `[` should NOT have landed in the input buffer.
+    assert_eq!(input_string(&app), "");
+}
+
+#[test]
+fn position_stack_records_on_turn_jump_and_supports_back_forward() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 25, 60, 90];
+    app.scroll_manual = Some(95);
+    // Two jumps back through turns; each records the prior pos.
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(90));
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(60));
+    // Ctrl+O steps back. First Ctrl+O captures the current
+    // position so Ctrl+I can return to it.
+    app.jump_back_in_history();
+    assert_eq!(app.scroll_manual, Some(90));
+    app.jump_back_in_history();
+    assert_eq!(app.scroll_manual, Some(95));
+    // Ctrl+I steps forward back to where we started Ctrl+O-ing.
+    app.jump_forward_in_history();
+    assert_eq!(app.scroll_manual, Some(90));
+    app.jump_forward_in_history();
+    assert_eq!(app.scroll_manual, Some(60));
+}
+
+#[test]
+fn position_stack_caps_at_history_limit() {
+    let mut app = App::new();
+    app.note_scroll_metrics(1000, 10);
+    for i in 0..(SCROLL_HISTORY_CAP + 5) {
+        app.scroll_manual = Some((i * 10) as u16);
+        app.record_scroll_position();
+    }
+    assert!(app.scroll_positions.len() <= SCROLL_HISTORY_CAP);
+}
+
+#[test]
+fn position_stack_truncates_forward_history_on_new_record() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![10, 30, 60, 90];
+    app.scroll_manual = Some(95);
+    app.jump_to_prev_turn(); // records 95, lands at 90
+    app.jump_to_prev_turn(); // records 90, lands at 60
+    app.jump_back_in_history(); // back to 90 (cursor mid-stack)
+    let stack_len_before = app.scroll_positions.len();
+    // A new recording while cursor is mid-stack drops everything
+    // past the cursor.
+    app.scroll_manual = Some(15);
+    app.record_scroll_position();
+    assert!(app.scroll_positions.len() <= stack_len_before);
+    // Forward jump is now a no-op (no entries past the cursor).
+    let before = app.scroll_manual;
+    app.jump_forward_in_history();
+    assert_eq!(app.scroll_manual, before);
+}
+
+#[test]
+fn ctrl_o_back_jump_fires_from_key_handler_when_input_empty() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![10, 50];
+    app.scroll_manual = Some(80);
+    app.on_key(key(KeyCode::Char('['))); // jump to prev turn (50)
+    assert_eq!(app.scroll_manual, Some(50));
+    app.on_key(ctrl('o'));
+    assert_eq!(app.scroll_manual, Some(80));
+    app.on_key(ctrl('i'));
+    assert_eq!(app.scroll_manual, Some(50));
+}
+
+#[test]
 fn help_browser_opens_with_slash_meta_sorted() {
     let mut app = App::new();
     app.set_slash_meta(vec![
@@ -619,4 +762,37 @@ fn wheel_down_reattaches_at_bottom() {
     app.scroll_manual = Some(28);
     app.scroll_wheel_down(3);
     assert_eq!(app.scroll_manual, None);
+}
+
+#[test]
+fn copy_fallback_opens_with_body_and_index() {
+    let mut app = App::new();
+    app.open_copy_fallback("hello world".into(), 1, "neovim:terminal".into());
+    let s = app.copy_fallback().expect("overlay should be open");
+    assert_eq!(s.body, "hello world");
+    assert_eq!(s.index, 1);
+    assert_eq!(s.host_hint, "neovim:terminal");
+    assert_eq!(s.scroll, 0);
+}
+
+#[test]
+fn copy_fallback_close_clears_overlay() {
+    let mut app = App::new();
+    app.open_copy_fallback("body".into(), 2, "vscode".into());
+    assert!(app.copy_fallback().is_some());
+    app.close_copy_fallback();
+    assert!(app.copy_fallback().is_none());
+}
+
+#[test]
+fn copy_fallback_scroll_is_bounded_at_zero() {
+    let mut app = App::new();
+    app.open_copy_fallback("body".into(), 1, "host".into());
+    app.copy_fallback_scroll_up();
+    // PgUp at the top of a fresh modal stays at 0 — saturating_sub.
+    assert_eq!(app.copy_fallback().unwrap().scroll, 0);
+    app.copy_fallback_scroll_down();
+    assert_eq!(app.copy_fallback().unwrap().scroll, 5);
+    app.copy_fallback_scroll_up();
+    assert_eq!(app.copy_fallback().unwrap().scroll, 0);
 }

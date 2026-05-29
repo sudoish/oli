@@ -12,7 +12,7 @@
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph};
 
@@ -39,7 +39,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
 
     draw_status(f, chunks[0], app);
     transcript::draw_transcript(f, chunks[1], app);
-    draw_activity_strip(f, chunks[2], app);
+    if app.search().is_some() {
+        draw_search_bar(f, chunks[2], app);
+    } else {
+        draw_activity_strip(f, chunks[2], app);
+    }
     draw_input(f, chunks[3], app);
 
     if app.completion.is_some() {
@@ -48,11 +52,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     use crate::tui::app::Overlay;
     match &app.overlay {
         Some(Overlay::Approval(s)) => overlays::draw_approval_modal(f, area, s, app),
-        Some(Overlay::SessionsPicker(s)) => overlays::draw_sessions_picker(f, area, s),
-        Some(Overlay::HelpBrowser(s)) => overlays::draw_help_browser(f, area, s),
-        Some(Overlay::InlineHelp(s)) => overlays::draw_inline_help(f, area, s),
+        Some(Overlay::SessionsPicker(s)) => {
+            overlays::draw_sessions_picker(f, area, s, &app.theme)
+        }
+        Some(Overlay::HelpBrowser(s)) => overlays::draw_help_browser(f, area, s, &app.theme),
+        Some(Overlay::InlineHelp(s)) => overlays::draw_inline_help(f, area, s, &app.theme),
         Some(Overlay::HistorySearch(s)) => overlays::draw_history_search(f, area, s, app),
+        Some(Overlay::CopyFallback(s)) => overlays::draw_copy_fallback(f, area, s, &app.theme),
         Some(Overlay::Wizard(s)) => overlays::draw_wizard(f, area, s),
+        // Search bar replaces the activity strip; rendered above.
+        Some(Overlay::Search(_)) => {}
         None => {}
     }
 }
@@ -91,12 +100,13 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     // branch + session, dropped right-to-left when the terminal
     // narrows. The live activity indicator lives in its own row
     // above the input (see `draw_activity_strip`).
+    let theme = &app.theme;
 
     let mut left = vec![Span::styled(
         format!(" {} ", TITLE),
         Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
+            .fg(theme.selected_fg)
+            .bg(theme.accent)
             .add_modifier(Modifier::BOLD),
     )];
 
@@ -117,14 +127,14 @@ fn draw_status(f: &mut Frame, area: Rect, app: &App) {
     for field in visible {
         left.push(Span::styled(
             "  • ",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.dim),
         ));
         left.extend(field);
     }
 
     let bar = Paragraph::new(Line::from(left))
         .block(Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD)))
-        .style(Style::default().bg(Color::Reset));
+        .style(Style::default().bg(theme.bg));
     f.render_widget(bar, area);
 }
 
@@ -146,14 +156,13 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
 /// `Vec<Span>` so it can carry styled sub-fragments (e.g. the
 /// token gauge's color-graded number).
 fn build_status_fields(app: &App) -> Vec<Vec<Span<'static>>> {
+    let theme = &app.theme;
     let mut out: Vec<Vec<Span<'static>>> = Vec::new();
     // Model (highest priority — kept on the narrowest terminals).
     if !app.status.model.is_empty() {
         out.push(vec![Span::styled(
             app.status.model.clone(),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         )]);
     }
     // Token gauge with color thresholds.
@@ -162,7 +171,7 @@ fn build_status_fields(app: &App) -> Vec<Vec<Span<'static>>> {
     if let Some(branch) = &app.status.branch {
         out.push(vec![Span::styled(
             branch.clone(),
-            Style::default().fg(Color::Magenta),
+            Style::default().fg(theme.user),
         )]);
     }
     // Session id (truncated; the full id is from
@@ -172,7 +181,7 @@ fn build_status_fields(app: &App) -> Vec<Vec<Span<'static>>> {
         let short: String = short.chars().rev().collect();
         out.push(vec![Span::styled(
             format!("session …{}", short),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.dim),
         )]);
     }
     out
@@ -182,6 +191,7 @@ fn build_status_fields(app: &App) -> Vec<Vec<Span<'static>>> {
 /// green < 60%, amber 60–85%, red > 85%. Falls through to a
 /// plain dash when no usage is recorded yet.
 fn token_gauge_field(app: &App) -> Vec<Span<'static>> {
+    let theme = &app.theme;
     let used = app
         .status
         .last_usage
@@ -190,25 +200,25 @@ fn token_gauge_field(app: &App) -> Vec<Span<'static>> {
     let ctx = app.status.ctx_window.max(1);
     let ratio = used as f32 / ctx as f32;
     let color = if ratio >= 0.85 {
-        Color::Red
+        theme.gauge_danger
     } else if ratio >= 0.60 {
-        Color::Yellow
+        theme.gauge_warn
     } else {
-        Color::Green
+        theme.gauge_ok
     };
     let used_label = format_count(used);
     let ctx_label = format_count(ctx);
     if used == 0 {
         vec![Span::styled(
             format!("— / {} tok", ctx_label),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.dim),
         )]
     } else {
         vec![
             Span::styled(used_label, Style::default().fg(color)),
             Span::styled(
                 format!(" / {} tok", ctx_label),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.dim),
             ),
         ]
     }
@@ -254,25 +264,26 @@ fn draw_activity_strip(f: &mut Frame, area: Rect, app: &App) {
 
 /// Left half of the activity strip — the mode label.
 pub(super) fn render_activity_strip_left(app: &App) -> Vec<Span<'static>> {
+    let theme = &app.theme;
     if app.approval().is_some() {
         return vec![Span::styled(
             " ⏸ awaiting approval ".to_string(),
             Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
+                .fg(theme.selected_fg)
+                .bg(theme.tool_running)
                 .add_modifier(Modifier::BOLD),
         )];
     }
     match &app.mode {
         Mode::Idle => vec![Span::styled(
             " — ".to_string(),
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(theme.dim),
         )],
         Mode::Thinking { since } => {
             let secs = since.elapsed().as_secs_f32();
             vec![Span::styled(
                 format!(" {} thinking · {:.1}s ", spinner_glyph(secs), secs),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.tool_running),
             )]
         }
         Mode::Streaming { since } => {
@@ -280,7 +291,7 @@ pub(super) fn render_activity_strip_left(app: &App) -> Vec<Span<'static>> {
             vec![Span::styled(
                 format!(" ▶ streaming · {:.1}s ", secs),
                 Style::default()
-                    .fg(Color::Green)
+                    .fg(theme.tool_ok)
                     .add_modifier(Modifier::BOLD),
             )]
         }
@@ -289,7 +300,7 @@ pub(super) fn render_activity_strip_left(app: &App) -> Vec<Span<'static>> {
             vec![Span::styled(
                 format!(" {} running {} · {:.1}s ", spinner_glyph(secs), tool, secs),
                 Style::default()
-                    .fg(Color::Magenta)
+                    .fg(theme.user)
                     .add_modifier(Modifier::BOLD),
             )]
         }
@@ -297,21 +308,107 @@ pub(super) fn render_activity_strip_left(app: &App) -> Vec<Span<'static>> {
 }
 
 /// Right half of the activity strip — cancel hint while busy,
-/// suppressed while an approval modal is up (the modal owns the
-/// keyboard) and while idle.
+/// navigation hints while idle, suppressed while an approval modal
+/// is up (the modal owns the keyboard).
 pub(super) fn render_activity_strip_right(app: &App) -> Vec<Span<'static>> {
     if app.approval().is_some() {
         return Vec::new();
     }
-    if matches!(app.mode, Mode::Idle) {
+    let text = context_hint_text(&app.mode);
+    if text.is_empty() {
         return Vec::new();
     }
     vec![Span::styled(
-        "Esc to cancel ".to_string(),
+        format!("{} ", text),
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(app.theme.dim)
             .add_modifier(Modifier::ITALIC),
     )]
+}
+
+/// Pick a context-appropriate hint line for the right-side of the
+/// activity strip (X4). Idle shows navigation hints; Streaming /
+/// ToolRunning surface the cancel keys. Empty string suppresses.
+pub(super) fn context_hint_text(mode: &Mode) -> &'static str {
+    match mode {
+        Mode::Idle => "[/]: turns · Ctrl+F: search · Ctrl+R: history",
+        Mode::Thinking { .. } | Mode::Streaming { .. } => "Esc to cancel",
+        Mode::ToolRunning { .. } => "Esc cancel · Ctrl+C hard cancel",
+    }
+}
+
+/// Search bar — swaps in for the activity strip while the Search
+/// overlay is active. Left side shows the query with a cursor; right
+/// side shows match counter + key legend.
+fn draw_search_bar(f: &mut Frame, area: Rect, app: &App) {
+    let left = render_search_bar_left(app);
+    let right = render_search_bar_right(app);
+    let left_w = spans_width(&left) as u16;
+    let right_w = spans_width(&right) as u16;
+    let inner_width = area.width.saturating_sub(TRANSCRIPT_H_PAD * 2);
+    let mut spans = left;
+    let pad = inner_width.saturating_sub(left_w + right_w);
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad as usize)));
+    }
+    spans.extend(right);
+    let bar = Paragraph::new(Line::from(spans))
+        .block(Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD)));
+    f.render_widget(bar, area);
+}
+
+/// Left half of the search bar — `🔍 <query>▏`. Returns no-op
+/// spans (single space) if the overlay isn't active, so call sites
+/// can rely on the function being total.
+pub(super) fn render_search_bar_left(app: &App) -> Vec<Span<'static>> {
+    let Some(state) = app.search() else {
+        return Vec::new();
+    };
+    let theme = &app.theme;
+    vec![
+        Span::styled(
+            " 🔍 ".to_string(),
+            Style::default()
+                .fg(theme.match_highlight)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(state.query.clone(), Style::default().fg(theme.fg)),
+        Span::styled(
+            "▏".to_string(),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]
+}
+
+/// Right half of the search bar — `n/N · n/N next · Esc dismiss`.
+/// When there are no matches, shows `no matches` instead of a counter.
+pub(super) fn render_search_bar_right(app: &App) -> Vec<Span<'static>> {
+    let Some(state) = app.search() else {
+        return Vec::new();
+    };
+    let theme = &app.theme;
+    let count = app.search_match_count;
+    let counter = if count == 0 {
+        if state.query.is_empty() {
+            "type to search ".to_string()
+        } else {
+            "no matches ".to_string()
+        }
+    } else {
+        let cur = state.current.min(count.saturating_sub(1)) + 1;
+        format!("{}/{} ", cur, count)
+    };
+    vec![
+        Span::styled(counter, Style::default().fg(theme.accent)),
+        Span::styled(
+            "· n/N next · Esc dismiss ".to_string(),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        ),
+    ]
 }
 
 /// Pick a frame of a 10-step braille spinner from elapsed seconds.
@@ -332,6 +429,35 @@ mod tests {
     use super::*;
     use crate::providers::Usage;
     use crate::tui::app::StatusModel;
+    use ratatui::style::Color;
+
+    #[test]
+    fn completion_line_with_no_positions_is_single_span() {
+        let base = Style::default().fg(Color::White);
+        let highlight = Style::default().fg(Color::Yellow);
+        let line = build_completion_line("  ", "sessions", &[], base, highlight);
+        // Prefix span + body span = 2.
+        assert_eq!(line.spans.len(), 2);
+        assert_eq!(line.spans[1].content, "sessions");
+    }
+
+    #[test]
+    fn completion_line_splits_around_match_positions() {
+        let base = Style::default().fg(Color::White);
+        let highlight = Style::default().fg(Color::Yellow);
+        // Highlight chars 0 ("s") and 4 ("i") in "sessions" → "s" + "essi" + "ons"... but
+        // actually 4 maps to "i" → so we expect:
+        //   prefix("  ") + match("s") + base("ess") + match("i") + base("ons")
+        let line = build_completion_line("  ", "sessions", &[0, 4], base, highlight);
+        assert_eq!(line.spans.len(), 5);
+        assert_eq!(line.spans[0].content, "  ");
+        assert_eq!(line.spans[1].content, "s");
+        assert_eq!(line.spans[1].style, highlight);
+        assert_eq!(line.spans[2].content, "ess");
+        assert_eq!(line.spans[3].content, "i");
+        assert_eq!(line.spans[3].style, highlight);
+        assert_eq!(line.spans[4].content, "ons");
+    }
 
     #[test]
     fn format_count_renders_units_at_thresholds() {
@@ -484,10 +610,24 @@ mod tests {
     }
 
     #[test]
-    fn activity_strip_right_is_empty_when_idle() {
+    fn activity_strip_right_shows_idle_nav_hints() {
+        // X4: idle mode advertises the nav keybindings on the right
+        // side of the activity strip.
         let app = app_with_status(StatusModel::default());
         let spans = render_activity_strip_right(&app);
-        assert!(spans.is_empty());
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("[/]"), "got: {}", combined);
+        assert!(combined.contains("search"), "got: {}", combined);
+    }
+
+    #[test]
+    fn activity_strip_right_shows_hard_cancel_hint_while_tool_running() {
+        let mut app = app_with_status(StatusModel::default());
+        app.on_turn_started();
+        app.on_tool_start(1, "grep".into(), "".into());
+        let spans = render_activity_strip_right(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("Ctrl+C"), "got: {}", combined);
     }
 
     #[test]
@@ -501,14 +641,70 @@ mod tests {
         let spans = render_activity_strip_right(&app);
         assert!(spans.is_empty());
     }
+
+    #[test]
+    fn search_bar_left_is_empty_when_overlay_is_closed() {
+        let app = app_with_status(StatusModel::default());
+        let spans = render_search_bar_left(&app);
+        assert!(spans.is_empty());
+    }
+
+    #[test]
+    fn search_bar_left_renders_glyph_query_and_cursor() {
+        let mut app = app_with_status(StatusModel::default());
+        app.open_search();
+        app.search_push_char('h');
+        app.search_push_char('i');
+        let spans = render_search_bar_left(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("🔍"));
+        assert!(combined.contains("hi"));
+        // Cursor glyph appears at the end of the query.
+        assert!(combined.contains("▏"));
+    }
+
+    #[test]
+    fn search_bar_right_shows_type_to_search_when_query_empty() {
+        let mut app = app_with_status(StatusModel::default());
+        app.open_search();
+        let spans = render_search_bar_right(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("type to search"));
+        assert!(combined.contains("Esc dismiss"));
+    }
+
+    #[test]
+    fn search_bar_right_shows_no_matches_when_count_is_zero() {
+        let mut app = app_with_status(StatusModel::default());
+        app.open_search();
+        app.search_push_char('z');
+        // search_match_count stays 0 — renderer caches it; without a render
+        // pass, we simulate the empty-results case.
+        let spans = render_search_bar_right(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("no matches"));
+    }
+
+    #[test]
+    fn search_bar_right_shows_one_indexed_counter_when_matches_exist() {
+        let mut app = app_with_status(StatusModel::default());
+        app.open_search();
+        app.search_push_char('x');
+        app.search_match_count = 3;
+        // current is zero-indexed internally; should display as 1/3.
+        let spans = render_search_bar_right(&app);
+        let combined: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(combined.contains("1/3"), "got: {}", combined);
+    }
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
+    let theme = &app.theme;
     let busy = app.is_busy();
     let (border_color, title) = if busy {
-        (Color::DarkGray, " ▶ input (busy — Ctrl+C to cancel) ")
+        (theme.dim, " ▶ input (busy — Ctrl+C to cancel) ")
     } else {
-        (Color::Cyan, " ▶ input ")
+        (theme.border, " ▶ input ")
     };
     let block = Block::default()
         .borders(Borders::ALL)
@@ -526,7 +722,7 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
         let body = Paragraph::new(Line::from(Span::styled(
             "(waiting for response — Ctrl+C cancels)".to_string(),
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme.dim)
                 .add_modifier(Modifier::ITALIC),
         )));
         f.render_widget(body, inner);
@@ -586,14 +782,15 @@ fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect,
         height: popup_height,
     };
 
+    let theme = &app.theme;
     f.render_widget(Clear, popup_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(theme.border))
         .title(Line::from(Span::styled(
             " complete ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
     let inner = block.inner(popup_area);
@@ -614,24 +811,55 @@ fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect,
         .take(visible as usize)
         .map(|(i, name)| {
             let is_selected = i == menu.selected;
-            let style = if is_selected {
+            let base_style = if is_selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(theme.selected_fg)
+                    .bg(theme.selected_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.fg)
             };
-            Line::from(Span::styled(
-                if is_selected {
-                    format!("▌ {}", name)
-                } else {
-                    format!("  {}", name)
-                },
-                style,
-            ))
+            let match_style = base_style
+                .fg(theme.match_highlight)
+                .add_modifier(Modifier::BOLD);
+            let prefix = if is_selected { "▌ " } else { "  " };
+            let positions = menu.match_positions.get(i).cloned().unwrap_or_default();
+            build_completion_line(prefix, name, &positions, base_style, match_style)
         })
         .collect();
     let para = Paragraph::new(lines);
     f.render_widget(para, inner);
+}
+
+/// Build a `Line` for one completion row, with characters at
+/// `match_positions` (char indices into `name`) styled with
+/// `match_style` and everything else with `base_style`.
+fn build_completion_line<'a>(
+    prefix: &'a str,
+    name: &'a str,
+    match_positions: &[u32],
+    base_style: Style,
+    match_style: Style,
+) -> Line<'a> {
+    let mut spans: Vec<Span<'a>> = Vec::new();
+    spans.push(Span::styled(prefix.to_string(), base_style));
+    if match_positions.is_empty() {
+        spans.push(Span::styled(name.to_string(), base_style));
+        return Line::from(spans);
+    }
+    let mut buf = String::new();
+    let mut buf_style = base_style;
+    for (ci, ch) in name.chars().enumerate() {
+        let is_match = match_positions.contains(&(ci as u32));
+        let style = if is_match { match_style } else { base_style };
+        if style != buf_style && !buf.is_empty() {
+            spans.push(Span::styled(std::mem::take(&mut buf), buf_style));
+        }
+        buf_style = style;
+        buf.push(ch);
+    }
+    if !buf.is_empty() {
+        spans.push(Span::styled(buf, buf_style));
+    }
+    Line::from(spans)
 }

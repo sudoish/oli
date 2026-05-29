@@ -13,15 +13,19 @@ use tokio::sync::oneshot;
 use tui_textarea::{CursorMove, Input, Key as TaKey, TextArea};
 
 use crate::tui::completion::{self, CompletionContext};
-use crate::tui::markdown::Theme;
+use crate::tui::markdown::Theme as MarkdownTheme;
+use crate::tui::theme::Theme;
 
 mod overlay;
+pub mod search;
 mod transcript;
 
 pub use overlay::{
-    ApprovalState, CompletionKind, CompletionMenu, HelpBrowserState, HistorySearchState,
-    InlineHelpState, Overlay, SessionPickerRow, SessionsPickerState,
+    ApprovalState, CompletionKind, CompletionMenu, CopyFallbackState, HelpBrowserState,
+    HistorySearchState, InlineHelpState, Overlay, SessionPickerRow, SessionsPickerState,
 };
+#[allow(unused_imports)]
+pub use search::SearchState;
 pub use transcript::{ToolCardState, TranscriptItem};
 
 pub enum Mode {
@@ -98,16 +102,60 @@ pub struct App {
     /// Cached transcript-pane height for PgUp/PgDn step size.
     pub scroll_viewport_height: u16,
 
-    /// Color theme for markdown / syntax-highlighted content.
-    /// Detected from `$COLORFGBG` at TUI startup; defaults to
-    /// dark on detection failure.
+    /// Light/dark mode hint for markdown / syntax-highlighted
+    /// content. Detected from `$COLORFGBG` at TUI startup;
+    /// defaults to dark on detection failure. Distinct from the
+    /// full UI color palette (`theme`) — syntect needs only a
+    /// binary light/dark choice.
+    pub markdown_theme: MarkdownTheme,
+
+    /// UI color palette. Resolved from `[ui].theme` at startup
+    /// (see `tui::theme::load`). Render functions pull every
+    /// semantic color from here so a theme swap recolors the
+    /// entire surface coherently.
     pub theme: Theme,
 
     /// Status-bar fields. Identity (model / session / branch /
     /// ctx_window) is set once at startup; usage is updated by
     /// the driver after each chat round.
     pub status: StatusModel,
+
+    /// Whether the host supports OSC52 clipboard writes. Resolved
+    /// once at TUI startup from `Capabilities::osc52` + the
+    /// `[ui].osc52` override (Phase W4). When false, `/copy N`
+    /// opens the `Overlay::CopyFallback` modal instead of writing
+    /// the escape into a host that would silently drop it.
+    pub osc52_supported: bool,
+
+    /// Short identifier of the host terminal (`caps.host`), shown
+    /// in the copy-fallback modal title so the user knows *which*
+    /// host blocked OSC52. Set once at startup.
+    pub host_hint: String,
+
+    /// Count of matches the transcript renderer found for the
+    /// current search query at the last paint. The renderer is
+    /// the authority on match positions (it walks the laid-out
+    /// lines), so the key handler reads this cached count when
+    /// the user hits `n` / `N` to cycle.
+    pub search_match_count: usize,
+
+    /// Line indices (post-layout) of the start of each user turn.
+    /// Same renderer-writes / handler-reads contract as
+    /// `search_match_count`. Drives `[` / `]` turn-jump nav (X3).
+    pub turn_line_indices: Vec<u16>,
+
+    /// Position-stack history for Ctrl+O (back) / Ctrl+I (forward).
+    /// Each entry is a `scroll_manual` value (None = attached to
+    /// bottom). The cursor points one *past* the current position;
+    /// new positions are pushed at the cursor (truncating any
+    /// forward history). Capped at SCROLL_HISTORY_CAP entries.
+    pub scroll_positions: Vec<Option<u16>>,
+    pub scroll_pos_cursor: usize,
 }
+
+/// Position-stack depth for Ctrl+O / Ctrl+I jumps. The spec's
+/// "Done when" wants a stack of ≥ 8 entries.
+pub const SCROLL_HISTORY_CAP: usize = 16;
 
 /// Aggregate of every field the status bar can display. Optional
 /// fields render as "—" or get dropped on narrow terminals.
@@ -141,10 +189,17 @@ impl Default for App {
             unread_lines: 0,
             scroll_max: 0,
             scroll_viewport_height: 0,
-            theme: Theme::Dark,
+            markdown_theme: MarkdownTheme::Dark,
+            theme: Theme::dark(),
             status: StatusModel::default(),
             slash_descriptions: HashMap::new(),
             shown_hints: HashSet::new(),
+            osc52_supported: true,
+            host_hint: String::from("unknown"),
+            search_match_count: 0,
+            turn_line_indices: Vec::new(),
+            scroll_positions: Vec::new(),
+            scroll_pos_cursor: 0,
         }
     }
 }
@@ -159,7 +214,7 @@ pub enum SubmitAction {
 impl App {
     pub fn new() -> Self {
         let mut app = Self::default();
-        app.theme = Theme::detect();
+        app.markdown_theme = MarkdownTheme::detect();
         app.transcript.push(TranscriptItem::System {
             body: "oli ready. type a message and press Enter (Shift+Enter for newline). \
                    /help for commands, Ctrl+D to exit."
@@ -211,6 +266,18 @@ impl App {
         self.history_draft = None;
     }
 
+    /// Wire the OSC52 capability + host label set at TUI startup.
+    /// The slash handler reads these to pick between writing the
+    /// OSC52 escape or opening the copy-fallback modal.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.theme = theme;
+    }
+
+    pub fn set_clipboard_caps(&mut self, osc52_supported: bool, host_hint: String) {
+        self.osc52_supported = osc52_supported;
+        self.host_hint = host_hint;
+    }
+
     pub fn request_quit(&mut self) {
         self.should_quit = true;
     }
@@ -243,11 +310,37 @@ impl App {
                 return SubmitAction::None;
             }
             KeyCode::Home if ctrl => {
+                self.record_scroll_position();
                 self.scroll_to_top();
                 return SubmitAction::None;
             }
             KeyCode::End if ctrl => {
+                self.record_scroll_position();
                 self.scroll_to_bottom();
+                return SubmitAction::None;
+            }
+            // Turn-jump nav (X3): `[` / `]` jump between user
+            // turns, but only when the input is empty so the
+            // characters can still be typed mid-prompt.
+            KeyCode::Char('[') if !ctrl && !alt && self.is_input_empty() => {
+                self.jump_to_prev_turn();
+                return SubmitAction::None;
+            }
+            KeyCode::Char(']') if !ctrl && !alt && self.is_input_empty() => {
+                self.jump_to_next_turn();
+                return SubmitAction::None;
+            }
+            // Position-stack jumps (X3): Ctrl+O steps back through
+            // recorded scroll positions, Ctrl+I steps forward. In
+            // legacy terminals Ctrl+I is indistinguishable from
+            // Tab; only kitty-keyboard-mode terminals see the
+            // distinct event.
+            KeyCode::Char('o') if ctrl => {
+                self.jump_back_in_history();
+                return SubmitAction::None;
+            }
+            KeyCode::Char('i') if ctrl => {
+                self.jump_forward_in_history();
                 return SubmitAction::None;
             }
             _ => {}
@@ -303,12 +396,9 @@ impl App {
     }
 
     /// True when the user hasn't typed anything in the input box.
-    /// Reserved for future first-keystroke detection (e.g. `?`
-    /// hint) — currently unused; the bare-letter scroll
-    /// shortcuts that needed it were dropped in favor of
-    /// Ctrl+Home/Ctrl+End.
-    #[allow(dead_code)]
-    fn is_input_empty(&self) -> bool {
+    /// Gates the bare-letter shortcuts (`[`/`]` turn-jump nav)
+    /// so they don't steal keystrokes mid-prompt.
+    pub fn is_input_empty(&self) -> bool {
         self.input.lines().iter().all(|l| l.is_empty())
     }
 
@@ -494,6 +584,14 @@ impl App {
             self.completion = None;
             return;
         }
+        let match_positions: Vec<Vec<u32>> = if ctx.query.is_empty() {
+            candidates.iter().map(|_| Vec::new()).collect()
+        } else {
+            candidates
+                .iter()
+                .map(|c| crate::tui::fuzzy::match_positions(&ctx.query, c))
+                .collect()
+        };
         let prior_selected = self
             .completion
             .as_ref()
@@ -503,6 +601,7 @@ impl App {
         self.completion = Some(CompletionMenu {
             kind: ctx.kind,
             candidates,
+            match_positions,
             selected: prior_selected,
             replace_start_byte: ctx.replace_start_byte,
         });

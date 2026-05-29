@@ -17,12 +17,54 @@ Every keyboard affordance and slash command in one place. Linked from
 | `oli --strict -p "..."`                            | One-shot, deny every `Ask` policy decision (unattended-safe scripted runs).  |
 | `oli --max-turns N`                                | Cap turns for this run (overrides `[agent].max_turns` config).               |
 | `oli --plain`                                      | Force the line-mode REPL even on a TTY.                                      |
+| `oli --inline`                                     | Render TUI inline in the host buffer (no alt-screen). Buffer-terminals.      |
+| `oli --fullscreen`                                 | Force alt-screen even when auto-detection would pick inline mode.            |
 | `oli init`                                         | Interactive `~/.config/oli/config.toml` setup on stdin.                      |
 | `oli init --provider ollama`                       | Headless config bootstrap; defaults for everything.                          |
 | `oli init --provider openrouter --api-key sk-...`  | Full non-interactive bootstrap.                                              |
 | `oli init --provider ollama --force`               | Overwrite an existing config file.                                           |
 
 ## TUI
+
+### Viewport modes
+
+oli renders in one of two modes, picked by `--inline` / `--fullscreen`,
+then `[ui].viewport`, then auto-detection.
+
+- **Fullscreen** (default in a fresh terminal): owns the screen via
+  alternate-screen, mouse capture on, focus events on. Exiting
+  restores the prior terminal contents.
+- **Inline** (default inside Neovim `:terminal`, VSCode integrated
+  terminal, Emacs `term`): renders in a fixed block in the host
+  buffer, no alt-screen, no mouse capture. The transcript stays as
+  normal scrollback when oli exits. Use the **host buffer's** scroll
+  affordances to scroll past the inline block; PgUp/PgDn inside oli
+  still scroll oli's transcript.
+
+Mouse-wheel ownership in inline mode: the host buffer owns the
+wheel by default (so editor / VSCode scroll works). Set
+`[ui].mouse = true` (or pass `--fullscreen`) to let oli capture it.
+
+### Clipboard (`/copy N`)
+
+oli's preferred clipboard path is OSC52 — a single escape sequence
+the host terminal turns into a clipboard write. iTerm2, kitty,
+WezTerm, ghostty, foot, and tmux (with `set-clipboard on`) all
+honor it; Neovim `:terminal`, VSCode integrated terminal, and most
+generic xterm variants don't.
+
+When OSC52 isn't supported, `/copy N` opens a fallback modal with
+the verbatim message body. Select it with your terminal's normal
+mouse / keyboard selection and copy with the host's shortcut
+(`Cmd+C`, `Ctrl+Shift+C`, etc.). Press any key to dismiss.
+
+Force the path with `[ui].osc52`:
+
+- `"on"` — always write the escape, even in hosts we'd default off.
+  Use when the host honors OSC52 but we couldn't detect it.
+- `"off"` — always open the fallback modal. Use when the host
+  *does* honor OSC52 but you'd rather see what you're copying.
+- `"auto"` / unset — defer to capability detection.
 
 ### Input box
 
@@ -120,6 +162,7 @@ listing.
 | `~/.config/oli/tui-history.jsonl`          | Persistent prompt history (Up/Down + Ctrl+R search).                 |
 | `~/.config/oli/tui-hints.json`             | Hint ids the user has dismissed (faded onboarding tips).             |
 | `~/.config/oli/policy-allow.json`          | Fingerprints persisted via `[A]` on the approval modal.              |
+| `[ui].theme` in config                     | `"dark"` (default) / `"light"` / `"dimmed"` / `"auto"` (consults `$COLORFGBG`). |
 | `~/.config/oli/plugins/`                   | Lua plugin directory, scanned at startup and on `/plugins reload`.   |
 | `<project>/.oli/config.toml`               | Optional project-scoped overlay; layered on top of the global file.  |
 | `<project>/.oli/notes/`                    | Long-term notes store (`WriteNote`/`SearchNotes`/`ListNotes`).       |
@@ -131,6 +174,9 @@ listing.
 | `XDG_CONFIG_HOME` | Override the `~/.config` root for all oli files.                                      |
 | `RUST_LOG`        | Stderr threshold for the diagnostics shim. `info` (default) / `warn` / `error` etc.  |
 | `COLORFGBG`       | Auto-detect light vs dark terminal theme for the markdown renderer.                   |
+| `NVIM`, `NVIM_LISTEN_ADDRESS` | Detected at startup → oli treats the host as a buffer-terminal (inline mode, no OSC52, no DA queries, no mouse capture). |
+| `TERM_PROGRAM=vscode`, `VSCODE_INJECTION` | Same: detected as buffer-terminal. |
+| `INSIDE_EMACS`    | Detected as buffer-terminal (Emacs `term`).                                           |
 
 ## Build features
 

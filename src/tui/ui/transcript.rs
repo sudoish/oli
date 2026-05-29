@@ -5,12 +5,13 @@
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Padding, Paragraph, Wrap};
 
 use crate::tui::app::{App, ToolCardState, TranscriptItem};
 use crate::tui::markdown;
+use crate::tui::theme::Theme;
 
 use super::spinner_glyph;
 
@@ -26,18 +27,48 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     let inner_width = area.width.saturating_sub(TRANSCRIPT_H_PAD * 2);
     let lines = build_transcript_lines(app, inner_width);
 
+    // Cache user-turn line indices so the input handler can jump
+    // between them with `[` / `]` (X3). The renderer is the only
+    // place that knows the post-layout line numbers, so it owns
+    // this cache.
+    app.turn_line_indices = user_turn_line_indices(&lines);
+
     // Now that the borrow on `app.transcript` is dropped, settle
     // the scroll metrics from the actual rendered line count.
     let total = lines.len() as u16;
     let height = area.height.saturating_sub(TRANSCRIPT_BOTTOM_PAD);
     let max = total.saturating_sub(height);
     app.note_scroll_metrics(max, height);
-    let offset = match app.scroll_manual {
-        None => max,
-        Some(o) => o.min(max),
-    };
     let detached = app.is_scroll_detached();
     let unread = app.unread_lines;
+
+    // Search overlay (X2): when active, highlight every match in
+    // the rendered lines, cache the match count on App so the
+    // key handler can cycle, and scroll the focused match into
+    // view (overrides `app.scroll_manual` while search is open).
+    let search_query = app.search().map(|s| (s.query.clone(), s.current));
+    let (lines, scroll_override) = if let Some((q, cur)) = search_query.as_ref() {
+        let (highlighted, match_idxs) =
+            apply_search_highlight(lines, q, app.theme.match_highlight, app.theme.selected_fg);
+        app.search_match_count = match_idxs.len();
+        let scroll = if match_idxs.is_empty() {
+            None
+        } else {
+            let focus = match_idxs[(*cur).min(match_idxs.len() - 1)] as u16;
+            // Place the matched line a few rows below the top of
+            // the pane so the user can read context above it.
+            Some(focus.saturating_sub(2).min(max))
+        };
+        (highlighted, scroll)
+    } else {
+        app.search_match_count = 0;
+        (lines, None)
+    };
+    let offset = match (scroll_override, app.scroll_manual) {
+        (Some(o), _) => o,
+        (None, None) => max,
+        (None, Some(o)) => o.min(max),
+    };
 
     // Chat-app anchoring: when the transcript is shorter than the
     // pane, push messages to the bottom by prepending blank lines.
@@ -74,8 +105,8 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
             let badge = Paragraph::new(Line::from(Span::styled(
                 label,
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(app.theme.selected_fg)
+                    .bg(app.theme.match_highlight)
                     .add_modifier(Modifier::BOLD),
             )));
             f.render_widget(badge, badge_area);
@@ -89,16 +120,15 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
 /// terminal. `rule_width` controls the horizontal-rule glyph count
 /// inserted between user→assistant turn boundaries.
 pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'static>> {
+    let theme = &app.theme;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let items = &app.transcript;
     for (i, item) in items.iter().enumerate() {
         let is_active = app.active_assistant == Some(i);
         match item {
             TranscriptItem::UserPrompt { body } => {
-                // Header `you ▐` — mirror of the assistant's `▌ oli`,
-                // pinned to the right edge of the inner pane.
                 let header_text = "you ";
-                let header_chars = header_text.chars().count() as u16 + 1; // +1 for ▐
+                let header_chars = header_text.chars().count() as u16 + 1;
                 let header_pad = rule_width.saturating_sub(header_chars) as usize;
                 let mut header_spans: Vec<Span<'static>> = Vec::with_capacity(3);
                 if header_pad > 0 {
@@ -107,20 +137,17 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                 header_spans.push(Span::styled(
                     header_text.to_string(),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.user)
                         .add_modifier(Modifier::BOLD),
                 ));
                 header_spans.push(Span::styled(
                     "▐".to_string(),
                     Style::default()
-                        .fg(Color::Yellow)
+                        .fg(theme.user)
                         .add_modifier(Modifier::BOLD),
                 ));
                 lines.push(Line::from(header_spans));
 
-                // Body chunks right-aligned with a 2-col right
-                // gutter — mirrors the 2-col left gutter assistant
-                // body uses under `▌ oli`.
                 let body_right_gutter: u16 = 2;
                 let body_total_w = rule_width.saturating_sub(body_right_gutter);
                 let bubble_width = bubble_width_for(rule_width);
@@ -132,10 +159,7 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                         if pad > 0 {
                             spans.push(Span::raw(" ".repeat(pad)));
                         }
-                        spans.push(Span::styled(
-                            chunk,
-                            Style::default().fg(Color::White),
-                        ));
+                        spans.push(Span::styled(chunk, Style::default().fg(theme.fg)));
                         lines.push(Line::from(spans));
                     }
                 }
@@ -144,24 +168,18 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                 lines.push(Line::from(Span::styled(
                     "▌ oli",
                     Style::default()
-                        .fg(Color::Cyan)
+                        .fg(theme.accent)
                         .add_modifier(Modifier::BOLD),
                 )));
                 if body.is_empty() && is_active {
                     lines.push(Line::from(Span::styled(
                         "  · waiting for first token",
                         Style::default()
-                            .fg(Color::DarkGray)
+                            .fg(theme.dim)
                             .add_modifier(Modifier::ITALIC),
                     )));
                 } else {
-                    // Re-parse the current body each frame.
-                    // pulldown-cmark on a few KB of prose is
-                    // microsecond-fast; mid-stream un-closed
-                    // tokens render as literal text. Each
-                    // markdown line gets a 2-space gutter so it
-                    // visually nests under the `▌ oli` header.
-                    for md_line in markdown::render(body, app.theme) {
+                    for md_line in markdown::render(body, app.markdown_theme) {
                         let mut spans: Vec<Span<'static>> =
                             Vec::with_capacity(md_line.spans.len() + 1);
                         spans.push(Span::raw("  "));
@@ -176,7 +194,7 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                     last.spans.push(Span::styled(
                         "▍",
                         Style::default()
-                            .fg(Color::Cyan)
+                            .fg(theme.accent)
                             .add_modifier(Modifier::SLOW_BLINK),
                     ));
                 }
@@ -186,7 +204,7 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                     lines.push(Line::from(Span::styled(
                         format!("  {}", body_line),
                         Style::default()
-                            .fg(Color::DarkGray)
+                            .fg(theme.dim)
                             .add_modifier(Modifier::ITALIC),
                     )));
                 }
@@ -197,20 +215,17 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                 state,
                 ..
             } => {
-                lines.push(render_tool_card_line(tool, args_preview, state));
-                if let Some(detail) = render_tool_card_detail(state) {
+                lines.push(render_tool_card_line(tool, args_preview, state, theme));
+                if let Some(detail) = render_tool_card_detail(state, theme) {
                     lines.push(detail);
                 }
             }
         }
-        // Trailing separator between items. User→Assistant
-        // transitions get a dim horizontal rule (turn boundary);
-        // everything else gets a blank line.
         let next = items.get(i + 1);
         let user_to_assistant = matches!(item, TranscriptItem::UserPrompt { .. })
             && matches!(next, Some(TranscriptItem::Assistant { .. }));
         if user_to_assistant {
-            lines.push(separator_rule(rule_width));
+            lines.push(separator_rule(rule_width, theme));
         } else {
             lines.push(Line::raw(""));
         }
@@ -301,15 +316,121 @@ pub(super) fn anchor_to_bottom(
     lines
 }
 
+/// Re-paint every `Line` so case-insensitive substring matches of
+/// Line indices (post-layout) of user-turn headers. Detects them
+/// by the trailing `▐` glyph emitted only by the UserPrompt header
+/// in `build_transcript_lines`. Returned indices match the row
+/// offset in the laid-out transcript and are clamped to `u16` —
+/// `scroll_manual` is `u16` too, so callers don't need to widen.
+pub(super) fn user_turn_line_indices(lines: &[Line<'_>]) -> Vec<u16> {
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.spans.iter().any(|s| s.content.as_ref() == "▐") {
+            out.push(i as u16);
+        }
+    }
+    out
+}
+
+/// `needle` are styled with `bg = highlight` / `fg = highlight_fg`.
+/// Returns the recolored lines and a vector of line indices that
+/// contained at least one match. Empty `needle` short-circuits to
+/// `(lines, vec![])` — search inactive, no recoloring.
+pub(super) fn apply_search_highlight(
+    lines: Vec<Line<'static>>,
+    needle: &str,
+    highlight: ratatui::style::Color,
+    highlight_fg: ratatui::style::Color,
+) -> (Vec<Line<'static>>, Vec<usize>) {
+    if needle.is_empty() {
+        return (lines, Vec::new());
+    }
+    let needle_lc = needle.to_lowercase();
+    let mut match_idxs = Vec::new();
+    let out: Vec<Line<'static>> = lines
+        .into_iter()
+        .enumerate()
+        .map(|(line_idx, line)| {
+            // Concatenate the line's text for a single
+            // substring scan. If it doesn't match, return the
+            // line untouched — preserves the original styling
+            // and avoids redundant Span splits.
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            if !text.to_lowercase().contains(&needle_lc) {
+                return line;
+            }
+            match_idxs.push(line_idx);
+            highlight_line_spans(line, &needle_lc, highlight, highlight_fg)
+        })
+        .collect();
+    (out, match_idxs)
+}
+
+/// Split a line's spans so every case-insensitive substring
+/// occurrence of `needle_lc` gets the highlight style applied. The
+/// non-match runs keep their original style.
+fn highlight_line_spans(
+    line: Line<'static>,
+    needle_lc: &str,
+    highlight: ratatui::style::Color,
+    highlight_fg: ratatui::style::Color,
+) -> Line<'static> {
+    let hl_style = Style::default()
+        .bg(highlight)
+        .fg(highlight_fg)
+        .add_modifier(Modifier::BOLD);
+
+    let mut new_spans: Vec<Span<'static>> = Vec::new();
+    for span in line.spans {
+        let span_text: &str = span.content.as_ref();
+        let span_lc = span_text.to_lowercase();
+        // ASCII (the overwhelming common case) preserves byte
+        // positions through `to_lowercase`. If the lowercased
+        // span's byte length changed (a non-ASCII codepoint
+        // folded to a different-width form), bail on the
+        // highlight for this span — keep it as-is to avoid
+        // slicing at a non-char-boundary.
+        if span_lc.len() != span_text.len() {
+            new_spans.push(span);
+            continue;
+        }
+        let mut cursor = 0usize;
+        while cursor < span_text.len() {
+            match span_lc[cursor..].find(needle_lc) {
+                None => {
+                    new_spans.push(Span::styled(
+                        span_text[cursor..].to_string(),
+                        span.style,
+                    ));
+                    break;
+                }
+                Some(rel) => {
+                    let start = cursor + rel;
+                    let end = start + needle_lc.len();
+                    if start > cursor {
+                        new_spans.push(Span::styled(
+                            span_text[cursor..start].to_string(),
+                            span.style,
+                        ));
+                    }
+                    new_spans.push(Span::styled(
+                        span_text[start..end].to_string(),
+                        hl_style,
+                    ));
+                    cursor = end;
+                }
+            }
+        }
+    }
+    Line::from(new_spans)
+}
+
 /// Dim horizontal rule used between user→assistant turn
 /// boundaries. Width is the inner width of the transcript pane so
 /// the rule visually spans the full gutter.
-fn separator_rule(width: u16) -> Line<'static> {
+fn separator_rule(width: u16, theme: &Theme) -> Line<'static> {
     let glyphs: String = std::iter::repeat('─').take(width.max(1) as usize).collect();
-    Line::from(Span::styled(
-        glyphs,
-        Style::default().fg(Color::DarkGray),
-    ))
+    Line::from(Span::styled(glyphs, Style::default().fg(theme.dim)))
 }
 
 /// Header line of a tool card:
@@ -318,12 +439,13 @@ fn render_tool_card_line(
     tool: &str,
     args_preview: &str,
     state: &ToolCardState,
+    theme: &Theme,
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let arrow_color = match state {
-        ToolCardState::Running { .. } => Color::Yellow,
-        ToolCardState::Done { ok: true, .. } => Color::Green,
-        ToolCardState::Done { ok: false, .. } => Color::Red,
+        ToolCardState::Running { .. } => theme.tool_running,
+        ToolCardState::Done { ok: true, .. } => theme.tool_ok,
+        ToolCardState::Done { ok: false, .. } => theme.tool_err,
     };
     spans.push(Span::styled(
         "  → ",
@@ -334,13 +456,13 @@ fn render_tool_card_line(
     spans.push(Span::styled(
         format!("{:<7}", tool),
         Style::default()
-            .fg(Color::Cyan)
+            .fg(theme.accent)
             .add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
         args_preview.to_string(),
-        Style::default().fg(Color::White),
+        Style::default().fg(theme.fg),
     ));
     spans.push(Span::raw("  "));
     match state {
@@ -348,18 +470,18 @@ fn render_tool_card_line(
             let elapsed = started_at.elapsed().as_secs_f32();
             spans.push(Span::styled(
                 format!("{} {:.1}s", spinner_glyph(elapsed), elapsed),
-                Style::default().fg(Color::Yellow),
+                Style::default().fg(theme.tool_running),
             ));
         }
         ToolCardState::Done { duration, ok, .. } => {
             spans.push(Span::styled(
                 format!("{:.2}s", duration.as_secs_f32()),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme.dim),
             ));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
                 if *ok { "✓" } else { "✗" },
-                Style::default().fg(if *ok { Color::Green } else { Color::Red }),
+                Style::default().fg(if *ok { theme.tool_ok } else { theme.tool_err }),
             ));
         }
     }
@@ -369,7 +491,7 @@ fn render_tool_card_line(
 /// Optional detail line under a card. Running cards show no
 /// detail; done cards show their summary indented under the
 /// header.
-fn render_tool_card_detail(state: &ToolCardState) -> Option<Line<'static>> {
+fn render_tool_card_detail(state: &ToolCardState, theme: &Theme) -> Option<Line<'static>> {
     match state {
         ToolCardState::Running { .. } => None,
         ToolCardState::Done { summary, ok, .. } => {
@@ -379,7 +501,7 @@ fn render_tool_card_detail(state: &ToolCardState) -> Option<Line<'static>> {
             Some(Line::from(Span::styled(
                 format!("    {}", summary),
                 Style::default()
-                    .fg(if *ok { Color::DarkGray } else { Color::Red })
+                    .fg(if *ok { theme.dim } else { theme.diff_removed })
                     .add_modifier(Modifier::ITALIC),
             )))
         }
@@ -390,10 +512,92 @@ fn render_tool_card_detail(state: &ToolCardState) -> Option<Line<'static>> {
 mod tests {
     use super::*;
     use crate::tui::app::App;
+    use ratatui::style::Color;
     use std::time::Duration;
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn apply_search_highlight_empty_query_is_noop() {
+        let lines = vec![Line::from(Span::raw("hello world".to_string()))];
+        let (out, idxs) =
+            apply_search_highlight(lines.clone(), "", Color::Yellow, Color::Black);
+        assert!(idxs.is_empty());
+        assert_eq!(line_text(&out[0]), "hello world");
+    }
+
+    #[test]
+    fn apply_search_highlight_finds_substring_case_insensitive() {
+        let lines = vec![
+            Line::from(Span::raw("a panic happened".to_string())),
+            Line::from(Span::raw("ok".to_string())),
+            Line::from(Span::raw("PANIC again".to_string())),
+        ];
+        let (out, idxs) =
+            apply_search_highlight(lines, "panic", Color::Yellow, Color::Black);
+        assert_eq!(idxs, vec![0, 2]);
+        // The needle text round-trips and shares a single span
+        // with the highlight style.
+        let hl_present = |line: &Line<'_>| {
+            line.spans.iter().any(|s| {
+                s.style.bg == Some(Color::Yellow)
+                    && s.content.eq_ignore_ascii_case("panic")
+            })
+        };
+        assert!(hl_present(&out[0]));
+        assert!(hl_present(&out[2]));
+        // Untouched line keeps its original (single) span.
+        assert_eq!(out[1].spans.len(), 1);
+    }
+
+    #[test]
+    fn apply_search_highlight_splits_spans_across_styled_runs() {
+        // "hel" + "lo world" — a needle "ello" crosses both spans
+        // *texts* but each span is matched independently. So
+        // "hel" has no match; "lo world" has no "ello" either.
+        // For a true cross-span match we'd need pre-concatenated
+        // text; the current implementation explicitly scopes
+        // matches inside a single span. Document that here.
+        let line = Line::from(vec![
+            Span::styled("hel".to_string(), Style::default().fg(Color::Red)),
+            Span::styled("lo world".to_string(), Style::default().fg(Color::Blue)),
+        ]);
+        let (out, idxs) = apply_search_highlight(
+            vec![line],
+            "ello",
+            Color::Yellow,
+            Color::Black,
+        );
+        // The whole line *is* counted as a match (the
+        // concatenated text contains 'ello'), but no span got
+        // re-styled because no individual span contains it.
+        assert_eq!(idxs, vec![0]);
+        assert!(
+            out[0]
+                .spans
+                .iter()
+                .all(|s| s.style.bg != Some(Color::Yellow))
+        );
+    }
+
+    #[test]
+    fn apply_search_highlight_recolors_within_a_single_span() {
+        let line = Line::from(Span::styled(
+            "before MATCH after".to_string(),
+            Style::default().fg(Color::Red),
+        ));
+        let (out, idxs) =
+            apply_search_highlight(vec![line], "match", Color::Yellow, Color::Black);
+        assert_eq!(idxs, vec![0]);
+        // Three spans now: "before ", "MATCH", " after".
+        let texts: Vec<&str> = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(texts, vec!["before ", "MATCH", " after"]);
+        assert_eq!(out[0].spans[1].style.bg, Some(Color::Yellow));
+        // Non-match spans keep their original fg.
+        assert_eq!(out[0].spans[0].style.fg, Some(Color::Red));
+        assert_eq!(out[0].spans[2].style.fg, Some(Color::Red));
     }
 
     fn has_rule(lines: &[Line<'_>]) -> bool {
@@ -603,5 +807,47 @@ mod tests {
             .find(|l| line_text(l).contains('─'))
             .expect("rule should be present");
         assert_eq!(line_text(rule_line).chars().count(), 12);
+    }
+
+    #[test]
+    fn user_turn_indices_match_each_user_prompt_header() {
+        let mut app = App::new();
+        app.transcript
+            .push(TranscriptItem::UserPrompt { body: "first".into() });
+        app.transcript.push(TranscriptItem::Assistant {
+            body: "a".into(),
+            done: true,
+        });
+        app.transcript.push(TranscriptItem::UserPrompt {
+            body: "second".into(),
+        });
+        app.transcript.push(TranscriptItem::Assistant {
+            body: "b".into(),
+            done: true,
+        });
+        let lines = build_transcript_lines(&app, 40);
+        let idxs = user_turn_line_indices(&lines);
+        // Two user turns → two indices.
+        assert_eq!(idxs.len(), 2);
+        // Each index points at a line containing "you " (the user
+        // header text), confirming we landed on the header row.
+        for i in &idxs {
+            let row = &lines[*i as usize];
+            let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains("you "), "row text was: {:?}", text);
+        }
+        // Indices are strictly increasing.
+        assert!(idxs[0] < idxs[1]);
+    }
+
+    #[test]
+    fn user_turn_indices_returns_empty_when_no_user_prompts() {
+        let mut app = App::new();
+        app.transcript.push(TranscriptItem::Assistant {
+            body: "a".into(),
+            done: true,
+        });
+        let lines = build_transcript_lines(&app, 40);
+        assert!(user_turn_line_indices(&lines).is_empty());
     }
 }

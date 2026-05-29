@@ -22,14 +22,17 @@
 
 mod app;
 mod approver;
+pub mod caps;
 mod completion;
 mod driver;
 mod event;
+pub mod fuzzy;
 mod hints;
 pub mod history;
 mod hook;
 mod markdown;
 mod terminal;
+pub mod theme;
 mod ui;
 mod wizard;
 
@@ -53,13 +56,22 @@ use crate::tui::app::{Mode, SubmitAction};
 use crate::tui::approver::{PendingApproval, TuiApprover};
 use crate::tui::driver::AgentCommand;
 use crate::tui::event::{ApprovalResponse, UiEvent};
-use crate::tui::terminal::TerminalGuard;
+use crate::tui::terminal::{TerminalGuard, ViewportMode};
+
+pub use crate::tui::terminal::{
+    ViewportChoice, ViewportMode as Viewport, resolve_mode, resolve_mouse,
+};
 
 pub async fn run(
     mut agent: Agent,
     plugin_slashes: Vec<Box<dyn SlashCommand>>,
     reloader: Option<Arc<PluginReloader>>,
     session_id: Option<String>,
+    viewport: ViewportMode,
+    mouse_capture: bool,
+    osc52_supported: bool,
+    host_hint: String,
+    theme: theme::Theme,
 ) -> Result<()> {
     // Snapshot identity fields for the status bar before the
     // agent moves into the driver task. Branch is queried once
@@ -74,7 +86,7 @@ pub async fn run(
         session_usage: Default::default(),
     };
 
-    let mut guard = TerminalGuard::enter()
+    let mut guard = TerminalGuard::enter(viewport, mouse_capture)
         .map_err(|e| AgentError::Provider(format!("tui init: {}", e)))?;
 
     let (tx, mut rx) = mpsc::unbounded_channel::<UiEvent>();
@@ -148,6 +160,8 @@ pub async fn run(
     app.set_slash_meta(initial_slash_meta);
     app.set_status(initial_status);
     app.set_shown_hints(hints::load());
+    app.set_clipboard_caps(osc52_supported, host_hint);
+    app.set_theme(theme);
     if !has_user_config() {
         app.open_wizard();
     }
@@ -329,8 +343,16 @@ fn on_key(
             handle_history_search_key(app, key);
             return;
         }
+        Some(Overlay::CopyFallback(_)) => {
+            handle_copy_fallback_key(app, key);
+            return;
+        }
         Some(Overlay::Wizard(_)) => {
             handle_wizard_key(app, key, ui_tx);
+            return;
+        }
+        Some(Overlay::Search(_)) => {
+            handle_search_key(app, key);
             return;
         }
         None => {}
@@ -379,6 +401,16 @@ fn on_key(
                     load_into_input: true,
                 });
             }
+            return;
+        }
+        KeyCode::Char('f') if ctrl => {
+            // Ctrl+F: in-transcript search. Opens a one-line
+            // search bar above the input; typing filters,
+            // Enter / n / N cycle matches, Esc closes. (Spec X2
+            // suggested `/` but that's already the slash-command
+            // sigil at the input prompt — Ctrl+F sidesteps the
+            // conflict.)
+            app.open_search();
             return;
         }
         _ => {}
@@ -546,11 +578,17 @@ fn has_user_config() -> bool {
 }
 
 /// `/copy [N]` — copy the N-th-most-recent assistant message to
-/// the system clipboard via OSC52. `N` defaults to 1 (the most
-/// recent). OSC52 lands in iTerm2, kitty, WezTerm, Alacritty
-/// (with `clipboard.osc52: true`), and tmux (with
-/// `set-clipboard on`). Terminals that don't support it silently
-/// drop the escape; we surface a hint either way.
+/// the system clipboard. `N` defaults to 1 (the most recent).
+///
+/// In hosts that support OSC52 (iTerm2, kitty, WezTerm, ghostty,
+/// tmux with `set-clipboard on`) we write the escape directly.
+/// In hosts that don't (Neovim `:terminal`, VSCode integrated
+/// terminal, generic xterm without an allowlist hit) we open the
+/// `Overlay::CopyFallback` modal instead — the user reads the body
+/// in a visible window and copies it via the host's own selection
+/// affordances. The split is driven by `App::osc52_supported`,
+/// which is resolved from `Capabilities::osc52` + `[ui].osc52`
+/// at TUI startup.
 fn handle_copy_slash(app: &mut App, arg: &str) {
     let n: usize = if arg.is_empty() {
         1
@@ -587,11 +625,16 @@ fn handle_copy_slash(app: &mut App, arg: &str) {
         return;
     };
 
-    write_osc52_clipboard(&body);
-    app.on_system_note(format!(
-        "copied {} bytes to clipboard via OSC52 (terminal must support it; tmux needs `set -g set-clipboard on`)",
-        body.len()
-    ));
+    if app.osc52_supported {
+        write_osc52_clipboard(&body);
+        app.on_system_note(format!(
+            "copied {} bytes to clipboard via OSC52 (terminal must support it; tmux needs `set -g set-clipboard on`)",
+            body.len()
+        ));
+    } else {
+        let host = app.host_hint.clone();
+        app.open_copy_fallback(body, n, host);
+    }
 }
 
 /// Write `payload` to the user's clipboard via the OSC52 escape
@@ -665,6 +708,67 @@ mod tests {
     fn base64_encode_handles_unicode_bytes() {
         // Emoji is 4 UTF-8 bytes (one block + one byte tail).
         assert_eq!(base64_encode("✓".as_bytes()), "4pyT");
+    }
+
+    use crate::tui::app::TranscriptItem;
+
+    fn app_with_assistants<I, S>(bodies: I) -> App
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut app = App::new();
+        for body in bodies {
+            app.transcript.push(TranscriptItem::Assistant {
+                body: body.into(),
+                done: true,
+            });
+        }
+        app
+    }
+
+    #[test]
+    fn copy_slash_opens_fallback_when_osc52_unsupported() {
+        let mut app = app_with_assistants(["hello world"]);
+        app.set_clipboard_caps(false, "vscode".into());
+        handle_copy_slash(&mut app, "");
+        let s = app.copy_fallback().expect("fallback should be open");
+        assert_eq!(s.body, "hello world");
+        assert_eq!(s.index, 1);
+        assert_eq!(s.host_hint, "vscode");
+    }
+
+    #[test]
+    fn copy_slash_does_not_open_fallback_when_osc52_supported() {
+        // When the host honors OSC52, the slash handler writes the
+        // escape and emits a system note — no modal is opened.
+        let mut app = app_with_assistants(["body"]);
+        app.set_clipboard_caps(true, "kitty".into());
+        handle_copy_slash(&mut app, "");
+        assert!(app.copy_fallback().is_none());
+    }
+
+    #[test]
+    fn copy_slash_with_explicit_n_targets_nth_most_recent() {
+        // `/copy 2` picks the second-most-recent assistant message,
+        // not the first one in the transcript. Verifying the index
+        // is carried into the modal title.
+        let mut app = app_with_assistants(["oldest", "middle", "newest"]);
+        app.set_clipboard_caps(false, "neovim:terminal".into());
+        handle_copy_slash(&mut app, "2");
+        let s = app.copy_fallback().expect("fallback should be open");
+        assert_eq!(s.body, "middle");
+        assert_eq!(s.index, 2);
+    }
+
+    #[test]
+    fn copy_slash_without_assistant_messages_does_not_open_fallback() {
+        // No transcript content → system note, no modal. Avoids an
+        // empty modal that the user has to dismiss for no reason.
+        let mut app = App::new();
+        app.set_clipboard_caps(false, "vscode".into());
+        handle_copy_slash(&mut app, "");
+        assert!(app.copy_fallback().is_none());
     }
 }
 
@@ -925,6 +1029,39 @@ fn handle_help_browser_key(app: &mut App, key: crossterm::event::KeyEvent) {
         KeyCode::Down => app.help_browser_navigate(1),
         KeyCode::Esc | KeyCode::Enter => app.close_help_browser(),
         _ => {}
+    }
+}
+
+fn handle_search_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // The renderer is the authority on the active match list
+    // (it's computed against the laid-out transcript), so the
+    // handler cycles via App's last cached count. For navigation
+    // we use `i32::MAX` as a sentinel meaning "let the renderer
+    // wrap it next paint" — App stores the modular index and the
+    // next render clamps it. In practice the cached count from
+    // `App.search_match_count` is sufficient.
+    let count = app.search_match_count;
+    match key.code {
+        KeyCode::Esc => app.close_search(),
+        KeyCode::Enter | KeyCode::Down => app.search_navigate(1, count),
+        KeyCode::Up => app.search_navigate(-1, count),
+        KeyCode::Char('n') if !ctrl => app.search_navigate(1, count),
+        KeyCode::Char('N') if !ctrl => app.search_navigate(-1, count),
+        KeyCode::Backspace => app.search_backspace(),
+        KeyCode::Char(c) if !ctrl => app.search_push_char(c),
+        _ => {}
+    }
+}
+
+fn handle_copy_fallback_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    match key.code {
+        KeyCode::PageUp => app.copy_fallback_scroll_up(),
+        KeyCode::PageDown => app.copy_fallback_scroll_down(),
+        // Modifier-only events shouldn't dismiss; everything else
+        // (including Esc, Enter, single chars) closes the modal.
+        KeyCode::Modifier(_) => {}
+        _ => app.close_copy_fallback(),
     }
 }
 

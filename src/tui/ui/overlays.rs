@@ -13,10 +13,11 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::tui::app::{
-    App, ApprovalState, HelpBrowserState, HistorySearchState, InlineHelpState,
+    App, ApprovalState, CopyFallbackState, HelpBrowserState, HistorySearchState, InlineHelpState,
     SessionsPickerState,
 };
 use crate::tui::hints;
+use crate::tui::theme::Theme;
 use crate::tui::wizard::{DaemonStatus, PullStatus, WizardProvider, WizardState, WizardStep};
 
 use super::{centered_rect, clip_to_width};
@@ -32,6 +33,7 @@ pub(super) fn draw_approval_modal(
     approval: &ApprovalState,
     app: &App,
 ) {
+    let theme = &app.theme;
     let modal = centered_rect(full_area, 80, 60).intersection(full_area);
     f.render_widget(Clear, modal);
 
@@ -39,21 +41,21 @@ pub(super) fn draw_approval_modal(
         .borders(Borders::ALL)
         .border_style(
             Style::default()
-                .fg(Color::Yellow)
+                .fg(theme.match_highlight)
                 .add_modifier(Modifier::BOLD),
         )
         .title(Line::from(vec![
             Span::styled(
                 " ⚠ approve ",
                 Style::default()
-                    .fg(Color::Yellow)
+                    .fg(theme.match_highlight)
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" {} ", approval.tool),
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Yellow)
+                    .fg(theme.selected_fg)
+                    .bg(theme.match_highlight)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));
@@ -71,18 +73,18 @@ pub(super) fn draw_approval_modal(
 
     // Reason header.
     let reason = Paragraph::new(Line::from(vec![
-        Span::styled("  reason: ", Style::default().fg(Color::DarkGray)),
-        Span::styled(approval.reason.as_str(), Style::default().fg(Color::White)),
+        Span::styled("  reason: ", Style::default().fg(theme.dim)),
+        Span::styled(approval.reason.as_str(), Style::default().fg(theme.fg)),
     ]));
     f.render_widget(reason, parts[0]);
 
     // Diff / preview body. Lines starting with `+`/`-` (after the
     // 4-space indent the diff renderer emits) get colored;
-    // everything else stays white.
+    // everything else stays fg.
     let lines: Vec<Line> = approval
         .preview
         .lines()
-        .map(diff_line_to_styled)
+        .map(|l| diff_line_to_styled(l, theme))
         .collect();
     let preview = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -93,14 +95,17 @@ pub(super) fn draw_approval_modal(
     let mut legend_spans: Vec<Span<'static>> = vec![Span::styled(
         "  [y]es  [n]o  [a]llow this session  [A]llow always (persisted)  [d]eny session  [PgUp/Dn] scroll  [Esc] cancel",
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(theme.dim)
             .add_modifier(Modifier::ITALIC),
     )];
     // Fading hint: highlight `a` and `d` for first-time users.
     if app.hint_is_unseen(hints::ids::APPROVAL_ALLOW) {
         legend_spans.insert(
             0,
-            Span::styled("  💡 ".to_string(), Style::default().fg(Color::Yellow)),
+            Span::styled(
+                "  💡 ".to_string(),
+                Style::default().fg(theme.match_highlight),
+            ),
         );
     }
     let legend = Paragraph::new(Line::from(legend_spans));
@@ -111,22 +116,28 @@ pub(super) fn draw_approval_modal(
 /// `policy::render_unified_diff` emits `    + body` / `    - body`
 /// / `      body` (4 spaces indent + sign + space + body). Others
 /// (the "file: …", "(replace_all)" header lines etc) stay white.
-fn diff_line_to_styled(line: &str) -> Line<'_> {
+fn diff_line_to_styled<'a>(line: &'a str, theme: &Theme) -> Line<'a> {
     let trimmed = line.trim_start();
     if let Some(rest) = trimmed.strip_prefix("+ ") {
         Line::from(vec![
             Span::raw("    "),
-            Span::styled(format!("+ {}", rest), Style::default().fg(Color::Green)),
+            Span::styled(
+                format!("+ {}", rest),
+                Style::default().fg(theme.diff_added),
+            ),
         ])
     } else if let Some(rest) = trimmed.strip_prefix("- ") {
         Line::from(vec![
             Span::raw("    "),
-            Span::styled(format!("- {}", rest), Style::default().fg(Color::Red)),
+            Span::styled(
+                format!("- {}", rest),
+                Style::default().fg(theme.diff_removed),
+            ),
         ])
     } else {
         Line::from(Span::styled(
             line.to_string(),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme.fg),
         ))
     }
 }
@@ -138,16 +149,21 @@ pub(super) fn draw_sessions_picker(
     f: &mut Frame,
     full_area: Rect,
     picker: &SessionsPickerState,
+    theme: &Theme,
 ) {
     let modal = centered_rect(full_area, 70, 60).intersection(full_area);
     f.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(Line::from(Span::styled(
             " /sessions  (↑↓ select · Enter copy `--resume` cmd · Esc close) ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
     let inner = block.inner(modal);
@@ -157,7 +173,7 @@ pub(super) fn draw_sessions_picker(
         let p = Paragraph::new(Line::from(Span::styled(
             "  (no prior sessions yet)",
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme.dim)
                 .add_modifier(Modifier::ITALIC),
         )));
         f.render_widget(p, inner);
@@ -180,11 +196,11 @@ pub(super) fn draw_sessions_picker(
             let selected = i == picker.selected;
             let style = if selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(theme.selected_fg)
+                    .bg(theme.selected_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.fg)
             };
             Line::from(Span::styled(
                 if selected {
@@ -201,16 +217,25 @@ pub(super) fn draw_sessions_picker(
 
 /// `/help` browser overlay. Two-pane: command list left, full
 /// description right. Arrow keys cycle, Esc / Enter closes.
-pub(super) fn draw_help_browser(f: &mut Frame, full_area: Rect, browser: &HelpBrowserState) {
+pub(super) fn draw_help_browser(
+    f: &mut Frame,
+    full_area: Rect,
+    browser: &HelpBrowserState,
+    theme: &Theme,
+) {
     let modal = centered_rect(full_area, 80, 70).intersection(full_area);
     f.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(Line::from(Span::styled(
             " /help  (↑↓ select · Esc close) ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
     let inner = block.inner(modal);
@@ -241,11 +266,11 @@ pub(super) fn draw_help_browser(f: &mut Frame, full_area: Rect, browser: &HelpBr
             let selected = i == browser.selected;
             let style = if selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(theme.selected_fg)
+                    .bg(theme.selected_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.fg)
             };
             Line::from(Span::styled(
                 if selected {
@@ -264,14 +289,14 @@ pub(super) fn draw_help_browser(f: &mut Frame, full_area: Rect, browser: &HelpBr
         detail_lines.push(Line::from(Span::styled(
             format!("/{}", name),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
         detail_lines.push(Line::raw(""));
         for body_line in desc.lines() {
             detail_lines.push(Line::from(Span::styled(
                 body_line.to_string(),
-                Style::default().fg(Color::White),
+                Style::default().fg(theme.fg),
             )));
         }
         let p = Paragraph::new(detail_lines).wrap(Wrap { trim: false });
@@ -281,16 +306,21 @@ pub(super) fn draw_help_browser(f: &mut Frame, full_area: Rect, browser: &HelpBr
 
 /// `/<cmd> ?` one-shot help card. Smaller modal than the full
 /// browser; fades on the next keystroke.
-pub(super) fn draw_inline_help(f: &mut Frame, full_area: Rect, card: &InlineHelpState) {
+pub(super) fn draw_inline_help(
+    f: &mut Frame,
+    full_area: Rect,
+    card: &InlineHelpState,
+    theme: &Theme,
+) {
     let modal = centered_rect(full_area, 60, 30).intersection(full_area);
     f.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
+        .border_style(Style::default().fg(theme.border))
         .title(Line::from(Span::styled(
             format!(" /{} ", card.name),
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
     let inner = block.inner(modal);
@@ -300,14 +330,14 @@ pub(super) fn draw_inline_help(f: &mut Frame, full_area: Rect, card: &InlineHelp
     for body_line in card.description.lines() {
         lines.push(Line::from(Span::styled(
             body_line.to_string(),
-            Style::default().fg(Color::White),
+            Style::default().fg(theme.fg),
         )));
     }
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
         "(press any key to close)".to_string(),
         Style::default()
-            .fg(Color::DarkGray)
+            .fg(theme.dim)
             .add_modifier(Modifier::ITALIC),
     )));
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
@@ -322,15 +352,20 @@ pub(super) fn draw_history_search(
     search: &HistorySearchState,
     app: &App,
 ) {
+    let theme = &app.theme;
     let modal = centered_rect(full_area, 70, 60).intersection(full_area);
     f.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+        .border_style(
+            Style::default()
+                .fg(theme.border)
+                .add_modifier(Modifier::BOLD),
+        )
         .title(Line::from(Span::styled(
             " (i-search) ↑↓ select · Enter load · Esc cancel ",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )));
     let inner = block.inner(modal);
@@ -340,17 +375,17 @@ pub(super) fn draw_history_search(
 
     // Query row.
     let query_line = Line::from(vec![
-        Span::styled("  search: ", Style::default().fg(Color::DarkGray)),
+        Span::styled("  search: ", Style::default().fg(theme.dim)),
         Span::styled(
             search.query.clone(),
             Style::default()
-                .fg(Color::White)
+                .fg(theme.fg)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "▍",
             Style::default()
-                .fg(Color::Cyan)
+                .fg(theme.accent)
                 .add_modifier(Modifier::SLOW_BLINK),
         ),
     ]);
@@ -365,7 +400,7 @@ pub(super) fn draw_history_search(
         let p = Paragraph::new(Line::from(Span::styled(
             hint,
             Style::default()
-                .fg(Color::DarkGray)
+                .fg(theme.dim)
                 .add_modifier(Modifier::ITALIC),
         )));
         f.render_widget(p, parts[1]);
@@ -393,11 +428,11 @@ pub(super) fn draw_history_search(
             let selected = i == search.selected;
             let style = if selected {
                 Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Cyan)
+                    .fg(theme.selected_fg)
+                    .bg(theme.selected_bg)
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::White)
+                Style::default().fg(theme.fg)
             };
             Line::from(Span::styled(
                 if selected {
@@ -410,6 +445,89 @@ pub(super) fn draw_history_search(
         })
         .collect();
     f.render_widget(Paragraph::new(lines), parts[1]);
+}
+
+/// `/copy N` fallback modal. Shown when the host doesn't support
+/// OSC52 (Phase W4): we render the verbatim message body inside a
+/// centered modal and instruct the user to select + copy via the
+/// host's own selection affordances. PgUp/PgDn scroll the body
+/// for long messages; any other key dismisses.
+pub(super) fn draw_copy_fallback(
+    f: &mut Frame,
+    full_area: Rect,
+    state: &CopyFallbackState,
+    theme: &Theme,
+) {
+    let modal = centered_rect(full_area, 80, 70).intersection(full_area);
+    f.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(theme.match_highlight)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(Line::from(vec![
+            Span::styled(
+                " 📋 copy below ",
+                Style::default()
+                    .fg(theme.match_highlight)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" /copy {} ", state.index),
+                Style::default()
+                    .fg(theme.selected_fg)
+                    .bg(theme.match_highlight)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    // Layout: explanatory header (3 lines), body (flex), legend
+    // (1 line).
+    let parts = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(3),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+
+    let header_lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "  Your terminal ({}) blocked OSC52 — select the text below and copy with your terminal's shortcut.",
+                state.host_hint
+            ),
+            Style::default().fg(theme.fg),
+        )),
+        Line::from(Span::styled(
+            "  ([ui].osc52 = \"on\" forces OSC52; \"off\" keeps this fallback.)".to_string(),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
+        )),
+    ];
+    f.render_widget(Paragraph::new(header_lines), parts[0]);
+
+    let body_lines: Vec<Line<'static>> = state
+        .body
+        .lines()
+        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(theme.fg))))
+        .collect();
+    let body = Paragraph::new(body_lines)
+        .wrap(Wrap { trim: false })
+        .scroll((state.scroll, 0));
+    f.render_widget(body, parts[1]);
+
+    let legend = Paragraph::new(Line::from(Span::styled(
+        "  [PgUp/Dn] scroll  [Esc / any other key] close".to_string(),
+        Style::default()
+            .fg(theme.dim)
+            .add_modifier(Modifier::ITALIC),
+    )));
+    f.render_widget(legend, parts[2]);
 }
 
 /// First-run setup wizard overlay. Multi-step modal:
