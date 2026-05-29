@@ -48,11 +48,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     use crate::tui::app::Overlay;
     match &app.overlay {
         Some(Overlay::Approval(s)) => overlays::draw_approval_modal(f, area, s, app),
-        Some(Overlay::SessionsPicker(s)) => overlays::draw_sessions_picker(f, area, s),
-        Some(Overlay::HelpBrowser(s)) => overlays::draw_help_browser(f, area, s),
-        Some(Overlay::InlineHelp(s)) => overlays::draw_inline_help(f, area, s),
+        Some(Overlay::SessionsPicker(s)) => {
+            overlays::draw_sessions_picker(f, area, s, &app.theme)
+        }
+        Some(Overlay::HelpBrowser(s)) => overlays::draw_help_browser(f, area, s, &app.theme),
+        Some(Overlay::InlineHelp(s)) => overlays::draw_inline_help(f, area, s, &app.theme),
         Some(Overlay::HistorySearch(s)) => overlays::draw_history_search(f, area, s, app),
-        Some(Overlay::CopyFallback(s)) => overlays::draw_copy_fallback(f, area, s),
+        Some(Overlay::CopyFallback(s)) => overlays::draw_copy_fallback(f, area, s, &app.theme),
         Some(Overlay::Wizard(s)) => overlays::draw_wizard(f, area, s),
         None => {}
     }
