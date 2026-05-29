@@ -497,6 +497,76 @@ fn jump_keys_fire_when_input_is_empty() {
 }
 
 #[test]
+fn position_stack_records_on_turn_jump_and_supports_back_forward() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 25, 60, 90];
+    app.scroll_manual = Some(95);
+    // Two jumps back through turns; each records the prior pos.
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(90));
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(60));
+    // Ctrl+O steps back. First Ctrl+O captures the current
+    // position so Ctrl+I can return to it.
+    app.jump_back_in_history();
+    assert_eq!(app.scroll_manual, Some(90));
+    app.jump_back_in_history();
+    assert_eq!(app.scroll_manual, Some(95));
+    // Ctrl+I steps forward back to where we started Ctrl+O-ing.
+    app.jump_forward_in_history();
+    assert_eq!(app.scroll_manual, Some(90));
+    app.jump_forward_in_history();
+    assert_eq!(app.scroll_manual, Some(60));
+}
+
+#[test]
+fn position_stack_caps_at_history_limit() {
+    let mut app = App::new();
+    app.note_scroll_metrics(1000, 10);
+    for i in 0..(SCROLL_HISTORY_CAP + 5) {
+        app.scroll_manual = Some((i * 10) as u16);
+        app.record_scroll_position();
+    }
+    assert!(app.scroll_positions.len() <= SCROLL_HISTORY_CAP);
+}
+
+#[test]
+fn position_stack_truncates_forward_history_on_new_record() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![10, 30, 60, 90];
+    app.scroll_manual = Some(95);
+    app.jump_to_prev_turn(); // records 95, lands at 90
+    app.jump_to_prev_turn(); // records 90, lands at 60
+    app.jump_back_in_history(); // back to 90 (cursor mid-stack)
+    let stack_len_before = app.scroll_positions.len();
+    // A new recording while cursor is mid-stack drops everything
+    // past the cursor.
+    app.scroll_manual = Some(15);
+    app.record_scroll_position();
+    assert!(app.scroll_positions.len() <= stack_len_before);
+    // Forward jump is now a no-op (no entries past the cursor).
+    let before = app.scroll_manual;
+    app.jump_forward_in_history();
+    assert_eq!(app.scroll_manual, before);
+}
+
+#[test]
+fn ctrl_o_back_jump_fires_from_key_handler_when_input_empty() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![10, 50];
+    app.scroll_manual = Some(80);
+    app.on_key(key(KeyCode::Char('['))); // jump to prev turn (50)
+    assert_eq!(app.scroll_manual, Some(50));
+    app.on_key(ctrl('o'));
+    assert_eq!(app.scroll_manual, Some(80));
+    app.on_key(ctrl('i'));
+    assert_eq!(app.scroll_manual, Some(50));
+}
+
+#[test]
 fn help_browser_opens_with_slash_meta_sorted() {
     let mut app = App::new();
     app.set_slash_meta(vec![

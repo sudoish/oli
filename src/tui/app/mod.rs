@@ -143,7 +143,19 @@ pub struct App {
     /// Same renderer-writes / handler-reads contract as
     /// `search_match_count`. Drives `[` / `]` turn-jump nav (X3).
     pub turn_line_indices: Vec<u16>,
+
+    /// Position-stack history for Ctrl+O (back) / Ctrl+I (forward).
+    /// Each entry is a `scroll_manual` value (None = attached to
+    /// bottom). The cursor points one *past* the current position;
+    /// new positions are pushed at the cursor (truncating any
+    /// forward history). Capped at SCROLL_HISTORY_CAP entries.
+    pub scroll_positions: Vec<Option<u16>>,
+    pub scroll_pos_cursor: usize,
 }
+
+/// Position-stack depth for Ctrl+O / Ctrl+I jumps. The spec's
+/// "Done when" wants a stack of ≥ 8 entries.
+pub const SCROLL_HISTORY_CAP: usize = 16;
 
 /// Aggregate of every field the status bar can display. Optional
 /// fields render as "—" or get dropped on narrow terminals.
@@ -186,6 +198,8 @@ impl Default for App {
             host_hint: String::from("unknown"),
             search_match_count: 0,
             turn_line_indices: Vec::new(),
+            scroll_positions: Vec::new(),
+            scroll_pos_cursor: 0,
         }
     }
 }
@@ -296,10 +310,12 @@ impl App {
                 return SubmitAction::None;
             }
             KeyCode::Home if ctrl => {
+                self.record_scroll_position();
                 self.scroll_to_top();
                 return SubmitAction::None;
             }
             KeyCode::End if ctrl => {
+                self.record_scroll_position();
                 self.scroll_to_bottom();
                 return SubmitAction::None;
             }
@@ -312,6 +328,19 @@ impl App {
             }
             KeyCode::Char(']') if !ctrl && !alt && self.is_input_empty() => {
                 self.jump_to_next_turn();
+                return SubmitAction::None;
+            }
+            // Position-stack jumps (X3): Ctrl+O steps back through
+            // recorded scroll positions, Ctrl+I steps forward. In
+            // legacy terminals Ctrl+I is indistinguishable from
+            // Tab; only kitty-keyboard-mode terminals see the
+            // distinct event.
+            KeyCode::Char('o') if ctrl => {
+                self.jump_back_in_history();
+                return SubmitAction::None;
+            }
+            KeyCode::Char('i') if ctrl => {
+                self.jump_forward_in_history();
                 return SubmitAction::None;
             }
             _ => {}
