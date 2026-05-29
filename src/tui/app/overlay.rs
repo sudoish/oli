@@ -72,6 +72,30 @@ pub struct InlineHelpState {
     pub description: String,
 }
 
+/// `/copy N` fallback overlay. Shown instead of writing the OSC52
+/// escape when the host doesn't support it (Neovim `:terminal`,
+/// VSCode integrated terminal, generic xterm without OSC52
+/// allowlisted). The body is the verbatim assistant message; the
+/// user selects + copies via the host's normal selection
+/// affordances and dismisses with any key.
+#[derive(Debug, Clone)]
+pub struct CopyFallbackState {
+    /// Verbatim message body. Rendered as-is, no markdown reflow,
+    /// so what the user copies matches what they would have got
+    /// from OSC52.
+    pub body: String,
+    /// 1-based index of the assistant message the user asked to
+    /// copy (the `N` from `/copy N`). Displayed in the title.
+    pub index: usize,
+    /// Reason the fallback opened — usually `caps.host` from
+    /// Capabilities, plus a short note. Drives the title hint so
+    /// the user knows *why* the modal opened.
+    pub host_hint: String,
+    /// Scroll offset within the body, advanced by PgUp/PgDn so
+    /// long messages stay readable inside a small modal.
+    pub scroll: u16,
+}
+
 /// Ctrl-R history search overlay. Substring match (case-
 /// insensitive); newest matches first; arrow keys navigate;
 /// Enter loads the picked entry into the input; Esc cancels.
@@ -96,6 +120,7 @@ pub enum Overlay {
     HelpBrowser(HelpBrowserState),
     InlineHelp(InlineHelpState),
     HistorySearch(HistorySearchState),
+    CopyFallback(CopyFallbackState),
     Wizard(crate::tui::wizard::WizardState),
 }
 
@@ -314,6 +339,46 @@ impl App {
         // Cap so the popup stays small even on huge histories.
         out.truncate(50);
         out
+    }
+
+    /// Open the `/copy N` fallback modal with the verbatim body
+    /// the user asked to copy. `host_hint` is the short label
+    /// (`caps.host`) so the title can explain *why* the fallback
+    /// opened. Closes any prior overlay first.
+    pub fn open_copy_fallback(&mut self, body: String, index: usize, host_hint: String) {
+        self.overlay = Some(Overlay::CopyFallback(CopyFallbackState {
+            body,
+            index,
+            host_hint,
+            scroll: 0,
+        }));
+    }
+
+    pub fn close_copy_fallback(&mut self) {
+        if matches!(self.overlay, Some(Overlay::CopyFallback(_))) {
+            self.overlay = None;
+        }
+    }
+
+    /// Test-only accessor for the active copy-fallback modal.
+    #[cfg(test)]
+    pub fn copy_fallback(&self) -> Option<&CopyFallbackState> {
+        match &self.overlay {
+            Some(Overlay::CopyFallback(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn copy_fallback_scroll_up(&mut self) {
+        if let Some(Overlay::CopyFallback(s)) = &mut self.overlay {
+            s.scroll = s.scroll.saturating_sub(5);
+        }
+    }
+
+    pub fn copy_fallback_scroll_down(&mut self) {
+        if let Some(Overlay::CopyFallback(s)) = &mut self.overlay {
+            s.scroll = s.scroll.saturating_add(5);
+        }
     }
 
     pub fn open_inline_help(&mut self, name: &str) {

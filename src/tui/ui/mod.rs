@@ -52,6 +52,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Some(Overlay::HelpBrowser(s)) => overlays::draw_help_browser(f, area, s),
         Some(Overlay::InlineHelp(s)) => overlays::draw_inline_help(f, area, s),
         Some(Overlay::HistorySearch(s)) => overlays::draw_history_search(f, area, s, app),
+        Some(Overlay::CopyFallback(s)) => overlays::draw_copy_fallback(f, area, s),
         Some(Overlay::Wizard(s)) => overlays::draw_wizard(f, area, s),
         None => {}
     }

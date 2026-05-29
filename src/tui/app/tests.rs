@@ -620,3 +620,36 @@ fn wheel_down_reattaches_at_bottom() {
     app.scroll_wheel_down(3);
     assert_eq!(app.scroll_manual, None);
 }
+
+#[test]
+fn copy_fallback_opens_with_body_and_index() {
+    let mut app = App::new();
+    app.open_copy_fallback("hello world".into(), 1, "neovim:terminal".into());
+    let s = app.copy_fallback().expect("overlay should be open");
+    assert_eq!(s.body, "hello world");
+    assert_eq!(s.index, 1);
+    assert_eq!(s.host_hint, "neovim:terminal");
+    assert_eq!(s.scroll, 0);
+}
+
+#[test]
+fn copy_fallback_close_clears_overlay() {
+    let mut app = App::new();
+    app.open_copy_fallback("body".into(), 2, "vscode".into());
+    assert!(app.copy_fallback().is_some());
+    app.close_copy_fallback();
+    assert!(app.copy_fallback().is_none());
+}
+
+#[test]
+fn copy_fallback_scroll_is_bounded_at_zero() {
+    let mut app = App::new();
+    app.open_copy_fallback("body".into(), 1, "host".into());
+    app.copy_fallback_scroll_up();
+    // PgUp at the top of a fresh modal stays at 0 — saturating_sub.
+    assert_eq!(app.copy_fallback().unwrap().scroll, 0);
+    app.copy_fallback_scroll_down();
+    assert_eq!(app.copy_fallback().unwrap().scroll, 5);
+    app.copy_fallback_scroll_up();
+    assert_eq!(app.copy_fallback().unwrap().scroll, 0);
+}

@@ -336,6 +336,10 @@ fn on_key(
             handle_history_search_key(app, key);
             return;
         }
+        Some(Overlay::CopyFallback(_)) => {
+            handle_copy_fallback_key(app, key);
+            return;
+        }
         Some(Overlay::Wizard(_)) => {
             handle_wizard_key(app, key, ui_tx);
             return;
@@ -932,6 +936,17 @@ fn handle_help_browser_key(app: &mut App, key: crossterm::event::KeyEvent) {
         KeyCode::Down => app.help_browser_navigate(1),
         KeyCode::Esc | KeyCode::Enter => app.close_help_browser(),
         _ => {}
+    }
+}
+
+fn handle_copy_fallback_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    match key.code {
+        KeyCode::PageUp => app.copy_fallback_scroll_up(),
+        KeyCode::PageDown => app.copy_fallback_scroll_down(),
+        // Modifier-only events shouldn't dismiss; everything else
+        // (including Esc, Enter, single chars) closes the modal.
+        KeyCode::Modifier(_) => {}
+        _ => app.close_copy_fallback(),
     }
 }
 

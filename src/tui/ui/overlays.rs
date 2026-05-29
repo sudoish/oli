@@ -13,7 +13,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
 
 use crate::tui::app::{
-    App, ApprovalState, HelpBrowserState, HistorySearchState, InlineHelpState,
+    App, ApprovalState, CopyFallbackState, HelpBrowserState, HistorySearchState, InlineHelpState,
     SessionsPickerState,
 };
 use crate::tui::hints;
@@ -410,6 +410,84 @@ pub(super) fn draw_history_search(
         })
         .collect();
     f.render_widget(Paragraph::new(lines), parts[1]);
+}
+
+/// `/copy N` fallback modal. Shown when the host doesn't support
+/// OSC52 (Phase W4): we render the verbatim message body inside a
+/// centered modal and instruct the user to select + copy via the
+/// host's own selection affordances. PgUp/PgDn scroll the body
+/// for long messages; any other key dismisses.
+pub(super) fn draw_copy_fallback(f: &mut Frame, full_area: Rect, state: &CopyFallbackState) {
+    let modal = centered_rect(full_area, 80, 70).intersection(full_area);
+    f.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        )
+        .title(Line::from(vec![
+            Span::styled(
+                " 📋 copy below ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(" /copy {} ", state.index),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+
+    // Layout: explanatory header (3 lines), body (flex), legend
+    // (1 line).
+    let parts = Layout::vertical([
+        Constraint::Length(3),
+        Constraint::Min(3),
+        Constraint::Length(2),
+    ])
+    .split(inner);
+
+    let header_lines = vec![
+        Line::from(Span::styled(
+            format!(
+                "  Your terminal ({}) blocked OSC52 — select the text below and copy with your terminal's shortcut.",
+                state.host_hint
+            ),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            "  ([ui].osc52 = \"on\" forces OSC52; \"off\" keeps this fallback.)".to_string(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )),
+    ];
+    f.render_widget(Paragraph::new(header_lines), parts[0]);
+
+    let body_lines: Vec<Line<'static>> = state
+        .body
+        .lines()
+        .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::White))))
+        .collect();
+    let body = Paragraph::new(body_lines)
+        .wrap(Wrap { trim: false })
+        .scroll((state.scroll, 0));
+    f.render_widget(body, parts[1]);
+
+    let legend = Paragraph::new(Line::from(Span::styled(
+        "  [PgUp/Dn] scroll  [Esc / any other key] close".to_string(),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::ITALIC),
+    )));
+    f.render_widget(legend, parts[2]);
 }
 
 /// First-run setup wizard overlay. Multi-step modal:

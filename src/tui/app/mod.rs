@@ -19,8 +19,8 @@ mod overlay;
 mod transcript;
 
 pub use overlay::{
-    ApprovalState, CompletionKind, CompletionMenu, HelpBrowserState, HistorySearchState,
-    InlineHelpState, Overlay, SessionPickerRow, SessionsPickerState,
+    ApprovalState, CompletionKind, CompletionMenu, CopyFallbackState, HelpBrowserState,
+    HistorySearchState, InlineHelpState, Overlay, SessionPickerRow, SessionsPickerState,
 };
 pub use transcript::{ToolCardState, TranscriptItem};
 
