@@ -138,6 +138,11 @@ pub struct App {
     /// lines), so the key handler reads this cached count when
     /// the user hits `n` / `N` to cycle.
     pub search_match_count: usize,
+
+    /// Line indices (post-layout) of the start of each user turn.
+    /// Same renderer-writes / handler-reads contract as
+    /// `search_match_count`. Drives `[` / `]` turn-jump nav (X3).
+    pub turn_line_indices: Vec<u16>,
 }
 
 /// Aggregate of every field the status bar can display. Optional
@@ -180,6 +185,7 @@ impl Default for App {
             osc52_supported: true,
             host_hint: String::from("unknown"),
             search_match_count: 0,
+            turn_line_indices: Vec::new(),
         }
     }
 }
@@ -297,6 +303,17 @@ impl App {
                 self.scroll_to_bottom();
                 return SubmitAction::None;
             }
+            // Turn-jump nav (X3): `[` / `]` jump between user
+            // turns, but only when the input is empty so the
+            // characters can still be typed mid-prompt.
+            KeyCode::Char('[') if !ctrl && !alt && self.is_input_empty() => {
+                self.jump_to_prev_turn();
+                return SubmitAction::None;
+            }
+            KeyCode::Char(']') if !ctrl && !alt && self.is_input_empty() => {
+                self.jump_to_next_turn();
+                return SubmitAction::None;
+            }
             _ => {}
         }
         // Bare `g` / `G` would conflict with typing those letters
@@ -350,12 +367,9 @@ impl App {
     }
 
     /// True when the user hasn't typed anything in the input box.
-    /// Reserved for future first-keystroke detection (e.g. `?`
-    /// hint) — currently unused; the bare-letter scroll
-    /// shortcuts that needed it were dropped in favor of
-    /// Ctrl+Home/Ctrl+End.
-    #[allow(dead_code)]
-    fn is_input_empty(&self) -> bool {
+    /// Gates the bare-letter shortcuts (`[`/`]` turn-jump nav)
+    /// so they don't steal keystrokes mid-prompt.
+    pub fn is_input_empty(&self) -> bool {
         self.input.lines().iter().all(|l| l.is_empty())
     }
 

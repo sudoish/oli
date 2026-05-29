@@ -27,6 +27,12 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     let inner_width = area.width.saturating_sub(TRANSCRIPT_H_PAD * 2);
     let lines = build_transcript_lines(app, inner_width);
 
+    // Cache user-turn line indices so the input handler can jump
+    // between them with `[` / `]` (X3). The renderer is the only
+    // place that knows the post-layout line numbers, so it owns
+    // this cache.
+    app.turn_line_indices = user_turn_line_indices(&lines);
+
     // Now that the borrow on `app.transcript` is dropped, settle
     // the scroll metrics from the actual rendered line count.
     let total = lines.len() as u16;
@@ -311,6 +317,21 @@ pub(super) fn anchor_to_bottom(
 }
 
 /// Re-paint every `Line` so case-insensitive substring matches of
+/// Line indices (post-layout) of user-turn headers. Detects them
+/// by the trailing `▐` glyph emitted only by the UserPrompt header
+/// in `build_transcript_lines`. Returned indices match the row
+/// offset in the laid-out transcript and are clamped to `u16` —
+/// `scroll_manual` is `u16` too, so callers don't need to widen.
+pub(super) fn user_turn_line_indices(lines: &[Line<'_>]) -> Vec<u16> {
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        if line.spans.iter().any(|s| s.content.as_ref() == "▐") {
+            out.push(i as u16);
+        }
+    }
+    out
+}
+
 /// `needle` are styled with `bg = highlight` / `fg = highlight_fg`.
 /// Returns the recolored lines and a vector of line indices that
 /// contained at least one match. Empty `needle` short-circuits to
@@ -786,5 +807,47 @@ mod tests {
             .find(|l| line_text(l).contains('─'))
             .expect("rule should be present");
         assert_eq!(line_text(rule_line).chars().count(), 12);
+    }
+
+    #[test]
+    fn user_turn_indices_match_each_user_prompt_header() {
+        let mut app = App::new();
+        app.transcript
+            .push(TranscriptItem::UserPrompt { body: "first".into() });
+        app.transcript.push(TranscriptItem::Assistant {
+            body: "a".into(),
+            done: true,
+        });
+        app.transcript.push(TranscriptItem::UserPrompt {
+            body: "second".into(),
+        });
+        app.transcript.push(TranscriptItem::Assistant {
+            body: "b".into(),
+            done: true,
+        });
+        let lines = build_transcript_lines(&app, 40);
+        let idxs = user_turn_line_indices(&lines);
+        // Two user turns → two indices.
+        assert_eq!(idxs.len(), 2);
+        // Each index points at a line containing "you " (the user
+        // header text), confirming we landed on the header row.
+        for i in &idxs {
+            let row = &lines[*i as usize];
+            let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(text.contains("you "), "row text was: {:?}", text);
+        }
+        // Indices are strictly increasing.
+        assert!(idxs[0] < idxs[1]);
+    }
+
+    #[test]
+    fn user_turn_indices_returns_empty_when_no_user_prompts() {
+        let mut app = App::new();
+        app.transcript.push(TranscriptItem::Assistant {
+            body: "a".into(),
+            done: true,
+        });
+        let lines = build_transcript_lines(&app, 40);
+        assert!(user_turn_line_indices(&lines).is_empty());
     }
 }

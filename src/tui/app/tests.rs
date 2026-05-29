@@ -426,6 +426,77 @@ fn note_scroll_metrics_clamps_offset_when_max_shrinks() {
 }
 
 #[test]
+fn jump_to_prev_turn_moves_offset_to_last_turn_above_current() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 25, 60, 90];
+    app.scroll_manual = Some(70);
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(60));
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(25));
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(5));
+    // No turn above 5 → no-op.
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(5));
+}
+
+#[test]
+fn jump_to_prev_turn_when_attached_uses_scroll_max_as_current() {
+    // Attached (None) treats the natural bottom as "current".
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 25, 60, 90];
+    app.scroll_manual = None;
+    app.jump_to_prev_turn();
+    assert_eq!(app.scroll_manual, Some(90));
+}
+
+#[test]
+fn jump_to_next_turn_advances_or_reattaches_when_past_max() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 25, 60, 90, 120];
+    app.scroll_manual = Some(10);
+    app.jump_to_next_turn();
+    assert_eq!(app.scroll_manual, Some(25));
+    app.jump_to_next_turn();
+    assert_eq!(app.scroll_manual, Some(60));
+    app.jump_to_next_turn();
+    assert_eq!(app.scroll_manual, Some(90));
+    // Next target is 120 which exceeds max=100 → reattach.
+    app.jump_to_next_turn();
+    assert_eq!(app.scroll_manual, None);
+}
+
+#[test]
+fn jump_keys_are_ignored_while_input_has_text() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 50];
+    app.scroll_manual = Some(70);
+    // Type a character first so `[` should land in the buffer
+    // instead of triggering the jump.
+    type_str(&mut app, "x");
+    app.on_key(key(KeyCode::Char('[')));
+    assert_eq!(input_string(&app), "x[");
+    assert_eq!(app.scroll_manual, Some(70));
+}
+
+#[test]
+fn jump_keys_fire_when_input_is_empty() {
+    let mut app = App::new();
+    app.note_scroll_metrics(100, 10);
+    app.turn_line_indices = vec![5, 50];
+    app.scroll_manual = Some(70);
+    app.on_key(key(KeyCode::Char('[')));
+    assert_eq!(app.scroll_manual, Some(50));
+    // `[` should NOT have landed in the input buffer.
+    assert_eq!(input_string(&app), "");
+}
+
+#[test]
 fn help_browser_opens_with_slash_meta_sorted() {
     let mut app = App::new();
     app.set_slash_meta(vec![

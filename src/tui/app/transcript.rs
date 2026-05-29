@@ -281,4 +281,42 @@ impl App {
         self.scroll_manual = None;
         self.unread_lines = 0;
     }
+
+    /// Scroll so the previous user-turn header sits at (or near)
+    /// the top of the visible region. Uses
+    /// `turn_line_indices` cached by the transcript renderer.
+    /// No-op if there are no user turns or none lies above the
+    /// current view.
+    pub fn jump_to_prev_turn(&mut self) {
+        let current = self.scroll_manual.unwrap_or(self.scroll_max);
+        let target = self
+            .turn_line_indices
+            .iter()
+            .rev()
+            .copied()
+            .find(|idx| *idx < current);
+        if let Some(idx) = target {
+            self.scroll_manual = Some(idx.min(self.scroll_max));
+        }
+    }
+
+    /// Counterpart of `jump_to_prev_turn`. Reattaches (scroll_manual
+    /// = None) when the next-turn target sits at or below the
+    /// natural bottom of the view.
+    pub fn jump_to_next_turn(&mut self) {
+        let current = self.scroll_manual.unwrap_or(self.scroll_max);
+        let target = self
+            .turn_line_indices
+            .iter()
+            .copied()
+            .find(|idx| *idx > current);
+        if let Some(idx) = target {
+            if idx >= self.scroll_max {
+                self.scroll_manual = None;
+                self.unread_lines = 0;
+            } else {
+                self.scroll_manual = Some(idx);
+            }
+        }
+    }
 }
