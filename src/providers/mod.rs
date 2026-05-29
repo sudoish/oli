@@ -117,26 +117,52 @@ impl Usage {
     }
 }
 
-/// Sink for streamed assistant content tokens. Re-borrowed across multiple
-/// loop iterations so callers can reuse a single closure for a whole session.
-pub type ContentSink<'a> = &'a mut (dyn FnMut(&str) + Send);
+/// Event emitted by a streaming provider to its sink. Phase Y2 widened the
+/// sink from a `FnMut(&str)` (content-only) to an enum so providers can also
+/// surface incremental tool-call arguments to the UI before the call is
+/// dispatched. New variants land here when the streaming protocol grows
+/// (thinking deltas, image deltas, etc.) — keep this enum non-exhaustive in
+/// spirit by ignoring unknown variants at the consumer when possible.
+#[derive(Debug)]
+pub enum StreamEvent<'a> {
+    /// One token (or run of tokens) of assistant *text* content. The same
+    /// payload that the old `ContentSink(&str)` carried.
+    Content(&'a str),
+    /// One chunk of the streaming JSON `arguments` for a tool call the model
+    /// is composing. `provider_tool_id` is the provider's own id for the
+    /// call (Anthropic `tool_use.id`, OpenAI `tool_calls[].id`); the same id
+    /// will be present on the dispatched tool's hook event so the UI can
+    /// correlate the streaming preview with the eventual `ToolStart`.
+    /// `accumulated_json` is the full JSON-so-far (sink doesn't need to
+    /// re-buffer); `partial_json` is just the delta from this chunk.
+    ToolArgsChunk {
+        provider_tool_id: &'a str,
+        name: &'a str,
+        partial_json: &'a str,
+        accumulated_json: &'a str,
+    },
+}
+
+/// Sink for streamed assistant events. Re-borrowed across multiple loop
+/// iterations so callers can reuse a single closure for a whole session.
+pub type StreamSink<'a> = &'a mut (dyn FnMut(StreamEvent<'_>) + Send);
 
 #[async_trait]
 pub trait Provider: Send + Sync {
     async fn chat(&self, req: ChatRequest) -> Result<ChatResponse>;
 
-    /// Streaming variant. Calls `sink` with content deltas as they arrive and
+    /// Streaming variant. Calls `sink` with stream events as they arrive and
     /// returns the fully assembled assistant message — including any
     /// `tool_calls` — once the stream completes.
     ///
     /// The default implementation falls back to non-streaming `chat` and
-    /// emits the entire content in a single sink call. Real providers should
-    /// override this to deliver tokens incrementally.
-    async fn chat_stream(&self, req: ChatRequest, sink: ContentSink<'_>) -> Result<ChatResponse> {
+    /// emits the entire content in a single `StreamEvent::Content` call.
+    /// Real providers should override this to deliver tokens incrementally.
+    async fn chat_stream(&self, req: ChatRequest, sink: StreamSink<'_>) -> Result<ChatResponse> {
         let resp = self.chat(req).await?;
         if let Some(s) = resp.message.get("content").and_then(|v| v.as_str()) {
             if !s.is_empty() {
-                sink(s);
+                sink(StreamEvent::Content(s));
             }
         }
         Ok(resp)

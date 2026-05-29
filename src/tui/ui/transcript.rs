@@ -216,9 +216,7 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
                 ..
             } => {
                 lines.push(render_tool_card_line(tool, args_preview, state, theme));
-                if let Some(detail) = render_tool_card_detail(state, theme) {
-                    lines.push(detail);
-                }
+                lines.extend(render_tool_card_detail(tool, state, theme));
             }
         }
         let next = items.get(i + 1);
@@ -443,6 +441,7 @@ fn render_tool_card_line(
 ) -> Line<'static> {
     let mut spans: Vec<Span<'static>> = Vec::new();
     let arrow_color = match state {
+        ToolCardState::Streaming { .. } => theme.tool_running,
         ToolCardState::Running { .. } => theme.tool_running,
         ToolCardState::Done { ok: true, .. } => theme.tool_ok,
         ToolCardState::Done { ok: false, .. } => theme.tool_err,
@@ -466,6 +465,15 @@ fn render_tool_card_line(
     ));
     spans.push(Span::raw("  "));
     match state {
+        ToolCardState::Streaming { .. } => {
+            // Card is mid-stream — show a single static glyph + the
+            // word "streaming". No timer because the call hasn't been
+            // dispatched yet; PreToolUse hasn't fired.
+            spans.push(Span::styled(
+                "⠿ streaming…",
+                Style::default().fg(theme.tool_running),
+            ));
+        }
         ToolCardState::Running { started_at } => {
             let elapsed = started_at.elapsed().as_secs_f32();
             spans.push(Span::styled(
@@ -488,24 +496,137 @@ fn render_tool_card_line(
     Line::from(spans)
 }
 
-/// Optional detail line under a card. Running cards show no
-/// detail; done cards show their summary indented under the
-/// header.
-fn render_tool_card_detail(state: &ToolCardState, theme: &Theme) -> Option<Line<'static>> {
+/// Detail lines under a card.
+///
+/// - Streaming Edit/Write cards render a 6-line peek of the new
+///   content the model is mid-emitting (lenient partial-JSON
+///   extraction; partial last line OK).
+/// - Running cards show no detail (the call is dispatched; we
+///   wait for results).
+/// - Done cards show their summary indented under the header.
+fn render_tool_card_detail(
+    tool: &str,
+    state: &ToolCardState,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
     match state {
-        ToolCardState::Running { .. } => None,
+        ToolCardState::Streaming { accumulated_json, .. } => {
+            let peek = extract_streaming_peek(tool, accumulated_json);
+            peek.into_iter()
+                .map(|line| {
+                    Line::from(vec![
+                        Span::styled(
+                            "    + ".to_string(),
+                            Style::default().fg(theme.diff_added),
+                        ),
+                        Span::styled(
+                            line,
+                            Style::default().fg(theme.diff_added),
+                        ),
+                    ])
+                })
+                .collect()
+        }
+        ToolCardState::Running { .. } => Vec::new(),
         ToolCardState::Done { summary, ok, .. } => {
             if summary.is_empty() {
-                return None;
+                return Vec::new();
             }
-            Some(Line::from(Span::styled(
+            vec![Line::from(Span::styled(
                 format!("    {}", summary),
                 Style::default()
                     .fg(if *ok { theme.dim } else { theme.diff_removed })
                     .add_modifier(Modifier::ITALIC),
-            )))
+            ))]
         }
     }
+}
+
+/// Extract up to 6 lines of streamed content from partial JSON for
+/// Edit/Write tool calls.
+///
+/// For `Edit`, pulls the `new_string` field; for `Write`, pulls
+/// `content`. Tries a strict parse first (complete JSON); falls
+/// back to lenient field-scan for mid-stream JSON. Returns an
+/// empty Vec for any other tool or when the field isn't reachable
+/// yet.
+fn extract_streaming_peek(tool: &str, accumulated_json: &str) -> Vec<String> {
+    let field = match tool {
+        "Edit" => "new_string",
+        "Write" => "content",
+        _ => return Vec::new(),
+    };
+
+    let raw = match serde_json::from_str::<serde_json::Value>(accumulated_json) {
+        Ok(v) => v.get(field).and_then(|f| f.as_str()).map(String::from),
+        Err(_) => scan_partial_string_field(accumulated_json, field),
+    };
+
+    let Some(raw) = raw else {
+        return Vec::new();
+    };
+
+    raw.lines()
+        .take(6)
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Lenient scan for a partial `"<field>":"..."` value in JSON
+/// that hasn't finished streaming yet. Honors `\\`, `\"`, `\n`,
+/// `\t`, `\r`. Returns None if the field isn't present yet (or
+/// the value hasn't started). Returns the partial value if the
+/// closing quote hasn't arrived — including a trailing dangling
+/// backslash, which is dropped.
+fn scan_partial_string_field(json: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{}\"", field);
+    let key_pos = json.find(&needle)?;
+    let after_key = &json[key_pos + needle.len()..];
+
+    // Skip whitespace + the colon.
+    let mut bytes = after_key.bytes();
+    let mut rest_offset = 0usize;
+    let mut saw_colon = false;
+    for b in bytes.by_ref() {
+        rest_offset += 1;
+        match b {
+            b':' if !saw_colon => saw_colon = true,
+            b' ' | b'\t' | b'\n' | b'\r' => continue,
+            b'"' if saw_colon => break,
+            _ => return None,
+        }
+    }
+    if !saw_colon {
+        return None;
+    }
+    // We've consumed up through the opening `"`.
+    let value_start = key_pos + needle.len() + rest_offset;
+    let value_str = &json[value_start..];
+
+    let mut out = String::with_capacity(value_str.len());
+    let mut chars = value_str.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('"') => out.push('"'),
+                Some('\\') => out.push('\\'),
+                Some('/') => out.push('/'),
+                // Unknown / unfinished escape: drop it. The stream
+                // may complete it on a later chunk; on the next
+                // render we'll re-extract from the longer prefix.
+                Some(other) => out.push(other),
+                None => break,
+            }
+        } else if c == '"' {
+            break;
+        } else {
+            out.push(c);
+        }
+    }
+    Some(out)
 }
 
 #[cfg(test)]
@@ -849,5 +970,137 @@ mod tests {
         });
         let lines = build_transcript_lines(&app, 40);
         assert!(user_turn_line_indices(&lines).is_empty());
+    }
+
+    #[test]
+    fn extract_peek_returns_empty_for_non_edit_write_tools() {
+        assert!(extract_streaming_peek("Read", r#"{"file_path":"x"}"#).is_empty());
+        assert!(extract_streaming_peek("Bash", r#"{"command":"ls"}"#).is_empty());
+    }
+
+    #[test]
+    fn extract_peek_pulls_new_string_from_complete_edit_json() {
+        let json = r#"{"file_path":"a.rs","old_string":"x","new_string":"hello\nworld"}"#;
+        assert_eq!(
+            extract_streaming_peek("Edit", json),
+            vec!["hello".to_string(), "world".to_string()],
+        );
+    }
+
+    #[test]
+    fn extract_peek_pulls_content_from_complete_write_json() {
+        let json = r#"{"file_path":"a.rs","content":"line1\nline2\nline3"}"#;
+        assert_eq!(
+            extract_streaming_peek("Write", json),
+            vec!["line1".to_string(), "line2".to_string(), "line3".to_string()],
+        );
+    }
+
+    #[test]
+    fn extract_peek_caps_at_six_lines() {
+        let body: String = (1..=10).map(|i| format!("L{}\\n", i)).collect();
+        let json = format!(r#"{{"content":"{}"}}"#, body);
+        let lines = extract_streaming_peek("Write", &json);
+        assert_eq!(lines.len(), 6);
+        assert_eq!(lines[0], "L1");
+        assert_eq!(lines[5], "L6");
+    }
+
+    #[test]
+    fn extract_peek_handles_partial_json_mid_string() {
+        // Stream cut after the value started but before the closing
+        // quote — typical for input_json_delta chunks.
+        let json = r#"{"file_path":"a.rs","old_string":"abc","new_string":"def\nghi"#;
+        assert_eq!(
+            extract_streaming_peek("Edit", json),
+            vec!["def".to_string(), "ghi".to_string()],
+        );
+    }
+
+    #[test]
+    fn extract_peek_returns_empty_when_field_not_yet_present() {
+        // Only file_path has streamed so far; new_string is absent.
+        let json = r#"{"file_path":"a.rs""#;
+        assert!(extract_streaming_peek("Edit", json).is_empty());
+    }
+
+    #[test]
+    fn extract_peek_handles_escape_sequences() {
+        // \", \\, \t, \n all decoded.
+        let json = r#"{"content":"a\\b\"c\td\nlast"}"#;
+        let out = extract_streaming_peek("Write", json);
+        assert_eq!(out, vec!["a\\b\"c\td".to_string(), "last".to_string()]);
+    }
+
+    #[test]
+    fn extract_peek_dangling_backslash_drops_safely() {
+        // Stream cut mid-escape: ends with a lone '\'. Falls back to
+        // lenient scan (strict parse fails on the unfinished escape);
+        // the dangling '\' is dropped — next chunk will resync.
+        let json = r#"{"content":"abc\"#;
+        let out = extract_streaming_peek("Write", json);
+        assert_eq!(out, vec!["abc".to_string()]);
+    }
+
+    #[test]
+    fn render_tool_card_detail_streaming_edit_emits_peek_lines() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Streaming {
+            provider_tool_id: "tu_1".into(),
+            accumulated_json: r#"{"file_path":"a.rs","new_string":"hello\nworld"}"#.into(),
+        };
+        let detail = render_tool_card_detail("Edit", &state, &theme);
+        assert_eq!(detail.len(), 2);
+        assert_eq!(line_text(&detail[0]), "    + hello");
+        assert_eq!(line_text(&detail[1]), "    + world");
+        // Each line uses diff_added color.
+        assert!(detail[0].spans.iter().all(|s| s.style.fg == Some(theme.diff_added)));
+    }
+
+    #[test]
+    fn render_tool_card_detail_streaming_write_emits_peek_lines() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Streaming {
+            provider_tool_id: "tu_2".into(),
+            accumulated_json: r#"{"content":"line1\nline2"}"#.into(),
+        };
+        let detail = render_tool_card_detail("Write", &state, &theme);
+        assert_eq!(detail.len(), 2);
+        assert_eq!(line_text(&detail[0]), "    + line1");
+        assert_eq!(line_text(&detail[1]), "    + line2");
+    }
+
+    #[test]
+    fn render_tool_card_detail_streaming_partial_renders_what_we_have() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Streaming {
+            provider_tool_id: "tu_3".into(),
+            accumulated_json: r#"{"new_string":"partial"#.into(),
+        };
+        let detail = render_tool_card_detail("Edit", &state, &theme);
+        assert_eq!(detail.len(), 1);
+        assert_eq!(line_text(&detail[0]), "    + partial");
+    }
+
+    #[test]
+    fn render_tool_card_detail_running_returns_no_lines() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Running {
+            started_at: std::time::Instant::now(),
+        };
+        assert!(render_tool_card_detail("Edit", &state, &theme).is_empty());
+    }
+
+    #[test]
+    fn render_tool_card_detail_done_still_returns_summary_line() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(120),
+            summary: "wrote 3 lines".into(),
+            ok: true,
+        };
+        let detail = render_tool_card_detail("Write", &state, &theme);
+        assert_eq!(detail.len(), 1);
+        assert_eq!(line_text(&detail[0]), "    wrote 3 lines");
     }
 }

@@ -118,9 +118,13 @@ pub async fn run(
 /// state into the prompt.
 async fn run_turn(agent: &mut Agent, prompt: &str) {
     let saved_len = agent.memory.len();
-    let mut sink = |s: &str| {
-        print!("{s}");
-        let _ = std::io::stdout().flush();
+    let mut sink = |ev: crate::providers::StreamEvent<'_>| {
+        if let crate::providers::StreamEvent::Content(s) = ev {
+            print!("{s}");
+            let _ = std::io::stdout().flush();
+        }
+        // ToolArgsChunk events are ignored in line-mode REPL — the
+        // streaming-diff peek is TUI-only.
     };
 
     let cancelled;

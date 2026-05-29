@@ -6,7 +6,7 @@ use std::collections::VecDeque;
 use std::sync::Mutex;
 
 use crate::error::{AgentError, Result};
-use crate::providers::{ChatRequest, ChatResponse, ContentSink, Provider};
+use crate::providers::{ChatRequest, ChatResponse, Provider, StreamEvent, StreamSink};
 
 pub struct FakeProvider {
     responses: Mutex<VecDeque<Value>>,
@@ -45,7 +45,7 @@ impl Provider for FakeProvider {
     /// Splits scripted content into two halves at a char boundary so streaming
     /// tests can assert multi-chunk delivery without depending on real-network
     /// chunk timing.
-    async fn chat_stream(&self, req: ChatRequest, sink: ContentSink<'_>) -> Result<ChatResponse> {
+    async fn chat_stream(&self, req: ChatRequest, sink: StreamSink<'_>) -> Result<ChatResponse> {
         let resp = self.chat(req).await?;
         if let Some(s) = resp.message.get("content").and_then(|v| v.as_str()) {
             if s.len() >= 2 {
@@ -54,13 +54,13 @@ impl Provider for FakeProvider {
                     cut -= 1;
                 }
                 if cut == 0 || cut == s.len() {
-                    sink(s);
+                    sink(StreamEvent::Content(s));
                 } else {
-                    sink(&s[..cut]);
-                    sink(&s[cut..]);
+                    sink(StreamEvent::Content(&s[..cut]));
+                    sink(StreamEvent::Content(&s[cut..]));
                 }
             } else if !s.is_empty() {
-                sink(s);
+                sink(StreamEvent::Content(s));
             }
         }
         Ok(resp)

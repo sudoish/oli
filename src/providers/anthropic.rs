@@ -23,7 +23,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 
 use crate::error::{AgentError, Result};
-use crate::providers::{ChatRequest, ChatResponse, ContentSink, Provider, Usage};
+use crate::providers::{ChatRequest, ChatResponse, Provider, StreamEvent, StreamSink, Usage};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -130,7 +130,7 @@ impl Provider for AnthropicProvider {
         parse_models_response(&bytes)
     }
 
-    async fn chat_stream(&self, req: ChatRequest, sink: ContentSink<'_>) -> Result<ChatResponse> {
+    async fn chat_stream(&self, req: ChatRequest, sink: StreamSink<'_>) -> Result<ChatResponse> {
         let body = build_request_body(&req, true);
         let resp = self
             .client
@@ -219,7 +219,7 @@ fn handle_stream_event(
     event_type: &str,
     payload: &Value,
     acc: &mut StreamAcc,
-    sink: ContentSink<'_>,
+    sink: StreamSink<'_>,
 ) {
     match event_type {
         "message_start" => {
@@ -264,14 +264,27 @@ fn handle_stream_event(
                     if let Some(t) = delta.get("text").and_then(|v| v.as_str()) {
                         if !t.is_empty() {
                             acc.text.push_str(t);
-                            sink(t);
+                            sink(StreamEvent::Content(t));
                         }
                     }
                 }
                 "input_json_delta" => {
                     let idx = payload.get("index").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                     if let Some(part) = delta.get("partial_json").and_then(|v| v.as_str()) {
-                        acc.tool_args.entry(idx).or_default().push_str(part);
+                        let entry = acc.tool_args.entry(idx).or_default();
+                        entry.push_str(part);
+                        // Only surface chunks for blocks we already saw a
+                        // `content_block_start` for — guards against a
+                        // malformed stream that delivers a delta before its
+                        // header. `(id, name)` are stable across the block.
+                        if let Some((id, name)) = acc.tool_meta.get(&idx) {
+                            sink(StreamEvent::ToolArgsChunk {
+                                provider_tool_id: id,
+                                name,
+                                partial_json: part,
+                                accumulated_json: entry.as_str(),
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -704,6 +717,100 @@ mod tests {
         let body = br#"{"data":[{"id":"a"},{"name":"no-id"},{"id":"b"}]}"#;
         let ids = parse_models_response(body).unwrap();
         assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn handle_stream_event_emits_tool_args_chunk_on_input_json_delta() {
+        // Set up a tool_use content block, then deliver two
+        // input_json_delta events. The sink should see one
+        // ToolArgsChunk per delta with the accumulated_json growing,
+        // and zero Content events (the call is silent on the text
+        // side).
+        let mut acc = StreamAcc::default();
+        let mut events: Vec<(String, String, String, String)> = Vec::new();
+        let mut content_events: Vec<String> = Vec::new();
+        {
+            let mut sink = |ev: StreamEvent<'_>| match ev {
+                StreamEvent::ToolArgsChunk {
+                    provider_tool_id,
+                    name,
+                    partial_json,
+                    accumulated_json,
+                } => events.push((
+                    provider_tool_id.to_string(),
+                    name.to_string(),
+                    partial_json.to_string(),
+                    accumulated_json.to_string(),
+                )),
+                StreamEvent::Content(s) => content_events.push(s.to_string()),
+            };
+
+            handle_stream_event(
+                "content_block_start",
+                &json!({
+                    "index": 0,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": "toolu_42",
+                        "name": "Edit",
+                    }
+                }),
+                &mut acc,
+                &mut sink,
+            );
+            handle_stream_event(
+                "content_block_delta",
+                &json!({
+                    "index": 0,
+                    "delta": { "type": "input_json_delta", "partial_json": "{\"file_path" }
+                }),
+                &mut acc,
+                &mut sink,
+            );
+            handle_stream_event(
+                "content_block_delta",
+                &json!({
+                    "index": 0,
+                    "delta": { "type": "input_json_delta", "partial_json": "\":\"x.rs\"}" }
+                }),
+                &mut acc,
+                &mut sink,
+            );
+        }
+        assert!(content_events.is_empty(), "no Content events expected");
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].0, "toolu_42");
+        assert_eq!(events[0].1, "Edit");
+        assert_eq!(events[0].2, "{\"file_path");
+        assert_eq!(events[0].3, "{\"file_path");
+        assert_eq!(events[1].2, "\":\"x.rs\"}");
+        assert_eq!(events[1].3, "{\"file_path\":\"x.rs\"}");
+    }
+
+    #[test]
+    fn handle_stream_event_skips_args_chunk_without_block_start() {
+        // Malformed stream: input_json_delta before content_block_start.
+        // No tool_meta entry → no chunk event surfaced. Accumulator
+        // still buffers the partial JSON for finalize-time safety.
+        let mut acc = StreamAcc::default();
+        let mut chunks = 0usize;
+        {
+            let mut sink = |ev: StreamEvent<'_>| {
+                if let StreamEvent::ToolArgsChunk { .. } = ev {
+                    chunks += 1;
+                }
+            };
+            handle_stream_event(
+                "content_block_delta",
+                &json!({
+                    "index": 0,
+                    "delta": { "type": "input_json_delta", "partial_json": "{}" }
+                }),
+                &mut acc,
+                &mut sink,
+            );
+        }
+        assert_eq!(chunks, 0);
     }
 
     #[test]

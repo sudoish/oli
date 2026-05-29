@@ -28,7 +28,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::hooks::{HookRegistry, PreToolDecision};
 use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
-use crate::providers::{ChatRequest, ContentSink, Provider, Usage};
+use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage};
 use crate::tools::{Registry, ToolContext};
 
 pub mod caps;
@@ -334,16 +334,19 @@ impl Agent {
     /// produces a response without tool calls, and return that final
     /// content. Non-streaming path; uses a no-op sink under the hood.
     pub async fn run(&mut self, prompt: &str) -> Result<String> {
-        let mut nop = |_: &str| {};
+        let mut nop = |_: StreamEvent<'_>| {};
         self.run_streaming(prompt, &mut nop).await
     }
 
-    /// Same as `run`, but emits assistant content tokens through `sink`
-    /// as the provider streams them. Tool-call rounds are silent — only
-    /// model content is forwarded.
+    /// Same as `run`, but emits provider stream events through `sink` as
+    /// they arrive (assistant text via `StreamEvent::Content`, in-flight
+    /// tool-call arguments via `StreamEvent::ToolArgsChunk`). Tool-call
+    /// rounds are silent on the content side; only model text reaches
+    /// `Content`. Y2 widened this from the older `FnMut(&str)` signature
+    /// so the TUI can preview streaming Edit/Write args.
     pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<String>
     where
-        F: FnMut(&str) + Send,
+        F: FnMut(StreamEvent<'_>) + Send,
     {
         self.memory
             .record(json!({ "role": "user", "content": prompt }))
@@ -395,7 +398,7 @@ impl Agent {
                 tools: self.tools.openai_schemas(),
             };
 
-            let sink_dyn: ContentSink<'_> = sink;
+            let sink_dyn: StreamSink<'_> = sink;
             let resp = self.provider.chat_stream(req, sink_dyn).await?;
             if let Some(u) = resp.usage {
                 self.last_usage = Some(u);
@@ -668,7 +671,11 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("hello world")]);
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
         let mut chunks: Vec<String> = Vec::new();
-        let mut sink = |s: &str| chunks.push(s.to_string());
+        let mut sink = |ev: StreamEvent<'_>| {
+            if let StreamEvent::Content(s) = ev {
+                chunks.push(s.to_string());
+            }
+        };
         let out = agent.run_streaming("hi", &mut sink).await.unwrap();
         assert_eq!(out, "hello world");
         // FakeProvider splits at the midpoint char boundary into two chunks.
@@ -1434,7 +1441,7 @@ mod tests {
         async fn chat_stream(
             &self,
             req: ChatRequest,
-            sink: ContentSink<'_>,
+            sink: StreamSink<'_>,
         ) -> Result<ChatResponse> {
             self.0.chat_stream(req, sink).await
         }

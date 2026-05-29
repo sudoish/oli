@@ -4,7 +4,7 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 
 use crate::error::{AgentError, Result};
-use crate::providers::{ChatRequest, ChatResponse, ContentSink, Provider, Usage};
+use crate::providers::{ChatRequest, ChatResponse, Provider, StreamEvent, StreamSink, Usage};
 
 /// OpenAI-compatible provider. Works against OpenAI, OpenRouter, Ollama
 /// (via `http://localhost:11434/v1`), LM Studio, vLLM, llama.cpp's server,
@@ -214,7 +214,7 @@ impl Provider for OpenAICompatProvider {
         Ok(ChatResponse { message, usage })
     }
 
-    async fn chat_stream(&self, req: ChatRequest, sink: ContentSink<'_>) -> Result<ChatResponse> {
+    async fn chat_stream(&self, req: ChatRequest, sink: StreamSink<'_>) -> Result<ChatResponse> {
         let mut payload = json!({
             "model": req.model,
             "messages": req.messages,
@@ -302,7 +302,7 @@ impl Provider for OpenAICompatProvider {
             if let Some(c) = delta.get("content").and_then(|v| v.as_str()) {
                 if !c.is_empty() {
                     content.push_str(c);
-                    sink(c);
+                    sink(StreamEvent::Content(c));
                 }
             }
             if let Some(tcs) = delta.get("tool_calls").and_then(|v| v.as_array()) {
@@ -325,6 +325,20 @@ impl Provider for OpenAICompatProvider {
                         }
                         if let Some(args) = f.get("arguments").and_then(|v| v.as_str()) {
                             acc.arguments.push_str(args);
+                            // Surface incremental tool args to the UI so the
+                            // streaming-diff peek can render before the call
+                            // is dispatched. `acc.id` may still be empty on
+                            // the very first chunk for providers that send
+                            // `id` separately — skip those; the next chunk
+                            // typically carries enough metadata.
+                            if !acc.id.is_empty() && !acc.name.is_empty() && !args.is_empty() {
+                                sink(StreamEvent::ToolArgsChunk {
+                                    provider_tool_id: &acc.id,
+                                    name: &acc.name,
+                                    partial_json: args,
+                                    accumulated_json: acc.arguments.as_str(),
+                                });
+                            }
                         }
                     }
                 }

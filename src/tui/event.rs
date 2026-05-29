@@ -77,6 +77,18 @@ pub enum UiEvent {
         ok: bool,
     },
 
+    /// Phase Y2: provider emitted a chunk of streaming-tool-args JSON
+    /// for a not-yet-dispatched tool call (`Edit` / `Write` etc.). The
+    /// render loop maintains a streaming-card transcript item per
+    /// `provider_tool_id` and updates its preview. When `ToolStart`
+    /// later fires for the same call, the streaming card is upgraded
+    /// in-place to the running card.
+    ToolArgsChunk {
+        provider_tool_id: String,
+        name: String,
+        accumulated_json: String,
+    },
+
     /// Driver picked up fresh `last_usage` + `session_usage`
     /// from the agent. The status bar's token gauge reads from
     /// the last received update.

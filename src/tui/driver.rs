@@ -98,13 +98,29 @@ async fn handle_prompt(
     let saved_len = agent.memory.len();
     let _ = ui_tx.send(UiEvent::TurnStarted);
 
-    // Streaming sink: each chunk lands as a ContentChunk event the
-    // render loop appends to the active assistant transcript item.
+    // Streaming sink: each provider event is translated to a UiEvent
+    // the render loop dispatches. Content deltas land as
+    // `ContentChunk`; tool-args deltas land as `ToolArgsChunk` so the
+    // streaming-diff peek can render before the call is dispatched.
     // Closure captures `ui_tx` by reference; sink lifetime is the
     // duration of the `run_streaming` call.
     let tx_for_sink = ui_tx.clone();
-    let mut sink = move |s: &str| {
-        let _ = tx_for_sink.send(UiEvent::ContentChunk(s.to_string()));
+    let mut sink = move |ev: crate::providers::StreamEvent<'_>| match ev {
+        crate::providers::StreamEvent::Content(s) => {
+            let _ = tx_for_sink.send(UiEvent::ContentChunk(s.to_string()));
+        }
+        crate::providers::StreamEvent::ToolArgsChunk {
+            provider_tool_id,
+            name,
+            accumulated_json,
+            ..
+        } => {
+            let _ = tx_for_sink.send(UiEvent::ToolArgsChunk {
+                provider_tool_id: provider_tool_id.to_string(),
+                name: name.to_string(),
+                accumulated_json: accumulated_json.to_string(),
+            });
+        }
     };
 
     let result: Result<String> = tokio::select! {
