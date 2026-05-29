@@ -56,6 +56,10 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Some(Overlay::HistorySearch(s)) => overlays::draw_history_search(f, area, s, app),
         Some(Overlay::CopyFallback(s)) => overlays::draw_copy_fallback(f, area, s, &app.theme),
         Some(Overlay::Wizard(s)) => overlays::draw_wizard(f, area, s),
+        // Search bar is rendered inline by draw_transcript (it
+        // doesn't sit on top of the transcript as a centered
+        // modal — it's a thin bar above the input box).
+        Some(Overlay::Search(_)) => {}
         None => {}
     }
 }

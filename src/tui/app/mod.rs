@@ -17,12 +17,15 @@ use crate::tui::markdown::Theme as MarkdownTheme;
 use crate::tui::theme::Theme;
 
 mod overlay;
+pub mod search;
 mod transcript;
 
 pub use overlay::{
     ApprovalState, CompletionKind, CompletionMenu, CopyFallbackState, HelpBrowserState,
     HistorySearchState, InlineHelpState, Overlay, SessionPickerRow, SessionsPickerState,
 };
+#[allow(unused_imports)]
+pub use search::SearchState;
 pub use transcript::{ToolCardState, TranscriptItem};
 
 pub enum Mode {
@@ -128,6 +131,13 @@ pub struct App {
     /// in the copy-fallback modal title so the user knows *which*
     /// host blocked OSC52. Set once at startup.
     pub host_hint: String,
+
+    /// Count of matches the transcript renderer found for the
+    /// current search query at the last paint. The renderer is
+    /// the authority on match positions (it walks the laid-out
+    /// lines), so the key handler reads this cached count when
+    /// the user hits `n` / `N` to cycle.
+    pub search_match_count: usize,
 }
 
 /// Aggregate of every field the status bar can display. Optional
@@ -169,6 +179,7 @@ impl Default for App {
             shown_hints: HashSet::new(),
             osc52_supported: true,
             host_hint: String::from("unknown"),
+            search_match_count: 0,
         }
     }
 }

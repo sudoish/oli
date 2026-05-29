@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 
 use super::App;
+use super::search::SearchState;
 
 /// What kind of in-flight completion is being offered.
 #[derive(Debug, Clone)]
@@ -127,6 +128,10 @@ pub enum Overlay {
     HistorySearch(HistorySearchState),
     CopyFallback(CopyFallbackState),
     Wizard(crate::tui::wizard::WizardState),
+    /// In-transcript search bar (Ctrl+F). Substring (case-
+    /// insensitive) match against the rendered transcript;
+    /// Enter / n / N cycle matches; Esc closes.
+    Search(SearchState),
 }
 
 impl App {
@@ -383,6 +388,53 @@ impl App {
     pub fn copy_fallback_scroll_down(&mut self) {
         if let Some(Overlay::CopyFallback(s)) = &mut self.overlay {
             s.scroll = s.scroll.saturating_add(5);
+        }
+    }
+
+    // ---------- in-transcript search ----------
+
+    pub fn search(&self) -> Option<&SearchState> {
+        match &self.overlay {
+            Some(Overlay::Search(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn open_search(&mut self) {
+        self.overlay = Some(Overlay::Search(SearchState::default()));
+    }
+
+    pub fn close_search(&mut self) {
+        if matches!(self.overlay, Some(Overlay::Search(_))) {
+            self.overlay = None;
+        }
+    }
+
+    pub fn search_push_char(&mut self, c: char) {
+        if let Some(Overlay::Search(s)) = &mut self.overlay {
+            s.query.push(c);
+            s.current = 0;
+        }
+    }
+
+    pub fn search_backspace(&mut self) {
+        if let Some(Overlay::Search(s)) = &mut self.overlay {
+            s.query.pop();
+            s.current = 0;
+        }
+    }
+
+    /// Step the focused match forward (`+1`) or backward (`-1`).
+    /// `match_count` is supplied by the renderer, which knows
+    /// how many lines matched the current query. No-op when zero.
+    pub fn search_navigate(&mut self, delta: i32, match_count: usize) {
+        if match_count == 0 {
+            return;
+        }
+        if let Some(Overlay::Search(s)) = &mut self.overlay {
+            let n = match_count as i32;
+            let next = (s.current as i32 + delta).rem_euclid(n);
+            s.current = next as usize;
         }
     }
 

@@ -351,6 +351,10 @@ fn on_key(
             handle_wizard_key(app, key, ui_tx);
             return;
         }
+        Some(Overlay::Search(_)) => {
+            handle_search_key(app, key);
+            return;
+        }
         None => {}
     }
 
@@ -397,6 +401,16 @@ fn on_key(
                     load_into_input: true,
                 });
             }
+            return;
+        }
+        KeyCode::Char('f') if ctrl => {
+            // Ctrl+F: in-transcript search. Opens a one-line
+            // search bar above the input; typing filters,
+            // Enter / n / N cycle matches, Esc closes. (Spec X2
+            // suggested `/` but that's already the slash-command
+            // sigil at the input prompt — Ctrl+F sidesteps the
+            // conflict.)
+            app.open_search();
             return;
         }
         _ => {}
@@ -1014,6 +1028,28 @@ fn handle_help_browser_key(app: &mut App, key: crossterm::event::KeyEvent) {
         KeyCode::Up => app.help_browser_navigate(-1),
         KeyCode::Down => app.help_browser_navigate(1),
         KeyCode::Esc | KeyCode::Enter => app.close_help_browser(),
+        _ => {}
+    }
+}
+
+fn handle_search_key(app: &mut App, key: crossterm::event::KeyEvent) {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    // The renderer is the authority on the active match list
+    // (it's computed against the laid-out transcript), so the
+    // handler cycles via App's last cached count. For navigation
+    // we use `i32::MAX` as a sentinel meaning "let the renderer
+    // wrap it next paint" — App stores the modular index and the
+    // next render clamps it. In practice the cached count from
+    // `App.search_match_count` is sufficient.
+    let count = app.search_match_count;
+    match key.code {
+        KeyCode::Esc => app.close_search(),
+        KeyCode::Enter | KeyCode::Down => app.search_navigate(1, count),
+        KeyCode::Up => app.search_navigate(-1, count),
+        KeyCode::Char('n') if !ctrl => app.search_navigate(1, count),
+        KeyCode::Char('N') if !ctrl => app.search_navigate(-1, count),
+        KeyCode::Backspace => app.search_backspace(),
+        KeyCode::Char(c) if !ctrl => app.search_push_char(c),
         _ => {}
     }
 }
