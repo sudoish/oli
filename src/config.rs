@@ -95,6 +95,15 @@ pub struct UiConfig {
     /// terminal-native selection back.
     #[serde(default)]
     pub mouse: Option<bool>,
+
+    /// Override OSC52 clipboard-write default. `None` / `"auto"` =
+    /// follow `Capabilities::osc52` (on in kitty / iTerm2 / WezTerm
+    /// / ghostty / tmux-capable; off in buffer-terminals + generic
+    /// xterm). `"on"` forces the escape; `"off"` always falls back
+    /// to the copy-fallback modal. Useful when a host *does* honor
+    /// OSC52 but we couldn't detect it, or vice versa.
+    #[serde(default)]
+    pub osc52: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

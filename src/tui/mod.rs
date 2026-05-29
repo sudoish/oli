@@ -67,6 +67,8 @@ pub async fn run(
     session_id: Option<String>,
     viewport: ViewportMode,
     mouse_capture: bool,
+    osc52_supported: bool,
+    host_hint: String,
 ) -> Result<()> {
     // Snapshot identity fields for the status bar before the
     // agent moves into the driver task. Branch is queried once
@@ -155,6 +157,7 @@ pub async fn run(
     app.set_slash_meta(initial_slash_meta);
     app.set_status(initial_status);
     app.set_shown_hints(hints::load());
+    app.set_clipboard_caps(osc52_supported, host_hint);
     if !has_user_config() {
         app.open_wizard();
     }
@@ -557,11 +560,17 @@ fn has_user_config() -> bool {
 }
 
 /// `/copy [N]` — copy the N-th-most-recent assistant message to
-/// the system clipboard via OSC52. `N` defaults to 1 (the most
-/// recent). OSC52 lands in iTerm2, kitty, WezTerm, Alacritty
-/// (with `clipboard.osc52: true`), and tmux (with
-/// `set-clipboard on`). Terminals that don't support it silently
-/// drop the escape; we surface a hint either way.
+/// the system clipboard. `N` defaults to 1 (the most recent).
+///
+/// In hosts that support OSC52 (iTerm2, kitty, WezTerm, ghostty,
+/// tmux with `set-clipboard on`) we write the escape directly.
+/// In hosts that don't (Neovim `:terminal`, VSCode integrated
+/// terminal, generic xterm without an allowlist hit) we open the
+/// `Overlay::CopyFallback` modal instead — the user reads the body
+/// in a visible window and copies it via the host's own selection
+/// affordances. The split is driven by `App::osc52_supported`,
+/// which is resolved from `Capabilities::osc52` + `[ui].osc52`
+/// at TUI startup.
 fn handle_copy_slash(app: &mut App, arg: &str) {
     let n: usize = if arg.is_empty() {
         1
@@ -598,11 +607,16 @@ fn handle_copy_slash(app: &mut App, arg: &str) {
         return;
     };
 
-    write_osc52_clipboard(&body);
-    app.on_system_note(format!(
-        "copied {} bytes to clipboard via OSC52 (terminal must support it; tmux needs `set -g set-clipboard on`)",
-        body.len()
-    ));
+    if app.osc52_supported {
+        write_osc52_clipboard(&body);
+        app.on_system_note(format!(
+            "copied {} bytes to clipboard via OSC52 (terminal must support it; tmux needs `set -g set-clipboard on`)",
+            body.len()
+        ));
+    } else {
+        let host = app.host_hint.clone();
+        app.open_copy_fallback(body, n, host);
+    }
 }
 
 /// Write `payload` to the user's clipboard via the OSC52 escape
@@ -676,6 +690,67 @@ mod tests {
     fn base64_encode_handles_unicode_bytes() {
         // Emoji is 4 UTF-8 bytes (one block + one byte tail).
         assert_eq!(base64_encode("✓".as_bytes()), "4pyT");
+    }
+
+    use crate::tui::app::TranscriptItem;
+
+    fn app_with_assistants<I, S>(bodies: I) -> App
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let mut app = App::new();
+        for body in bodies {
+            app.transcript.push(TranscriptItem::Assistant {
+                body: body.into(),
+                done: true,
+            });
+        }
+        app
+    }
+
+    #[test]
+    fn copy_slash_opens_fallback_when_osc52_unsupported() {
+        let mut app = app_with_assistants(["hello world"]);
+        app.set_clipboard_caps(false, "vscode".into());
+        handle_copy_slash(&mut app, "");
+        let s = app.copy_fallback().expect("fallback should be open");
+        assert_eq!(s.body, "hello world");
+        assert_eq!(s.index, 1);
+        assert_eq!(s.host_hint, "vscode");
+    }
+
+    #[test]
+    fn copy_slash_does_not_open_fallback_when_osc52_supported() {
+        // When the host honors OSC52, the slash handler writes the
+        // escape and emits a system note — no modal is opened.
+        let mut app = app_with_assistants(["body"]);
+        app.set_clipboard_caps(true, "kitty".into());
+        handle_copy_slash(&mut app, "");
+        assert!(app.copy_fallback().is_none());
+    }
+
+    #[test]
+    fn copy_slash_with_explicit_n_targets_nth_most_recent() {
+        // `/copy 2` picks the second-most-recent assistant message,
+        // not the first one in the transcript. Verifying the index
+        // is carried into the modal title.
+        let mut app = app_with_assistants(["oldest", "middle", "newest"]);
+        app.set_clipboard_caps(false, "neovim:terminal".into());
+        handle_copy_slash(&mut app, "2");
+        let s = app.copy_fallback().expect("fallback should be open");
+        assert_eq!(s.body, "middle");
+        assert_eq!(s.index, 2);
+    }
+
+    #[test]
+    fn copy_slash_without_assistant_messages_does_not_open_fallback() {
+        // No transcript content → system note, no modal. Avoids an
+        // empty modal that the user has to dismiss for no reason.
+        let mut app = App::new();
+        app.set_clipboard_caps(false, "vscode".into());
+        handle_copy_slash(&mut app, "");
+        assert!(app.copy_fallback().is_none());
     }
 }
 

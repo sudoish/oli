@@ -45,6 +45,27 @@ Mouse-wheel ownership in inline mode: the host buffer owns the
 wheel by default (so editor / VSCode scroll works). Set
 `[ui].mouse = true` (or pass `--fullscreen`) to let oli capture it.
 
+### Clipboard (`/copy N`)
+
+oli's preferred clipboard path is OSC52 — a single escape sequence
+the host terminal turns into a clipboard write. iTerm2, kitty,
+WezTerm, ghostty, foot, and tmux (with `set-clipboard on`) all
+honor it; Neovim `:terminal`, VSCode integrated terminal, and most
+generic xterm variants don't.
+
+When OSC52 isn't supported, `/copy N` opens a fallback modal with
+the verbatim message body. Select it with your terminal's normal
+mouse / keyboard selection and copy with the host's shortcut
+(`Cmd+C`, `Ctrl+Shift+C`, etc.). Press any key to dismiss.
+
+Force the path with `[ui].osc52`:
+
+- `"on"` — always write the escape, even in hosts we'd default off.
+  Use when the host honors OSC52 but we couldn't detect it.
+- `"off"` — always open the fallback modal. Use when the host
+  *does* honor OSC52 but you'd rather see what you're copying.
+- `"auto"` / unset — defer to capability detection.
+
 ### Input box
 
 | Key                         | Action                                                                  |

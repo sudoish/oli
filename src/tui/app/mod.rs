@@ -107,6 +107,18 @@ pub struct App {
     /// ctx_window) is set once at startup; usage is updated by
     /// the driver after each chat round.
     pub status: StatusModel,
+
+    /// Whether the host supports OSC52 clipboard writes. Resolved
+    /// once at TUI startup from `Capabilities::osc52` + the
+    /// `[ui].osc52` override (Phase W4). When false, `/copy N`
+    /// opens the `Overlay::CopyFallback` modal instead of writing
+    /// the escape into a host that would silently drop it.
+    pub osc52_supported: bool,
+
+    /// Short identifier of the host terminal (`caps.host`), shown
+    /// in the copy-fallback modal title so the user knows *which*
+    /// host blocked OSC52. Set once at startup.
+    pub host_hint: String,
 }
 
 /// Aggregate of every field the status bar can display. Optional
@@ -145,6 +157,8 @@ impl Default for App {
             status: StatusModel::default(),
             slash_descriptions: HashMap::new(),
             shown_hints: HashSet::new(),
+            osc52_supported: true,
+            host_hint: String::from("unknown"),
         }
     }
 }
@@ -209,6 +223,14 @@ impl App {
         self.history = history;
         self.history_cursor = None;
         self.history_draft = None;
+    }
+
+    /// Wire the OSC52 capability + host label set at TUI startup.
+    /// The slash handler reads these to pick between writing the
+    /// OSC52 escape or opening the copy-fallback modal.
+    pub fn set_clipboard_caps(&mut self, osc52_supported: bool, host_hint: String) {
+        self.osc52_supported = osc52_supported;
+        self.host_hint = host_hint;
     }
 
     pub fn request_quit(&mut self) {

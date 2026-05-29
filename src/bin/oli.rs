@@ -528,6 +528,11 @@ async fn run(args: Args) -> Result<()> {
                         tui::resolve_mode(flag, cfg_choice, caps.auto_viewport());
                     let mouse =
                         tui::resolve_mouse(cfg.ui.mouse, caps.mouse, viewport);
+                    let osc52 = tui::caps::resolve_osc52(
+                        cfg.ui.osc52.as_deref(),
+                        caps.osc52,
+                    );
+                    let host_hint = caps.host.clone();
                     return tui::run(
                         agent,
                         plugin_slashes,
@@ -535,6 +540,8 @@ async fn run(args: Args) -> Result<()> {
                         session_id,
                         viewport,
                         mouse,
+                        osc52,
+                        host_hint,
                     )
                     .await;
                 }
