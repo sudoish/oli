@@ -526,12 +526,15 @@ async fn run(args: Args) -> Result<()> {
                     let caps = tui::caps::Capabilities::detect();
                     let viewport =
                         tui::resolve_mode(flag, cfg_choice, caps.auto_viewport());
+                    let mouse =
+                        tui::resolve_mouse(cfg.ui.mouse, caps.mouse, viewport);
                     return tui::run(
                         agent,
                         plugin_slashes,
                         Some(plugin_reloader),
                         session_id,
                         viewport,
+                        mouse,
                     )
                     .await;
                 }

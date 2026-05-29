@@ -56,7 +56,9 @@ use crate::tui::driver::AgentCommand;
 use crate::tui::event::{ApprovalResponse, UiEvent};
 use crate::tui::terminal::{TerminalGuard, ViewportMode};
 
-pub use crate::tui::terminal::{ViewportChoice, ViewportMode as Viewport, resolve_mode};
+pub use crate::tui::terminal::{
+    ViewportChoice, ViewportMode as Viewport, resolve_mode, resolve_mouse,
+};
 
 pub async fn run(
     mut agent: Agent,
@@ -64,6 +66,7 @@ pub async fn run(
     reloader: Option<Arc<PluginReloader>>,
     session_id: Option<String>,
     viewport: ViewportMode,
+    mouse_capture: bool,
 ) -> Result<()> {
     // Snapshot identity fields for the status bar before the
     // agent moves into the driver task. Branch is queried once
@@ -78,10 +81,6 @@ pub async fn run(
         session_usage: Default::default(),
     };
 
-    // Mouse capture is meaningful only in fullscreen mode for W1;
-    // Phase W3 widens this so inline mode can opt in via `[ui].mouse`
-    // or `/mouse on`. Default: capture in fullscreen, off in inline.
-    let mouse_capture = matches!(viewport, ViewportMode::Fullscreen);
     let mut guard = TerminalGuard::enter(viewport, mouse_capture)
         .map_err(|e| AgentError::Provider(format!("tui init: {}", e)))?;
 

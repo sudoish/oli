@@ -82,10 +82,19 @@ pub struct Config {
 pub struct UiConfig {
     /// Which viewport mode the TUI should pick. One of `"auto"`,
     /// `"fullscreen"`, `"inline"`. `"auto"` defers to capability
-    /// detection (currently always `"fullscreen"`; Phase W2 widens
-    /// this to choose `"inline"` inside buffer-terminals).
+    /// detection (Phase W2): inline inside buffer-terminals,
+    /// fullscreen elsewhere.
     #[serde(default)]
     pub viewport: Option<String>,
+
+    /// Override mouse-capture default. `None` = follow the viewport
+    /// and capability defaults (capture in fullscreen, off in
+    /// inline / buffer-terminals). `Some(true)` forces capture on,
+    /// `Some(false)` forces it off — the latter is useful in a
+    /// fullscreen kitty/iTerm2 session when the user wants
+    /// terminal-native selection back.
+    #[serde(default)]
+    pub mouse: Option<bool>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

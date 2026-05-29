@@ -104,6 +104,28 @@ pub fn inline_height(terminal_rows: u16) -> u16 {
     DEFAULT_INLINE_HEIGHT.min(cap).max(MIN_INLINE_HEIGHT)
 }
 
+/// Decide whether to enable mouse capture, in priority order:
+///
+/// 1. Explicit config override (`[ui].mouse = true | false`).
+/// 2. `caps.mouse == false` (host doesn't pass mouse cleanly —
+///    Neovim `:terminal`, VSCode integrated terminal) ⇒ off.
+/// 3. Inline viewport ⇒ off (the host buffer expects to own the
+///    scroll-wheel; W7 documents the split).
+/// 4. Fullscreen + capable host ⇒ on (pre-W3 default).
+pub fn resolve_mouse(
+    config: Option<bool>,
+    caps_mouse_allowed: bool,
+    viewport: ViewportMode,
+) -> bool {
+    if let Some(b) = config {
+        return b;
+    }
+    if !caps_mouse_allowed {
+        return false;
+    }
+    matches!(viewport, ViewportMode::Fullscreen)
+}
+
 pub struct TerminalGuard {
     terminal: Tui,
     mode: ViewportMode,
@@ -272,5 +294,37 @@ mod tests {
     fn inline_height_caps_at_default_on_tall_terminal() {
         assert_eq!(inline_height(80), DEFAULT_INLINE_HEIGHT);
         assert_eq!(inline_height(200), DEFAULT_INLINE_HEIGHT);
+    }
+
+    #[test]
+    fn mouse_config_override_wins_in_both_directions() {
+        // Force-on inside a buffer-terminal (user knows their host
+        // forwards mouse) — capture turns on even though caps says
+        // mouse=false.
+        assert!(resolve_mouse(Some(true), false, ViewportMode::Inline));
+        // Force-off in fullscreen kitty — capture turns off even
+        // though caps and viewport would both default it on.
+        assert!(!resolve_mouse(Some(false), true, ViewportMode::Fullscreen));
+    }
+
+    #[test]
+    fn mouse_off_in_buffer_terminal_by_default() {
+        // No override; caps says mouse is unsafe (Neovim :terminal) —
+        // capture stays off regardless of viewport.
+        assert!(!resolve_mouse(None, false, ViewportMode::Fullscreen));
+        assert!(!resolve_mouse(None, false, ViewportMode::Inline));
+    }
+
+    #[test]
+    fn mouse_off_in_inline_mode_by_default() {
+        // Inline mode wants to share the scroll-wheel with the host
+        // buffer — default off even when caps would allow it.
+        assert!(!resolve_mouse(None, true, ViewportMode::Inline));
+    }
+
+    #[test]
+    fn mouse_on_in_fullscreen_capable_host_by_default() {
+        // The pre-W3 default for a fresh terminal.
+        assert!(resolve_mouse(None, true, ViewportMode::Fullscreen));
     }
 }
