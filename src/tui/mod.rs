@@ -30,6 +30,7 @@ pub mod fuzzy;
 mod hints;
 pub mod history;
 mod hook;
+mod image;
 mod markdown;
 mod terminal;
 pub mod theme;
