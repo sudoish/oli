@@ -171,8 +171,8 @@ pub struct App {
 /// "Done when" wants a stack of ≥ 8 entries.
 pub const SCROLL_HISTORY_CAP: usize = 16;
 
-/// Aggregate of every field the status bar can display. Optional
-/// fields render as "—" or get dropped on narrow terminals.
+/// Identity fields for the footer and welcome box. Optional
+/// fields are dropped from the footer when the terminal narrows.
 #[derive(Clone, Debug, Default)]
 pub struct StatusModel {
     pub session_id: Option<String>,

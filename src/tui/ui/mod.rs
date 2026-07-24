@@ -507,6 +507,32 @@ mod tests {
         assert!(!narrow.contains("main"), "got: {narrow}");
         assert!(narrow.contains("kimi-k3"), "got: {narrow}");
     }
+
+    #[test]
+    fn footer_truncates_cwd_around_surviving_model() {
+        let app = app_with_status(StatusModel {
+            model: "kimi-k3".into(),
+            ctx_window: 100_000,
+            branch: Some("main".into()),
+            cwd: "~/dev/devenv/oli".into(),
+            ..Default::default()
+        });
+        // 40 cols: shortcuts and branch are gone, cwd is
+        // center-truncated, and the model still survives.
+        let line = line_text(&build_footer_line(&app, 40));
+        assert!(!line.contains("? for shortcuts"), "got: {line}");
+        assert!(!line.contains("main"), "got: {line}");
+        assert!(line.contains('…'), "cwd should be truncated: {line}");
+        assert!(line.contains("kimi-k3"), "model must survive: {line}");
+    }
+
+    #[test]
+    fn status_row_shows_thinking_before_first_token() {
+        let mut app = app_with_status(StatusModel::default());
+        app.on_turn_started();
+        let lines = render_status_row(&app);
+        assert!(line_text(&lines[0]).contains("Thinking"));
+    }
 }
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
@@ -620,7 +646,8 @@ fn footer_identity_spans(app: &App, budget: u16) -> Vec<Span<'static>> {
     }
     if width_of(show_shortcuts, &cwd, show_branch, show_model) > budget {
         let others = width_of(show_shortcuts, "", show_branch, show_model);
-        let room = budget.saturating_sub(others) as usize;
+        let sep = if others > 0 { 3 } else { 0 };
+        let room = budget.saturating_sub(others + sep) as usize;
         if room >= 4 {
             cwd = truncate_middle(&cwd, room);
         } else {

@@ -75,8 +75,8 @@ pub async fn run(
     host_hint: String,
     theme: theme::Theme,
 ) -> Result<()> {
-    // Snapshot identity fields for the status bar before the
-    // agent moves into the driver task. Branch is queried once
+    // Snapshot identity fields for the footer and welcome box
+    // before the agent moves into the driver task. Branch is queried once
     // (it doesn't change mid-session in any healthy workflow);
     // model + ctx_window come from the agent's configured caps.
     let initial_status = app::StatusModel {
