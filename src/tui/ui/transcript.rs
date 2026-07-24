@@ -117,9 +117,9 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
 
 /// Render every transcript item to a flat `Vec<Line>` ready for
 /// `Paragraph`. Pure over `&App` so V2 tests can inspect the
-/// rendered structure (separators, padding gutter, etc.) without a
-/// terminal. `rule_width` controls the horizontal-rule glyph count
-/// inserted between user→assistant turn boundaries.
+/// rendered structure (bands, padding gutter, etc.) without a
+/// terminal. `rule_width` is the inner width of the transcript
+/// pane — user-prompt bands pad to it.
 pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'static>> {
     // The viewport renders the live tail only. In fullscreen
     // `committed` is always 0, so this is the whole transcript —
@@ -131,10 +131,7 @@ pub(super) fn build_transcript_lines(app: &App, rule_width: u16) -> Vec<Line<'st
 /// Render a contiguous range of transcript items to lines. Used by the
 /// viewport builder (`committed..len`) and the inline-mode scrollback
 /// flush (`old_committed..new_committed`). `range` selects which items
-/// are *emitted*; the full `app.transcript` slice stays accessible for
-/// lookahead (the trailing user→assistant separator peeks `i + 1`), so
-/// a range ending just before a live assistant still draws the rule
-/// that visually joins scrollback to the viewport.
+/// are *emitted*.
 pub(super) fn build_transcript_lines_range(
     app: &App,
     rule_width: u16,
@@ -149,86 +146,92 @@ pub(super) fn build_transcript_lines_range(
         let is_active = app.active_assistant == Some(i);
         match item {
             TranscriptItem::UserPrompt { body } => {
-                let header_text = "you ";
-                let header_chars = header_text.chars().count() as u16 + 1;
-                let header_pad = rule_width.saturating_sub(header_chars) as usize;
-                let mut header_spans: Vec<Span<'static>> = Vec::with_capacity(3);
-                if header_pad > 0 {
-                    header_spans.push(Span::raw(" ".repeat(header_pad)));
-                }
-                header_spans.push(Span::styled(
-                    header_text.to_string(),
-                    Style::default()
-                        .fg(theme.user)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                header_spans.push(Span::styled(
-                    "▐".to_string(),
-                    Style::default()
-                        .fg(theme.user)
-                        .add_modifier(Modifier::BOLD),
-                ));
-                lines.push(Line::from(header_spans));
-
-                let body_right_gutter: u16 = 2;
-                let body_total_w = rule_width.saturating_sub(body_right_gutter);
-                let bubble_width = bubble_width_for(rule_width);
+                let band = Style::default().bg(theme.user_band_bg);
+                let width = rule_width.max(1) as usize;
+                let pad_line = || Line::from(Span::styled(" ".repeat(width), band));
+                lines.push(pad_line());
+                let body_w = rule_width.saturating_sub(2).max(1) as usize;
+                let mut visual: Vec<String> = Vec::new();
                 for body_line in body.lines() {
-                    for chunk in wrap_to_width(body_line, bubble_width as usize) {
-                        let chunk_w = chunk.chars().count() as u16;
-                        let pad = body_total_w.saturating_sub(chunk_w) as usize;
-                        let mut spans: Vec<Span<'static>> = Vec::with_capacity(2);
-                        if pad > 0 {
-                            spans.push(Span::raw(" ".repeat(pad)));
-                        }
-                        spans.push(Span::styled(chunk, Style::default().fg(theme.fg)));
-                        lines.push(Line::from(spans));
-                    }
+                    visual.extend(wrap_to_width(body_line, body_w));
                 }
+                if visual.is_empty() {
+                    visual.push(String::new());
+                }
+                for (idx, chunk) in visual.iter().enumerate() {
+                    let (prefix, prefix_style) = if idx == 0 {
+                        (
+                            "› ",
+                            band.add_modifier(Modifier::BOLD).add_modifier(Modifier::DIM),
+                        )
+                    } else {
+                        ("  ", band)
+                    };
+                    let used = prefix.chars().count() + chunk.chars().count();
+                    let pad = width.saturating_sub(used);
+                    lines.push(Line::from(vec![
+                        Span::styled(prefix.to_string(), prefix_style),
+                        Span::styled(chunk.clone(), band),
+                        Span::styled(" ".repeat(pad), band),
+                    ]));
+                }
+                lines.push(pad_line());
             }
-            TranscriptItem::Assistant { body, done } => {
-                lines.push(Line::from(Span::styled(
-                    "▌ oli",
-                    Style::default()
-                        .fg(theme.accent)
-                        .add_modifier(Modifier::BOLD),
-                )));
+            TranscriptItem::Assistant { body, .. } => {
                 if body.is_empty() && is_active {
-                    lines.push(Line::from(Span::styled(
-                        "  · waiting for first token",
-                        Style::default()
-                            .fg(theme.dim)
-                            .add_modifier(Modifier::ITALIC),
-                    )));
+                    lines.push(Line::from(vec![
+                        Span::styled("• ".to_string(), Style::default().fg(theme.dim)),
+                        Span::styled(
+                            "waiting for first token".to_string(),
+                            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+                        ),
+                    ]));
                 } else {
-                    for md_line in markdown::render(body, app.markdown_theme) {
+                    let mut md_lines = markdown::render(body, app.markdown_theme);
+                    if md_lines.is_empty() {
+                        md_lines.push(Line::raw(""));
+                    }
+                    for (idx, md_line) in md_lines.into_iter().enumerate() {
                         let mut spans: Vec<Span<'static>> =
                             Vec::with_capacity(md_line.spans.len() + 1);
-                        spans.push(Span::raw("  "));
+                        if idx == 0 {
+                            spans.push(Span::styled(
+                                "• ".to_string(),
+                                Style::default().fg(theme.dim),
+                            ));
+                        } else {
+                            spans.push(Span::raw("  "));
+                        }
                         spans.extend(md_line.spans.into_iter());
                         lines.push(Line::from(spans));
                     }
                 }
-                if !done && is_active {
-                    let last = lines
-                        .last_mut()
-                        .expect("at least the header was pushed");
-                    last.spans.push(Span::styled(
-                        "▍",
-                        Style::default()
-                            .fg(theme.accent)
-                            .add_modifier(Modifier::SLOW_BLINK),
-                    ));
-                }
             }
             TranscriptItem::System { body } => {
-                for body_line in body.lines() {
+                if let Some(msg) = body.strip_prefix("error: ") {
                     lines.push(Line::from(Span::styled(
-                        format!("  {}", body_line),
-                        Style::default()
-                            .fg(theme.dim)
-                            .add_modifier(Modifier::ITALIC),
+                        format!("■ {}", msg),
+                        Style::default().fg(theme.tool_err),
                     )));
+                } else if body.starts_with("✔ ") {
+                    lines.push(Line::from(Span::styled(
+                        body.clone(),
+                        Style::default().fg(theme.tool_ok),
+                    )));
+                } else if body.starts_with("✗ ") {
+                    lines.push(Line::from(Span::styled(
+                        body.clone(),
+                        Style::default().fg(theme.tool_err),
+                    )));
+                } else {
+                    for body_line in body.lines() {
+                        lines.push(Line::from(Span::styled(
+                            format!("  {}", body_line),
+                            Style::default()
+                                .fg(theme.dim)
+                                .add_modifier(Modifier::ITALIC),
+                        )));
+                    }
                 }
             }
             TranscriptItem::ToolCard {
@@ -248,25 +251,9 @@ pub(super) fn build_transcript_lines_range(
                 lines.extend(render_tool_card_detail(tool, state, theme));
             }
         }
-        let next = items.get(i + 1);
-        let user_to_assistant = matches!(item, TranscriptItem::UserPrompt { .. })
-            && matches!(next, Some(TranscriptItem::Assistant { .. }));
-        if user_to_assistant {
-            lines.push(separator_rule(rule_width, theme));
-        } else {
-            lines.push(Line::raw(""));
-        }
+        lines.push(Line::raw(""));
     }
     lines
-}
-
-/// Maximum width of a right-aligned user "bubble" given the
-/// transcript inner width. Caps at 60 cols so very wide terminals
-/// don't stretch user prompts edge-to-edge, with a 4-col gutter on
-/// the left so the bubble visibly hugs the right side. Floors at
-/// 20 cols so tiny terminals still wrap reasonably.
-fn bubble_width_for(inner_width: u16) -> u16 {
-    inner_width.saturating_sub(4).min(60).max(20)
 }
 
 /// Word-wrap `text` into chunks of at most `width` chars. Splits
@@ -343,16 +330,13 @@ pub(super) fn anchor_to_bottom(
     lines
 }
 
-/// Re-paint every `Line` so case-insensitive substring matches of
-/// Line indices (post-layout) of user-turn headers. Detects them
-/// by the trailing `▐` glyph emitted only by the UserPrompt header
-/// in `build_transcript_lines`. Returned indices match the row
-/// offset in the laid-out transcript and are clamped to `u16` —
-/// `scroll_manual` is `u16` too, so callers don't need to widen.
+/// Line indices (post-layout) of the start of each user turn.
+/// Detects them by the `› ` prefix span emitted only by the
+/// UserPrompt band in `build_transcript_lines`.
 pub(super) fn user_turn_line_indices(lines: &[Line<'_>]) -> Vec<u16> {
     let mut out = Vec::new();
     for (i, line) in lines.iter().enumerate() {
-        if line.spans.iter().any(|s| s.content.as_ref() == "▐") {
+        if line.spans.iter().any(|s| s.content.as_ref() == "› ") {
             out.push(i as u16);
         }
     }
@@ -450,14 +434,6 @@ fn highlight_line_spans(
         }
     }
     Line::from(new_spans)
-}
-
-/// Dim horizontal rule used between user→assistant turn
-/// boundaries. Width is the inner width of the transcript pane so
-/// the rule visually spans the full gutter.
-fn separator_rule(width: u16, theme: &Theme) -> Line<'static> {
-    let glyphs: String = std::iter::repeat('─').take(width.max(1) as usize).collect();
-    Line::from(Span::styled(glyphs, Style::default().fg(theme.dim)))
 }
 
 /// Header line of a tool card:
@@ -879,61 +855,6 @@ mod tests {
         assert_eq!(out[0].spans[2].style.fg, Some(Color::Red));
     }
 
-    fn has_rule(lines: &[Line<'_>]) -> bool {
-        lines.iter().any(|l| line_text(l).contains('─'))
-    }
-
-    #[test]
-    fn rule_appears_between_user_prompt_and_assistant_response() {
-        let mut app = App::new();
-        app.transcript
-            .push(TranscriptItem::UserPrompt { body: "q".into() });
-        app.transcript.push(TranscriptItem::Assistant {
-            body: "a".into(),
-            done: true,
-        });
-        let lines = build_transcript_lines(&app, 40);
-        assert!(has_rule(&lines), "expected a rule in {:?}",
-            lines.iter().map(line_text).collect::<Vec<_>>());
-    }
-
-    #[test]
-    fn rule_does_not_appear_between_assistant_and_tool_card() {
-        let mut app = App::new();
-        app.transcript.push(TranscriptItem::Assistant {
-            body: "a".into(),
-            done: true,
-        });
-        app.transcript.push(TranscriptItem::ToolCard {
-            tool: "grep".into(),
-            args_preview: "".into(),
-            state: ToolCardState::Done {
-                duration: Duration::ZERO,
-                summary: "ok".into(),
-                ok: true,
-                full_output: String::new(),
-                expanded: false,
-            },
-        });
-        let lines = build_transcript_lines(&app, 40);
-        assert!(!has_rule(&lines));
-    }
-
-    #[test]
-    fn rule_does_not_appear_between_assistant_and_subsequent_user_turn() {
-        // Boundary at end of assistant → start of next user prompt
-        // is just a blank line, not a rule.
-        let mut app = App::new();
-        app.transcript.push(TranscriptItem::Assistant {
-            body: "a".into(),
-            done: true,
-        });
-        app.transcript
-            .push(TranscriptItem::UserPrompt { body: "q2".into() });
-        let lines = build_transcript_lines(&app, 40);
-        assert!(!has_rule(&lines));
-    }
-
     fn empty_app() -> App {
         let mut app = App::new();
         app.transcript.clear(); // drop the welcome-system banner
@@ -941,65 +862,108 @@ mod tests {
     }
 
     #[test]
-    fn user_prompt_renders_you_header_with_right_bar() {
+    fn user_prompt_renders_full_width_banded_block() {
         let mut app = empty_app();
         app.transcript
-            .push(TranscriptItem::UserPrompt { body: "hi".into() });
-        let inner = 40u16;
-        let lines = build_transcript_lines(&app, inner);
-        let header = lines
+            .push(TranscriptItem::UserPrompt { body: "hi there".into() });
+        let lines = build_transcript_lines(&app, 40);
+        let band = Some(app.theme.user_band_bg);
+        let body = lines
             .iter()
-            .find(|l| line_text(l).contains("you"))
-            .expect("you header should be in output");
-        let s = line_text(header);
-        assert!(s.ends_with("you ▐"), "got: {:?}", s);
-        assert_eq!(s.chars().count(), inner as usize);
-    }
-
-    #[test]
-    fn user_prompt_body_is_right_aligned_with_2col_right_gutter() {
-        let mut app = empty_app();
-        app.transcript
-            .push(TranscriptItem::UserPrompt { body: "hello".into() });
-        let inner = 40u16;
-        let lines = build_transcript_lines(&app, inner);
-        let body_line = lines
-            .iter()
-            .find(|l| line_text(l).trim() == "hello")
-            .expect("hello body line should be present");
-        let s = line_text(body_line);
-        assert!(s.ends_with("hello"));
-        // Body sits 2 cols left of where the header's `▐` ends.
-        assert_eq!(s.chars().count(), (inner - 2) as usize);
-    }
-
-    #[test]
-    fn user_prompt_wraps_long_text_into_right_aligned_chunks() {
-        let mut app = empty_app();
-        let body =
-            "this is a sufficiently long user prompt that should wrap onto more than one chunk";
-        app.transcript
-            .push(TranscriptItem::UserPrompt { body: body.into() });
-        let inner = 40u16;
-        let lines = build_transcript_lines(&app, inner);
-        // Body chunks: non-empty, no rule, no header glyph.
-        let chunks: Vec<&Line> = lines
-            .iter()
-            .filter(|l| {
-                let t: String = line_text(l);
-                !t.trim().is_empty() && !t.contains('─') && !t.contains("▐")
-            })
-            .collect();
-        assert!(chunks.len() >= 2, "expected wrapping, got {} chunk(s)", chunks.len());
-        for chunk in chunks {
-            let s = line_text(chunk);
-            assert_eq!(
-                s.chars().count(),
-                (inner - 2) as usize,
-                "chunk not padded to inner_width-2: {:?}",
-                s
-            );
+            .find(|l| line_text(l).contains("hi there"))
+            .expect("body line");
+        assert_eq!(line_text(body).chars().count(), 40);
+        assert!(line_text(body).starts_with("› "));
+        assert!(body.spans.iter().all(|s| s.style.bg == band));
+        let first = &body.spans[0];
+        assert_eq!(first.content, "› ");
+        assert!(first.style.add_modifier.contains(Modifier::BOLD));
+        assert!(first.style.add_modifier.contains(Modifier::DIM));
+        // Tinted blank pad lines above and below the message.
+        let idx = lines.iter().position(|l| std::ptr::eq(l, body)).unwrap();
+        for neighbor in [&lines[idx - 1], &lines[idx + 1]] {
+            assert!(line_text(neighbor).trim().is_empty());
+            assert!(neighbor.spans.iter().all(|s| s.style.bg == band));
         }
+    }
+
+    #[test]
+    fn user_prompt_wraps_with_indented_continuations() {
+        let mut app = empty_app();
+        app.transcript.push(TranscriptItem::UserPrompt {
+            body: "one two three four five six seven eight nine ten".into(),
+        });
+        let lines = build_transcript_lines(&app, 20);
+        let band = Some(app.theme.user_band_bg);
+        let visual: Vec<&Line> = lines
+            .iter()
+            .filter(|l| !line_text(l).trim().is_empty())
+            .collect();
+        assert!(visual.len() >= 3, "expected wrap, got {}", visual.len());
+        assert!(line_text(visual[0]).starts_with("› "));
+        for cont in &visual[1..] {
+            assert!(line_text(cont).starts_with("  "), "got: {:?}", line_text(cont));
+        }
+        for l in visual {
+            assert_eq!(line_text(l).chars().count(), 20);
+            assert!(l.spans.iter().all(|s| s.style.bg == band));
+        }
+    }
+
+    #[test]
+    fn assistant_renders_bullet_prefix_without_header_or_cursor() {
+        let mut app = empty_app();
+        app.transcript.push(TranscriptItem::Assistant {
+            body: "hello world".into(),
+            done: false,
+        });
+        app.active_assistant = Some(0);
+        let lines = build_transcript_lines(&app, 40);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("• hello world"), "got: {text}");
+        assert!(!text.contains('▌'), "old header glyph leaked: {text}");
+        assert!(!text.contains('▍'), "streaming cursor leaked: {text}");
+        let first = lines
+            .iter()
+            .find(|l| line_text(l).contains("hello world"))
+            .expect("body line");
+        assert_eq!(first.spans[0].content, "• ");
+        assert_eq!(first.spans[0].style.fg, Some(app.theme.dim));
+    }
+
+    #[test]
+    fn assistant_waiting_placeholder_while_empty_and_active() {
+        let mut app = empty_app();
+        app.on_turn_started();
+        let lines = build_transcript_lines(&app, 40);
+        let text = lines.iter().map(line_text).collect::<Vec<_>>().join("\n");
+        assert!(text.contains("waiting for first token"), "got: {text}");
+    }
+
+    #[test]
+    fn system_note_stays_dim_italic() {
+        let mut app = empty_app();
+        app.on_system_note("just a note".into());
+        let lines = build_transcript_lines(&app, 40);
+        let note = lines
+            .iter()
+            .find(|l| line_text(l).contains("just a note"))
+            .expect("note line");
+        assert!(line_text(note).starts_with("  "));
+        assert!(note.spans[0].style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn error_note_renders_block_glyph_in_error_color() {
+        let mut app = empty_app();
+        app.on_turn_error("boom");
+        let lines = build_transcript_lines(&app, 40);
+        let err = lines
+            .iter()
+            .find(|l| line_text(l).contains("boom"))
+            .expect("error line");
+        assert!(line_text(err).starts_with("■ "), "got: {:?}", line_text(err));
+        assert_eq!(err.spans[0].style.fg, Some(app.theme.tool_err));
     }
 
     #[test]
@@ -1067,30 +1031,6 @@ mod tests {
     }
 
     #[test]
-    fn bubble_width_caps_at_60() {
-        assert_eq!(bubble_width_for(200), 60);
-        assert_eq!(bubble_width_for(40), 36); // 40 - 4
-        assert_eq!(bubble_width_for(10), 20); // floor
-    }
-
-    #[test]
-    fn rule_width_matches_requested_width() {
-        let mut app = App::new();
-        app.transcript
-            .push(TranscriptItem::UserPrompt { body: "q".into() });
-        app.transcript.push(TranscriptItem::Assistant {
-            body: "a".into(),
-            done: true,
-        });
-        let lines = build_transcript_lines(&app, 12);
-        let rule_line = lines
-            .iter()
-            .find(|l| line_text(l).contains('─'))
-            .expect("rule should be present");
-        assert_eq!(line_text(rule_line).chars().count(), 12);
-    }
-
-    #[test]
     fn user_turn_indices_match_each_user_prompt_header() {
         let mut app = App::new();
         app.transcript
@@ -1110,12 +1050,14 @@ mod tests {
         let idxs = user_turn_line_indices(&lines);
         // Two user turns → two indices.
         assert_eq!(idxs.len(), 2);
-        // Each index points at a line containing "you " (the user
-        // header text), confirming we landed on the header row.
-        for i in &idxs {
+        // Each index points at a line containing the `› ` band
+        // prefix followed by the prompt's first chunk, confirming
+        // we landed on the band's first body row.
+        let expected = ["› first", "› second"];
+        for (i, want) in idxs.iter().zip(expected) {
             let row = &lines[*i as usize];
             let text: String = row.spans.iter().map(|s| s.content.as_ref()).collect();
-            assert!(text.contains("you "), "row text was: {:?}", text);
+            assert!(text.contains(want), "row text was: {:?}", text);
         }
         // Indices are strictly increasing.
         assert!(idxs[0] < idxs[1]);
