@@ -84,6 +84,7 @@ pub async fn run(
         model: agent.model.clone(),
         ctx_window: agent.caps.ctx_window as u32,
         branch: detect_git_branch(),
+        cwd: current_dir_label(),
         last_usage: None,
         session_usage: Default::default(),
     };
@@ -1170,6 +1171,18 @@ fn flush_committed(guard: &mut TerminalGuard, app: &mut App) -> Result<()> {
 
 fn io_err(e: std::io::Error) -> AgentError {
     AgentError::Provider(format!("tui io: {}", e))
+}
+
+/// `~`-relativized cwd for the footer.
+fn current_dir_label() -> String {
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let raw = cwd.to_string_lossy().into_owned();
+    match std::env::var("HOME") {
+        Ok(home) if !home.is_empty() && raw.starts_with(&home) => {
+            format!("~{}", &raw[home.len()..])
+        }
+        _ => raw,
+    }
 }
 
 /// Best-effort current git branch + dirty marker, queried once

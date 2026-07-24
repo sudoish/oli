@@ -32,6 +32,8 @@ pub struct Theme {
     pub gauge_warn: Color,
     pub gauge_danger: Color,
     pub border: Color,
+    /// Background tint for the user-message band and the composer.
+    pub user_band_bg: Color,
     pub selected_fg: Color,
     pub selected_bg: Color,
 }
@@ -55,6 +57,7 @@ impl Theme {
             gauge_warn: Color::Yellow,
             gauge_danger: Color::Red,
             border: Color::Cyan,
+            user_band_bg: Color::Rgb(0x1f, 0x1f, 0x1f),
             selected_fg: Color::Black,
             selected_bg: Color::Cyan,
         }
@@ -78,6 +81,7 @@ impl Theme {
             gauge_warn: Color::Rgb(0xb5, 0x86, 0x00),
             gauge_danger: Color::Rgb(0xb0, 0x00, 0x00),
             border: Color::Blue,
+            user_band_bg: Color::Rgb(0xf5, 0xf5, 0xf5),
             selected_fg: Color::White,
             selected_bg: Color::Blue,
         }
@@ -102,6 +106,7 @@ impl Theme {
             gauge_warn: Color::Rgb(0x9a, 0x86, 0x4c),
             gauge_danger: Color::Rgb(0x9a, 0x6c, 0x6c),
             border: Color::Rgb(0x6c, 0x9a, 0xa0),
+            user_band_bg: Color::Rgb(0x10, 0x10, 0x10),
             selected_fg: Color::Black,
             selected_bg: Color::Rgb(0x6c, 0x9a, 0xa0),
         }

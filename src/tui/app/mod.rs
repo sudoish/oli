@@ -179,6 +179,8 @@ pub struct StatusModel {
     pub model: String,
     pub ctx_window: u32,
     pub branch: Option<String>,
+    /// `~`-relativized cwd for the footer.
+    pub cwd: String,
     pub last_usage: Option<crate::providers::Usage>,
     pub session_usage: crate::providers::Usage,
 }
@@ -355,6 +357,12 @@ impl App {
             }
             KeyCode::Char('}') if !ctrl && !alt && self.is_input_empty() => {
                 self.focus_next_card();
+                return SubmitAction::None;
+            }
+            KeyCode::Char('?')
+                if self.input.lines().len() == 1 && self.input.lines()[0].is_empty() =>
+            {
+                self.open_help_browser();
                 return SubmitAction::None;
             }
             // Position-stack jumps (X3): Ctrl+O steps back through
@@ -722,7 +730,7 @@ fn build_textarea() -> TextArea<'static> {
 
 fn build_textarea_with(lines: Vec<String>) -> TextArea<'static> {
     let mut t = TextArea::new(lines);
-    t.set_placeholder_text("type a message…  Shift+Enter for newline, Tab to complete");
+    t.set_placeholder_text("Ask oli to do anything");
     t
 }
 
