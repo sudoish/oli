@@ -14,7 +14,7 @@ use crate::tui::image::{ImageMarker, can_render_images, parse_image_marker};
 use crate::tui::markdown;
 use crate::tui::theme::Theme;
 
-use super::spinner_glyph;
+use super::{fmt_elapsed, spinner_glyph};
 
 /// Horizontal padding (cols) inset from each transcript edge.
 /// Applied via `Block::padding`; the rule width below subtracts 2x.
@@ -436,8 +436,23 @@ fn highlight_line_spans(
     Line::from(new_spans)
 }
 
+/// `(active, done)` verb pair per tool. MCP tools arrive namespaced
+/// (`server__tool`); anything unrecognized reads as a call.
+fn tool_verbs(tool: &str) -> (&'static str, &'static str) {
+    match tool.to_ascii_lowercase().as_str() {
+        "bash" | "subprocess" | "task" => ("Running", "Ran"),
+        "edit" | "multiedit" => ("Editing", "Edited"),
+        "write" => ("Writing", "Wrote"),
+        "read" => ("Reading", "Read"),
+        "grep" | "glob" => ("Searching", "Searched"),
+        "notes" => ("Noting", "Noted"),
+        _ => ("Calling", "Called"),
+    }
+}
+
 /// Header line of a tool card:
-/// `→ Read   src/main.rs                            0.04s ✓`
+/// `• Ran cargo test --lib 2.31s` — animated spinner bullet while
+/// running, green/red bold bullet when done, `›` when focused.
 fn render_tool_card_line(
     tool: &str,
     args_preview: &str,
@@ -445,99 +460,92 @@ fn render_tool_card_line(
     theme: &Theme,
     focused: bool,
 ) -> Line<'static> {
-    let mut spans: Vec<Span<'static>> = Vec::new();
-    let arrow_color = match state {
-        ToolCardState::Streaming { .. } => theme.tool_running,
-        ToolCardState::Running { .. } => theme.tool_running,
-        ToolCardState::Done { ok: true, .. } => theme.tool_ok,
-        ToolCardState::Done { ok: false, .. } => theme.tool_err,
+    let (active_verb, done_verb) = tool_verbs(tool);
+    let mut spans: Vec<Span<'static>> = if focused {
+        vec![Span::styled(
+            "› ".to_string(),
+            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+        )]
+    } else {
+        match state {
+            ToolCardState::Streaming { .. } => {
+                vec![Span::styled("• ".to_string(), Style::default().fg(theme.dim))]
+            }
+            ToolCardState::Running { started_at } => {
+                let secs = started_at.elapsed().as_secs_f32();
+                vec![Span::styled(
+                    format!("{} ", spinner_glyph(secs)),
+                    Style::default().fg(theme.tool_running),
+                )]
+            }
+            ToolCardState::Done { ok, .. } => vec![Span::styled(
+                "• ".to_string(),
+                Style::default()
+                    .fg(if *ok { theme.tool_ok } else { theme.tool_err })
+                    .add_modifier(Modifier::BOLD),
+            )],
+        }
     };
-    // Y4: focused cards get a leading ▍ sidebar in the accent color
-    // — the same focus glyph used elsewhere in the TUI — so the
-    // user can see which card the {/} cursor is on and `Enter`
-    // will expand/collapse.
-    let leader = if focused { "▍ → " } else { "  → " };
+    let verb = match state {
+        ToolCardState::Done { .. } => done_verb,
+        _ => active_verb,
+    };
     spans.push(Span::styled(
-        leader.to_string(),
-        Style::default()
-            .fg(if focused { theme.accent } else { arrow_color })
-            .add_modifier(Modifier::BOLD),
-    ));
-    spans.push(Span::styled(
-        format!("{:<7}", tool),
-        Style::default()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD),
+        verb.to_string(),
+        Style::default().add_modifier(Modifier::BOLD),
     ));
     spans.push(Span::raw(" "));
     spans.push(Span::styled(
         args_preview.to_string(),
         Style::default().fg(theme.fg),
     ));
-    spans.push(Span::raw("  "));
     match state {
-        ToolCardState::Streaming { .. } => {
-            // Card is mid-stream — show a single static glyph + the
-            // word "streaming". No timer because the call hasn't been
-            // dispatched yet; PreToolUse hasn't fired.
-            spans.push(Span::styled(
-                "⠿ streaming…",
-                Style::default().fg(theme.tool_running),
-            ));
-        }
         ToolCardState::Running { started_at } => {
-            let elapsed = started_at.elapsed().as_secs_f32();
             spans.push(Span::styled(
-                format!("{} {:.1}s", spinner_glyph(elapsed), elapsed),
-                Style::default().fg(theme.tool_running),
-            ));
-        }
-        ToolCardState::Done { duration, ok, .. } => {
-            spans.push(Span::styled(
-                format!("{:.2}s", duration.as_secs_f32()),
+                format!(" ({})", fmt_elapsed(started_at.elapsed().as_secs())),
                 Style::default().fg(theme.dim),
             ));
-            spans.push(Span::raw(" "));
+        }
+        ToolCardState::Done { duration, .. } => {
             spans.push(Span::styled(
-                if *ok { "✓" } else { "✗" },
-                Style::default().fg(if *ok { theme.tool_ok } else { theme.tool_err }),
+                format!(" {:.2}s", duration.as_secs_f32()),
+                Style::default().fg(theme.dim),
             ));
         }
+        ToolCardState::Streaming { .. } => {}
     }
     Line::from(spans)
 }
 
-/// Detail lines under a card.
-///
-/// - Streaming Edit/Write cards render a 6-line peek of the new
-///   content the model is mid-emitting (lenient partial-JSON
-///   extraction; partial last line OK).
-/// - Running cards show no detail (the call is dispatched; we
-///   wait for results).
-/// - Done cards show their summary indented under the header.
+/// First line `  └ `, continuations `    ` — Codex's output connector.
+fn connector_lines(body: Vec<String>, body_style: Style, theme: &Theme) -> Vec<Line<'static>> {
+    body.into_iter()
+        .enumerate()
+        .map(|(i, s)| {
+            let prefix = if i == 0 { "  └ " } else { "    " };
+            Line::from(vec![
+                Span::styled(prefix.to_string(), Style::default().fg(theme.dim)),
+                Span::styled(s, body_style),
+            ])
+        })
+        .collect()
+}
+
+/// Detail lines under a card. Streaming Edit/Write: dim peek.
+/// Running: nothing. Done+ok: one dim summary connector. Done+fail:
+/// ≤3-line error tail so failures survive the collapse. Expanded:
+/// full output under connectors (40-line cap).
 fn render_tool_card_detail(
     tool: &str,
     state: &ToolCardState,
     theme: &Theme,
 ) -> Vec<Line<'static>> {
     match state {
-        ToolCardState::Streaming { accumulated_json, .. } => {
-            let peek = extract_streaming_peek(tool, accumulated_json);
-            peek.into_iter()
-                .map(|line| {
-                    Line::from(vec![
-                        Span::styled(
-                            "    + ".to_string(),
-                            Style::default().fg(theme.diff_added),
-                        ),
-                        Span::styled(
-                            line,
-                            Style::default().fg(theme.diff_added),
-                        ),
-                    ])
-                })
-                .collect()
-        }
+        ToolCardState::Streaming { accumulated_json, .. } => connector_lines(
+            extract_streaming_peek(tool, accumulated_json),
+            Style::default().fg(theme.dim),
+            theme,
+        ),
         ToolCardState::Running { .. } => Vec::new(),
         ToolCardState::Done {
             summary,
@@ -548,33 +556,48 @@ fn render_tool_card_detail(
         } => {
             if *expanded {
                 expanded_output_lines(full_output, theme, *ok)
-            } else if summary.is_empty() {
-                Vec::new()
+            } else if *ok {
+                if summary.is_empty() {
+                    Vec::new()
+                } else {
+                    connector_lines(
+                        vec![summary.clone()],
+                        Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+                        theme,
+                    )
+                }
             } else {
-                vec![Line::from(Span::styled(
-                    format!("    {}", summary),
-                    Style::default()
-                        .fg(if *ok { theme.dim } else { theme.diff_removed })
-                        .add_modifier(Modifier::ITALIC),
-                ))]
+                let tail: Vec<String> = if full_output.trim().is_empty() {
+                    vec![summary.clone()]
+                } else {
+                    full_output
+                        .trim_end()
+                        .lines()
+                        .take(3)
+                        .map(String::from)
+                        .collect()
+                };
+                connector_lines(tail, Style::default().fg(theme.diff_removed), theme)
             }
         }
     }
 }
 
 /// Y4: cap an expanded card's body at 40 lines and emit each line
-/// dim-indented under the header, with a trailing "+N more" hint
-/// when the cap was hit. Empty output renders a single italic
-/// "(no output)" line so the expand gesture isn't silent.
+/// through the `└` connector under the header, with a trailing
+/// "+N more" hint when the cap was hit. Empty output renders a
+/// single italic "(no output)" line so the expand gesture isn't
+/// silent.
 const EXPANDED_LINE_CAP: usize = 40;
 
 fn expanded_output_lines(full_output: &str, theme: &Theme, ok: bool) -> Vec<Line<'static>> {
     let trimmed = full_output.trim_end_matches('\n');
     if trimmed.is_empty() {
-        return vec![Line::from(Span::styled(
-            "    (no output)".to_string(),
+        return connector_lines(
+            vec!["(no output)".to_string()],
             Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
-        ))];
+            theme,
+        );
     }
     // Phase Y3: an `[Image: ...]` marker gets its own polished render
     // — show the basename, dimensions, and format as a chip, plus a
@@ -588,17 +611,12 @@ fn expanded_output_lines(full_output: &str, theme: &Theme, ok: bool) -> Vec<Line
     }
     let all: Vec<&str> = trimmed.lines().collect();
     let total = all.len();
-    let body_color = if ok { theme.fg } else { theme.diff_removed };
-    let mut out: Vec<Line<'static>> = all
-        .iter()
-        .take(EXPANDED_LINE_CAP)
-        .map(|s| {
-            Line::from(vec![
-                Span::raw("    ".to_string()),
-                Span::styled(s.to_string(), Style::default().fg(body_color)),
-            ])
-        })
-        .collect();
+    let body_style = Style::default().fg(if ok { theme.fg } else { theme.diff_removed });
+    let mut out = connector_lines(
+        all.iter().take(EXPANDED_LINE_CAP).map(|s| s.to_string()).collect(),
+        body_style,
+        theme,
+    );
     if total > EXPANDED_LINE_CAP {
         out.push(Line::from(Span::styled(
             format!("    … +{} more lines", total - EXPANDED_LINE_CAP),
@@ -1189,71 +1207,84 @@ mod tests {
     }
 
     #[test]
-    fn render_tool_card_detail_streaming_edit_emits_peek_lines() {
+    fn tool_verbs_map_by_tool_kind() {
+        assert_eq!(tool_verbs("Bash"), ("Running", "Ran"));
+        assert_eq!(tool_verbs("Edit"), ("Editing", "Edited"));
+        assert_eq!(tool_verbs("Write"), ("Writing", "Wrote"));
+        assert_eq!(tool_verbs("Read"), ("Reading", "Read"));
+        assert_eq!(tool_verbs("Grep"), ("Searching", "Searched"));
+        assert_eq!(tool_verbs("github__search_code"), ("Calling", "Called"));
+    }
+
+    #[test]
+    fn done_ok_card_renders_green_bullet_past_verb_and_summary_connector() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(120),
+            summary: "12 lines".into(),
+            ok: true,
+            full_output: String::new(),
+            expanded: false,
+        };
+        let line = render_tool_card_line("Read", "a.rs", &state, &theme, false);
+        assert_eq!(line.spans[0].content, "• ");
+        assert_eq!(line.spans[0].style.fg, Some(theme.tool_ok));
+        let text = line_text(&line);
+        assert!(text.starts_with("• Read a.rs"), "got: {text}");
+        assert!(text.contains("0.12s"), "duration suffix: {text}");
+        let detail = render_tool_card_detail("Read", &state, &theme);
+        assert_eq!(line_text(&detail[0]), "  └ 12 lines");
+    }
+
+    #[test]
+    fn done_fail_card_renders_red_bullet_and_error_tail() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Done {
+            duration: Duration::from_millis(1),
+            summary: "exit 1".into(),
+            ok: false,
+            full_output: "line one\nline two\nline three\nline four".into(),
+            expanded: false,
+        };
+        let line = render_tool_card_line("Bash", "false", &state, &theme, false);
+        assert_eq!(line.spans[0].style.fg, Some(theme.tool_err));
+        assert!(line_text(&line).starts_with("• Ran false"));
+        let detail = render_tool_card_detail("Bash", &state, &theme);
+        // Tail capped at 3 lines, error-colored, connector-prefixed.
+        assert_eq!(detail.len(), 3);
+        assert_eq!(line_text(&detail[0]), "  └ line one");
+        assert_eq!(line_text(&detail[1]), "    line two");
+        assert_eq!(detail[0].spans[1].style.fg, Some(theme.diff_removed));
+    }
+
+    #[test]
+    fn running_card_renders_spinner_active_verb_and_elapsed() {
+        let theme = Theme::dark();
+        let state = ToolCardState::Running {
+            started_at: std::time::Instant::now(),
+        };
+        let line = render_tool_card_line("Bash", "cargo test", &state, &theme, false);
+        let text = line_text(&line);
+        assert!(text.contains("Running cargo test"), "got: {text}");
+        assert!(text.contains("(0s)"), "got: {text}");
+        assert!(render_tool_card_detail("Bash", &state, &theme).is_empty());
+    }
+
+    #[test]
+    fn streaming_edit_card_renders_dim_peek_with_connector() {
         let theme = Theme::dark();
         let state = ToolCardState::Streaming {
             provider_tool_id: "tu_1".into(),
             accumulated_json: r#"{"file_path":"a.rs","new_string":"hello\nworld"}"#.into(),
         };
         let detail = render_tool_card_detail("Edit", &state, &theme);
-        assert_eq!(detail.len(), 2);
-        assert_eq!(line_text(&detail[0]), "    + hello");
-        assert_eq!(line_text(&detail[1]), "    + world");
-        // Each line uses diff_added color.
-        assert!(detail[0].spans.iter().all(|s| s.style.fg == Some(theme.diff_added)));
+        assert_eq!(line_text(&detail[0]), "  └ hello");
+        assert_eq!(line_text(&detail[1]), "    world");
+        assert_eq!(detail[0].spans[1].style.fg, Some(theme.dim));
     }
 
     #[test]
-    fn render_tool_card_detail_streaming_write_emits_peek_lines() {
-        let theme = Theme::dark();
-        let state = ToolCardState::Streaming {
-            provider_tool_id: "tu_2".into(),
-            accumulated_json: r#"{"content":"line1\nline2"}"#.into(),
-        };
-        let detail = render_tool_card_detail("Write", &state, &theme);
-        assert_eq!(detail.len(), 2);
-        assert_eq!(line_text(&detail[0]), "    + line1");
-        assert_eq!(line_text(&detail[1]), "    + line2");
-    }
-
-    #[test]
-    fn render_tool_card_detail_streaming_partial_renders_what_we_have() {
-        let theme = Theme::dark();
-        let state = ToolCardState::Streaming {
-            provider_tool_id: "tu_3".into(),
-            accumulated_json: r#"{"new_string":"partial"#.into(),
-        };
-        let detail = render_tool_card_detail("Edit", &state, &theme);
-        assert_eq!(detail.len(), 1);
-        assert_eq!(line_text(&detail[0]), "    + partial");
-    }
-
-    #[test]
-    fn render_tool_card_detail_running_returns_no_lines() {
-        let theme = Theme::dark();
-        let state = ToolCardState::Running {
-            started_at: std::time::Instant::now(),
-        };
-        assert!(render_tool_card_detail("Edit", &state, &theme).is_empty());
-    }
-
-    #[test]
-    fn render_tool_card_detail_done_still_returns_summary_line() {
-        let theme = Theme::dark();
-        let state = ToolCardState::Done {
-            duration: Duration::from_millis(120),
-            summary: "wrote 3 lines".into(),
-            ok: true,
-            full_output: String::new(),
-            expanded: false,
-        };
-        let detail = render_tool_card_detail("Write", &state, &theme);
-        assert_eq!(detail.len(), 1);
-        assert_eq!(line_text(&detail[0]), "    wrote 3 lines");
-    }
-
-    #[test]
-    fn render_tool_card_line_focused_renders_sidebar_glyph() {
+    fn focused_card_renders_chevron_leader() {
         let theme = Theme::dark();
         let state = ToolCardState::Done {
             duration: Duration::from_millis(1),
@@ -1264,33 +1295,15 @@ mod tests {
         };
         let unfocused = render_tool_card_line("Read", "x", &state, &theme, false);
         let focused = render_tool_card_line("Read", "x", &state, &theme, true);
-        assert!(line_text(&unfocused).starts_with("  → "));
-        assert!(line_text(&focused).starts_with("▍ → "));
+        assert!(line_text(&unfocused).starts_with("• "));
+        assert!(line_text(&focused).starts_with("› "));
+        assert_eq!(focused.spans[0].style.fg, Some(theme.accent));
     }
 
     #[test]
-    fn render_tool_card_detail_expanded_done_shows_full_output_indented() {
+    fn expanded_done_shows_full_output_with_connectors_and_cap_hint() {
         let theme = Theme::dark();
-        let state = ToolCardState::Done {
-            duration: Duration::from_millis(1),
-            summary: "3 lines".into(),
-            ok: true,
-            full_output: "line1\nline2\nline3".into(),
-            expanded: true,
-        };
-        let detail = render_tool_card_detail("Read", &state, &theme);
-        assert_eq!(detail.len(), 3);
-        assert_eq!(line_text(&detail[0]), "    line1");
-        assert_eq!(line_text(&detail[1]), "    line2");
-        assert_eq!(line_text(&detail[2]), "    line3");
-    }
-
-    #[test]
-    fn render_tool_card_detail_expanded_caps_at_40_lines_with_hint() {
-        let theme = Theme::dark();
-        let body: String = (1..=50)
-            .map(|i| format!("L{}\n", i))
-            .collect();
+        let body: String = (1..=50).map(|i| format!("L{}\n", i)).collect();
         let state = ToolCardState::Done {
             duration: Duration::from_millis(1),
             summary: "50 lines".into(),
@@ -1299,15 +1312,14 @@ mod tests {
             expanded: true,
         };
         let detail = render_tool_card_detail("Read", &state, &theme);
-        // 40 content lines + 1 hint line.
         assert_eq!(detail.len(), 41);
-        assert_eq!(line_text(&detail[0]), "    L1");
-        assert_eq!(line_text(&detail[39]), "    L40");
+        assert_eq!(line_text(&detail[0]), "  └ L1");
+        assert_eq!(line_text(&detail[1]), "    L2");
         assert_eq!(line_text(&detail[40]), "    … +10 more lines");
     }
 
     #[test]
-    fn render_tool_card_detail_expanded_empty_output_shows_placeholder() {
+    fn expanded_empty_output_shows_placeholder_connector() {
         let theme = Theme::dark();
         let state = ToolCardState::Done {
             duration: Duration::from_millis(1),
@@ -1317,8 +1329,7 @@ mod tests {
             expanded: true,
         };
         let detail = render_tool_card_detail("Bash", &state, &theme);
-        assert_eq!(detail.len(), 1);
-        assert_eq!(line_text(&detail[0]), "    (no output)");
+        assert_eq!(line_text(&detail[0]), "  └ (no output)");
     }
 
     #[test]
@@ -1384,25 +1395,8 @@ mod tests {
         let detail = render_tool_card_detail("Read", &state, &theme);
         // Two literal output lines, no chip.
         assert_eq!(detail.len(), 2);
-        assert_eq!(line_text(&detail[0]), "    some text");
+        assert_eq!(line_text(&detail[0]), "  └ some text");
         assert!(line_text(&detail[1]).starts_with("    [Image: "));
-    }
-
-    #[test]
-    fn render_tool_card_detail_collapsed_done_still_shows_summary_when_full_output_present() {
-        // The summary line stays visible while the card is
-        // collapsed — full_output is hidden until the user expands.
-        let theme = Theme::dark();
-        let state = ToolCardState::Done {
-            duration: Duration::from_millis(1),
-            summary: "12 lines".into(),
-            ok: true,
-            full_output: "a\nb\nc".into(),
-            expanded: false,
-        };
-        let detail = render_tool_card_detail("Read", &state, &theme);
-        assert_eq!(detail.len(), 1);
-        assert_eq!(line_text(&detail[0]), "    12 lines");
     }
 
     #[test]
@@ -1420,13 +1414,17 @@ mod tests {
                 expanded: false,
             },
         });
-        // Sanity: unfocused renders the `  → ` leader.
+        // Sanity: unfocused renders the `• ` bullet leader.
         let lines = build_transcript_lines(&app, 40);
-        assert!(lines.iter().any(|l| line_text(l).starts_with("  → ")));
-        // Focus the card and re-render: leader flips to `▍ → `.
+        assert!(lines
+            .iter()
+            .any(|l| line_text(l).starts_with("• Read a.rs")));
+        // Focus the card and re-render: leader flips to `› `.
         app.focused_card_idx = Some(0);
         let lines = build_transcript_lines(&app, 40);
-        assert!(lines.iter().any(|l| line_text(l).starts_with("▍ → ")));
+        assert!(lines
+            .iter()
+            .any(|l| line_text(l).starts_with("› Read a.rs")));
     }
 
     #[test]
@@ -1446,10 +1444,10 @@ mod tests {
         });
         let lines = build_transcript_lines(&app, 40);
         let texts: Vec<String> = lines.iter().map(line_text).collect();
-        assert!(texts.iter().any(|t| t == "    alpha"));
+        assert!(texts.iter().any(|t| t == "  └ alpha"));
         assert!(texts.iter().any(|t| t == "    beta"));
         assert!(texts.iter().any(|t| t == "    gamma"));
         // Summary is NOT rendered when expanded — full_output replaces it.
-        assert!(!texts.iter().any(|t| t == "    3 lines"));
+        assert!(!texts.iter().any(|t| t == "  └ 3 lines"));
     }
 }
