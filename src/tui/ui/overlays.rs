@@ -78,13 +78,12 @@ pub(super) fn draw_approval_modal(
     ]));
     f.render_widget(reason, parts[0]);
 
-    // Diff / preview body. Lines starting with `+`/`-` (after the
-    // 4-space indent the diff renderer emits) get colored;
-    // everything else stays fg.
+    // Diff / preview body: styled_diff_line tints +/- rows
+    // full-width and dims context lines.
     let lines: Vec<Line> = approval
         .preview
         .lines()
-        .map(|l| diff_line_to_styled(l, theme))
+        .map(|l| styled_diff_line(l, inner.width, theme))
         .collect();
     let preview = Paragraph::new(lines)
         .wrap(Wrap { trim: false })
@@ -112,33 +111,27 @@ pub(super) fn draw_approval_modal(
     f.render_widget(legend, parts[2]);
 }
 
-/// Color a unified-diff line by its sign char. Renderer in
-/// `policy::render_unified_diff` emits `    + body` / `    - body`
-/// / `      body` (4 spaces indent + sign + space + body). Others
-/// (the "file: …", "(replace_all)" header lines etc) stay white.
-fn diff_line_to_styled<'a>(line: &'a str, theme: &Theme) -> Line<'a> {
+/// Codex-style diff row: sign-colored fg over a full-width bg tint
+/// for +/- lines; context lines stay dim and untinted. `width` pads
+/// the tint to the pane's inner width. Input is
+/// `policy::render_unified_diff`'s `    + body` / `    - body` /
+/// `      body` format.
+pub(super) fn styled_diff_line(line: &str, width: u16, theme: &Theme) -> Line<'static> {
     let trimmed = line.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("+ ") {
-        Line::from(vec![
-            Span::raw("    "),
-            Span::styled(
-                format!("+ {}", rest),
-                Style::default().fg(theme.diff_added),
-            ),
-        ])
-    } else if let Some(rest) = trimmed.strip_prefix("- ") {
-        Line::from(vec![
-            Span::raw("    "),
-            Span::styled(
-                format!("- {}", rest),
-                Style::default().fg(theme.diff_removed),
-            ),
-        ])
+    let (body_style, bg) = if trimmed.starts_with("+ ") {
+        (Style::default().fg(theme.diff_added), Some(theme.diff_add_bg))
+    } else if trimmed.starts_with("- ") {
+        (Style::default().fg(theme.diff_removed), Some(theme.diff_del_bg))
     } else {
-        Line::from(Span::styled(
-            line.to_string(),
-            Style::default().fg(theme.fg),
-        ))
+        (Style::default().fg(theme.dim), None)
+    };
+    let pad = (width as usize).saturating_sub(line.chars().count());
+    match bg {
+        Some(bg) => Line::from(vec![
+            Span::styled(line.to_string(), body_style.bg(bg)),
+            Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+        ]),
+        None => Line::from(Span::styled(line.to_string(), body_style)),
     }
 }
 
@@ -915,4 +908,46 @@ fn progress_bar(pct: f64, width: usize) -> String {
     }
     s.push(']');
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn added_line_gets_tinted_full_width() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("    + hello", 20, &theme);
+        assert_eq!(line_text(&line).chars().count(), 20);
+        assert!(line.spans.iter().all(|s| s.style.bg == Some(theme.diff_add_bg)));
+        assert_eq!(line.spans[0].style.fg, Some(theme.diff_added));
+    }
+
+    #[test]
+    fn removed_line_gets_del_tint() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("    - gone", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg == Some(theme.diff_del_bg)));
+        assert_eq!(line.spans[0].style.fg, Some(theme.diff_removed));
+    }
+
+    #[test]
+    fn context_line_stays_dim_without_bg() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("      same", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg.is_none()));
+        assert_eq!(line.spans[0].style.fg, Some(theme.dim));
+    }
+
+    #[test]
+    fn light_theme_uses_github_pastels() {
+        assert_eq!(Theme::light().diff_add_bg, Color::Rgb(0xda, 0xfb, 0xe1));
+        assert_eq!(Theme::light().diff_del_bg, Color::Rgb(0xff, 0xeb, 0xe9));
+        assert_eq!(Theme::dark().diff_add_bg, Color::Rgb(0x21, 0x3a, 0x2b));
+        assert_eq!(Theme::dimmed().diff_add_bg, Color::Rgb(0x1f, 0x2a, 0x1f));
+    }
 }
