@@ -166,6 +166,11 @@ pub struct App {
     /// Stays `0` in fullscreen mode (the commit step never runs), so
     /// the viewport renders the whole transcript exactly as before.
     pub committed: usize,
+
+    /// Wall-clock start of the current turn, captured in
+    /// `on_turn_started`. Feeds the `Worked for …` label on the
+    /// turn separator emitted at `on_turn_finished`.
+    pub turn_started_at: Option<Instant>,
 }
 
 /// Position-stack depth for Ctrl+O / Ctrl+I jumps. The spec's
@@ -219,6 +224,7 @@ impl Default for App {
             scroll_pos_cursor: 0,
             focused_card_idx: None,
             committed: 0,
+            turn_started_at: None,
         }
     }
 }
@@ -234,11 +240,7 @@ impl App {
     pub fn new() -> Self {
         let mut app = Self::default();
         app.markdown_theme = MarkdownTheme::detect();
-        app.transcript.push(TranscriptItem::System {
-            body: "oli ready. type a message and press Enter (Shift+Enter for newline). \
-                   /help for commands, Ctrl+D to exit."
-                .into(),
-        });
+        app.transcript.push(TranscriptItem::Welcome);
         app
     }
 

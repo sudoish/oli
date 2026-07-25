@@ -25,6 +25,14 @@ pub enum TranscriptItem {
         args_preview: String,
         state: ToolCardState,
     },
+    /// Startup splash: rounded box + tips. Rendered from
+    /// `app.status` (model, cwd) + the crate version.
+    Welcome,
+    /// Dim full-width rule emitted when a turn that ran at least one
+    /// tool finishes; carries the wall-clock turn duration.
+    TurnRule {
+        elapsed: Duration,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -59,7 +67,10 @@ pub enum ToolCardState {
 /// final once `Done` (Streaming/Running cards still change in place).
 fn is_final(item: &TranscriptItem) -> bool {
     match item {
-        TranscriptItem::UserPrompt { .. } | TranscriptItem::System { .. } => true,
+        TranscriptItem::UserPrompt { .. }
+        | TranscriptItem::System { .. }
+        | TranscriptItem::Welcome
+        | TranscriptItem::TurnRule { .. } => true,
         TranscriptItem::Assistant { done, .. } => *done,
         TranscriptItem::ToolCard { state, .. } => matches!(state, ToolCardState::Done { .. }),
     }
@@ -88,6 +99,7 @@ impl App {
         self.mode = Mode::Thinking {
             since: Instant::now(),
         };
+        self.turn_started_at = Some(Instant::now());
         self.transcript.push(TranscriptItem::Assistant {
             body: String::new(),
             done: false,
@@ -267,8 +279,25 @@ impl App {
                 *done = true;
             }
         }
+        // Codex-style separator: only turns that did real work
+        // (≥ 1 tool card since the last user prompt) earn the rule.
+        if self.turn_since_last_prompt_ran_tools() {
+            let elapsed = self.turn_started_at.map(|t| t.elapsed()).unwrap_or_default();
+            self.transcript.push(TranscriptItem::TurnRule { elapsed });
+            self.note_arrival(1);
+        }
         self.mode = Mode::Idle;
         self.cancel_tx = None;
+    }
+
+    /// True when the closing turn emitted at least one tool card
+    /// since the most recent user prompt.
+    fn turn_since_last_prompt_ran_tools(&self) -> bool {
+        self.transcript
+            .iter()
+            .rev()
+            .take_while(|i| !matches!(i, TranscriptItem::UserPrompt { .. }))
+            .any(|i| matches!(i, TranscriptItem::ToolCard { .. }))
     }
 
     pub fn on_turn_error(&mut self, msg: &str) {

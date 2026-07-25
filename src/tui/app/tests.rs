@@ -1248,3 +1248,14 @@ fn decision_cell_lands_in_transcript_with_glyph() {
         _ => panic!(),
     }
 }
+
+#[test]
+fn welcome_and_turn_rule_are_immediately_committable() {
+    let items = vec![
+        TranscriptItem::Welcome,
+        TranscriptItem::TurnRule {
+            elapsed: Duration::ZERO,
+        },
+    ];
+    assert_eq!(committable_count(&items, 0), 2);
+}

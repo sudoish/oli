@@ -3,6 +3,8 @@
 //! `Paragraph`. Owned strings everywhere so we can mutate scroll
 //! state on `App` afterwards without fighting borrows.
 
+use std::time::Duration;
+
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
@@ -250,10 +252,105 @@ pub(super) fn build_transcript_lines_range(
                 ));
                 lines.extend(render_tool_card_detail(tool, state, theme));
             }
+            TranscriptItem::Welcome => lines.extend(render_welcome(app, rule_width)),
+            TranscriptItem::TurnRule { elapsed } => {
+                lines.push(turn_separator(rule_width, *elapsed, theme))
+            }
         }
         lines.push(Line::raw(""));
     }
     lines
+}
+
+/// Codex-style startup splash: dim rounded box (`>_ oli (v…)` +
+/// model + directory) followed by three tip lines. Box inner width
+/// clamps to [20, 56] so wide terminals don't stretch it.
+fn render_welcome(app: &App, width: u16) -> Vec<Line<'static>> {
+    let theme = &app.theme;
+    let inner = width.saturating_sub(2).clamp(20, 56) as usize;
+    let dim = Style::default().fg(theme.dim);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    out.push(Line::from(Span::styled(format!("╭{}╮", "─".repeat(inner)), dim)));
+    out.push(welcome_row(
+        vec![
+            Span::styled(">_ ".to_string(), dim),
+            Span::styled(
+                "oli".to_string(),
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!(" (v{})", env!("CARGO_PKG_VERSION")), dim),
+        ],
+        inner,
+        theme,
+    ));
+    out.push(welcome_row(vec![Span::raw("")], inner, theme));
+    let model = if app.status.model.is_empty() {
+        "unknown".to_string()
+    } else {
+        app.status.model.clone()
+    };
+    out.push(welcome_row(
+        vec![
+            Span::styled("model: ".to_string(), dim),
+            Span::styled(model, Style::default().fg(theme.fg)),
+            Span::styled("  ".to_string(), dim),
+            Span::styled("/model".to_string(), Style::default().fg(theme.accent)),
+            Span::styled(" to change".to_string(), dim),
+        ],
+        inner,
+        theme,
+    ));
+    let cwd = super::clip_to_width(&app.status.cwd, inner.saturating_sub(11).max(1));
+    out.push(welcome_row(
+        vec![
+            Span::styled("directory: ".to_string(), dim),
+            Span::styled(cwd, Style::default().fg(theme.fg)),
+        ],
+        inner,
+        theme,
+    ));
+    out.push(Line::from(Span::styled(format!("╰{}╯", "─".repeat(inner)), dim)));
+    out.push(Line::raw(""));
+    out.push(Line::from(Span::styled(
+        "  To get started, describe a task or try one of these commands:".to_string(),
+        dim,
+    )));
+    let tips: [(&str, &str); 3] = [
+        ("/help", "show key bindings and commands"),
+        ("/sessions", "resume a previous session"),
+        ("/paths", "resolved config and data locations"),
+    ];
+    for (cmd, desc) in tips {
+        out.push(Line::from(vec![
+            Span::styled(format!("  {:<10}", cmd), Style::default().fg(theme.fg)),
+            Span::styled(format!("- {}", desc), dim),
+        ]));
+    }
+    out
+}
+
+/// One box row: `│` + spans padded to `inner` cols + `│`.
+fn welcome_row(spans: Vec<Span<'static>>, inner: usize, theme: &Theme) -> Line<'static> {
+    let dim = Style::default().fg(theme.dim);
+    let text_w: usize = spans.iter().map(|s| s.content.chars().count()).sum();
+    let mut all = vec![Span::styled("│".to_string(), dim)];
+    all.extend(spans);
+    all.push(Span::raw(" ".repeat(inner.saturating_sub(text_w))));
+    all.push(Span::styled("│".to_string(), dim));
+    Line::from(all)
+}
+
+/// Dim full-width rule; turns over a minute embed `Worked for …`.
+fn turn_separator(width: u16, elapsed: Duration, theme: &Theme) -> Line<'static> {
+    let w = width.max(1) as usize;
+    let style = Style::default().fg(theme.dim);
+    if elapsed.as_secs() > 60 {
+        let label = format!("─ Worked for {} ", super::fmt_elapsed(elapsed.as_secs()));
+        let fill = w.saturating_sub(label.chars().count());
+        Line::from(Span::styled(format!("{}{}", label, "─".repeat(fill)), style))
+    } else {
+        Line::from(Span::styled("─".repeat(w), style))
+    }
 }
 
 /// Word-wrap `text` into chunks of at most `width` chars. Splits
@@ -875,7 +972,7 @@ mod tests {
 
     fn empty_app() -> App {
         let mut app = App::new();
-        app.transcript.clear(); // drop the welcome-system banner
+        app.transcript.clear(); // drop the Welcome splash item
         app
     }
 
@@ -1449,5 +1546,69 @@ mod tests {
         assert!(texts.iter().any(|t| t == "    gamma"));
         // Summary is NOT rendered when expanded — full_output replaces it.
         assert!(!texts.iter().any(|t| t == "  └ 3 lines"));
+    }
+
+    #[test]
+    fn welcome_renders_rounded_box_with_identity_and_tips() {
+        let mut app = empty_app();
+        app.set_status(crate::tui::app::StatusModel {
+            model: "kimi-k3".into(),
+            cwd: "~/dev/oli".into(),
+            ..Default::default()
+        });
+        app.transcript.push(TranscriptItem::Welcome);
+        let lines = build_transcript_lines(&app, 80);
+        let text: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(text.iter().any(|l| l.starts_with('╭') && l.ends_with('╮')));
+        assert!(text.iter().any(|l| l.starts_with('╰') && l.ends_with('╯')));
+        assert!(text.iter().any(|l| l.contains("oli (v") && l.contains('│')));
+        assert!(text.iter().any(|l| l.contains("model: kimi-k3")));
+        assert!(text.iter().any(|l| l.contains("directory: ~/dev/oli")));
+        assert!(text.iter().any(|l| l.contains("/help")));
+        assert!(text.iter().any(|l| l.contains("/sessions")));
+    }
+
+    #[test]
+    fn welcome_box_inner_width_caps_at_56() {
+        let mut app = empty_app();
+        app.transcript.push(TranscriptItem::Welcome);
+        let lines = build_transcript_lines(&app, 200);
+        let top = lines
+            .iter()
+            .find(|l| line_text(l).starts_with('╭'))
+            .expect("top border");
+        assert_eq!(line_text(top).chars().count(), 58);
+    }
+
+    #[test]
+    fn turn_rule_emitted_after_tool_turn_but_not_chat_turn() {
+        let mut app = empty_app();
+        app.on_turn_started();
+        app.on_content_chunk("just chatting");
+        app.on_turn_finished("");
+        let lines = build_transcript_lines(&app, 40);
+        assert!(!lines.iter().any(|l| line_text(l).contains('─')));
+
+        app.on_turn_started();
+        app.on_tool_start(1, "Bash".into(), "ls".into());
+        app.on_tool_done(1, Duration::from_millis(5), "ok".into(), true, String::new());
+        app.on_turn_finished("");
+        let lines = build_transcript_lines(&app, 40);
+        let rule = lines
+            .iter()
+            .find(|l| line_text(l).contains('─'))
+            .expect("rule after tool turn");
+        assert_eq!(line_text(rule).chars().count(), 40);
+    }
+
+    #[test]
+    fn turn_separator_embeds_worked_for_over_a_minute() {
+        let theme = Theme::dark();
+        let line = turn_separator(40, Duration::from_secs(95), &theme);
+        let text = line_text(&line);
+        assert!(text.starts_with("─ Worked for 1m 35s "), "got: {text}");
+        assert_eq!(text.chars().count(), 40);
+        let short = turn_separator(40, Duration::from_secs(12), &theme);
+        assert!(!line_text(&short).contains("Worked for"));
     }
 }
