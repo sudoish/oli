@@ -1,12 +1,16 @@
 //! Per-frame render. Lays out the four-band shell:
-//! - **transcript** (flex top): user prompts, assistant
-//!   messages (with a live cursor while streaming), system
-//!   notices.
+//! - **transcript** (flex top): welcome splash, `›`-banded user
+//!   prompts, `•`-bulleted assistant messages, tool cards, and
+//!   system notices. In-flight state lives in the status row, not
+//!   an inline cursor.
 //! - **status row** (2 rows): spinner + elapsed while busy, a
 //!   tool-detail line while a tool runs; blank when idle.
 //! - **composer** (flex bottom, capped): borderless multi-line
 //!   tui-textarea on a tinted band.
 //! - **footer** (1 row): identity left, context gauge right.
+//!
+//! Approval takes over the bottom pane (transcript + inline
+//! approval) instead of floating a modal.
 //!
 //! Rendering is intentionally re-derived from `App` on every draw —
 //! there's no diff machinery. ratatui handles the on-screen diff

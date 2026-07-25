@@ -1,10 +1,11 @@
 //! Per-overlay render code. One `pub(super) fn draw_*` per
 //! variant of `tui::app::Overlay`, plus the wizard helpers and
-//! the diff-line styling used by the approval modal.
+//! the diff-line styling shared with the approval pane.
 //!
-//! Layout is consistently a centered modal with a top-left
-//! titled border, an inner body, and (where useful) a one-line
-//! legend at the bottom.
+//! Approval renders as an inline bottom pane (see
+//! `approval_pane_lines`); the remaining overlays are centered
+//! modals with a dim rounded border, a `›` selection accent, and
+//! (where useful) a one-line legend at the bottom.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
