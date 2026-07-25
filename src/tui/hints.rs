@@ -14,9 +14,11 @@ const FILE_NAME: &str = "tui-hints.json";
 /// Hint ids the TUI knows about. Adding a new tip = define a
 /// new constant + emit it in the relevant render path.
 pub mod ids {
-    /// Footnote on the approval modal: "Press [a] to allow this
-    /// for the rest of the session." Faded after the user
-    /// presses `a` once.
+    /// Retired: the inline approval pane replaced the modal that
+    /// carried the "press [a] to allow this session" footnote, so
+    /// nothing emits this today. Kept as the sample id and to keep
+    /// the store's round-trip test honest.
+    #[allow(dead_code)]
     pub const APPROVAL_ALLOW: &str = "approval-allow";
 }
 
@@ -44,12 +46,17 @@ pub fn load_from(path: &std::path::Path) -> HashSet<String> {
         .unwrap_or_default()
 }
 
+// Dormant write-side: the store is still read at startup, but no
+// active hint persists a "seen" id since the approval hint retired.
+// Retained so the next onboarding tip can wire straight through.
+#[allow(dead_code)]
 pub fn save(set: &HashSet<String>) {
     if let Some(path) = hints_path() {
         save_to(&path, set);
     }
 }
 
+#[allow(dead_code)]
 pub fn save_to(path: &std::path::Path, set: &HashSet<String>) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);

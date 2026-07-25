@@ -313,6 +313,27 @@ impl App {
         self.note_arrival(lines);
     }
 
+    /// Land the approval verdict in the transcript as a `✔`/`✗` cell
+    /// before the pane closes (the System renderer colors the glyph).
+    /// No-op if no approval is currently open.
+    pub fn note_approval_decision(&mut self, resp: &crate::tui::event::ApprovalResponse) {
+        use crate::tui::event::ApprovalResponse as R;
+        let Some(tool) = self.approval().map(|a| a.tool.clone()) else {
+            return;
+        };
+        let (glyph, verdict) = match resp {
+            R::Yes => ("✔", format!("You approved {} this time", tool)),
+            R::No => ("✗", format!("You did not approve {}", tool)),
+            R::AlwaysAllow => ("✔", format!("You approved {} for this session", tool)),
+            R::PersistAllow => ("✔", format!("You approved {} always", tool)),
+            R::AlwaysDeny => ("✗", format!("You denied {} for this session", tool)),
+        };
+        self.transcript.push(TranscriptItem::System {
+            body: format!("{} {}", glyph, verdict),
+        });
+        self.note_arrival(1);
+    }
+
     pub fn on_slash_finished(&mut self) {
         self.mode = Mode::Idle;
         self.cancel_tx = None;

@@ -21,8 +21,9 @@ pub mod search;
 mod transcript;
 
 pub use overlay::{
-    ApprovalState, CompletionKind, CompletionMenu, CopyFallbackState, HelpBrowserState,
-    HistorySearchState, InlineHelpState, Overlay, SessionPickerRow, SessionsPickerState,
+    APPROVAL_OPTIONS, ApprovalState, CompletionKind, CompletionMenu, CopyFallbackState,
+    HelpBrowserState, HistorySearchState, InlineHelpState, Overlay, SessionPickerRow,
+    SessionsPickerState,
 };
 #[allow(unused_imports)]
 pub use search::SearchState;

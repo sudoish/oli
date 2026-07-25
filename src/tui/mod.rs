@@ -1101,6 +1101,19 @@ fn handle_approval_key(
         KeyCode::Char('a') => Some(ApprovalResponse::AlwaysAllow),
         KeyCode::Char('A') => Some(ApprovalResponse::PersistAllow),
         KeyCode::Char('d') | KeyCode::Char('D') => Some(ApprovalResponse::AlwaysDeny),
+        // Arrow keys move the inline option cursor; Enter confirms it.
+        KeyCode::Up => {
+            app.approval_select_prev();
+            None
+        }
+        KeyCode::Down => {
+            app.approval_select_next();
+            None
+        }
+        KeyCode::Enter => {
+            let idx = app.approval().map(|a| a.selected).unwrap_or(0);
+            Some(crate::tui::event::approval_response_for(idx))
+        }
         // PgUp/PgDn scroll the diff body; let the user read a
         // long change before deciding.
         KeyCode::PageUp => {
@@ -1115,24 +1128,13 @@ fn handle_approval_key(
     };
 
     if let Some(resp) = response {
+        // Land the verdict in the transcript before the pane closes;
+        // reads `app.approval()`, so it must run first.
+        app.note_approval_decision(&resp);
         if let Some(tx) = pending_approval.lock().unwrap().take() {
             let _ = tx.send(resp);
         }
         app.close_approval();
-        // Once the user has used `a` (or `d`) at least once, fade
-        // the "Press [a] to allow this session" hint from future
-        // approval modals. Persist the change so the next session
-        // doesn't keep nagging them.
-        if matches!(
-            resp,
-            ApprovalResponse::AlwaysAllow
-                | ApprovalResponse::AlwaysDeny
-                | ApprovalResponse::PersistAllow
-        ) && app.hint_is_unseen(hints::ids::APPROVAL_ALLOW)
-        {
-            app.mark_hint_shown(hints::ids::APPROVAL_ALLOW);
-            hints::save(&app.shown_hints);
-        }
     }
 }
 

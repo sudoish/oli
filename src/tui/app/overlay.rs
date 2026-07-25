@@ -45,7 +45,20 @@ pub struct ApprovalState {
     pub reason: String,
     pub preview: String,
     pub scroll: u16,
+    /// Cursor into `APPROVAL_OPTIONS` for the inline option list.
+    pub selected: usize,
 }
+
+/// `(label, key)` — the five approval responses in list order. The
+/// list index maps to an `ApprovalResponse` via
+/// `crate::tui::event::approval_response_for`.
+pub const APPROVAL_OPTIONS: [(&str, &str); 5] = [
+    ("Yes", "y"),
+    ("No", "n"),
+    ("Allow for this session", "a"),
+    ("Allow always, persisted", "A"),
+    ("Deny for this session", "d"),
+];
 
 /// `/sessions` modal. Lists session entries, newest first.
 /// Selection is by index in `entries`. Enter triggers a copy of
@@ -467,6 +480,7 @@ impl App {
             tool,
             reason,
             scroll: 0,
+            selected: 0,
         }));
     }
 
@@ -485,6 +499,18 @@ impl App {
     pub fn approval_scroll_down(&mut self) {
         if let Some(a) = self.approval_mut() {
             a.scroll = a.scroll.saturating_add(5);
+        }
+    }
+
+    pub fn approval_select_prev(&mut self) {
+        if let Some(a) = self.approval_mut() {
+            a.selected = a.selected.saturating_sub(1);
+        }
+    }
+
+    pub fn approval_select_next(&mut self) {
+        if let Some(a) = self.approval_mut() {
+            a.selected = (a.selected + 1).min(APPROVAL_OPTIONS.len() - 1);
         }
     }
 }

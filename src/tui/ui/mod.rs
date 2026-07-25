@@ -16,7 +16,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 
 use transcript::TRANSCRIPT_H_PAD;
 
@@ -27,6 +27,21 @@ mod transcript;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
+
+    // Approval owns the bottom pane instead of floating a modal: the
+    // transcript keeps the rest of the frame so the user can still
+    // read context above the decision.
+    if let Some(crate::tui::app::Overlay::Approval(state)) = &app.overlay {
+        // Clone to release the immutable borrow of `app.overlay` so the
+        // transcript/pane draws (which take `app`) can proceed.
+        let state = state.clone();
+        let h = overlays::approval_pane_height(&state, area);
+        let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(h)]).split(area);
+        transcript::draw_transcript(f, chunks[0], app);
+        overlays::draw_approval_pane(f, chunks[1], &state, app);
+        return;
+    }
+
     let input_lines = app.input.lines().len().max(1).min(8) as u16;
     let chunks = Layout::vertical([
         Constraint::Min(3),              // transcript
@@ -50,13 +65,14 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
     use crate::tui::app::Overlay;
     match &app.overlay {
-        Some(Overlay::Approval(s)) => overlays::draw_approval_modal(f, area, s, app),
+        // Approval is handled above as a bottom pane, not a modal.
+        Some(Overlay::Approval(_)) => {}
         Some(Overlay::SessionsPicker(s)) => overlays::draw_sessions_picker(f, area, s, &app.theme),
         Some(Overlay::HelpBrowser(s)) => overlays::draw_help_browser(f, area, s, &app.theme),
         Some(Overlay::InlineHelp(s)) => overlays::draw_inline_help(f, area, s, &app.theme),
         Some(Overlay::HistorySearch(s)) => overlays::draw_history_search(f, area, s, app),
         Some(Overlay::CopyFallback(s)) => overlays::draw_copy_fallback(f, area, s, &app.theme),
-        Some(Overlay::Wizard(s)) => overlays::draw_wizard(f, area, s),
+        Some(Overlay::Wizard(s)) => overlays::draw_wizard(f, area, s, &app.theme),
         Some(Overlay::Search(_)) | None => {}
     }
 }
@@ -776,13 +792,8 @@ fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect,
     f.render_widget(Clear, popup_area);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
-        .title(Line::from(Span::styled(
-            " complete ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
-        )));
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.dim));
     let inner = block.inner(popup_area);
     f.render_widget(block, popup_area);
 
@@ -803,8 +814,7 @@ fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect,
             let is_selected = i == menu.selected;
             let base_style = if is_selected {
                 Style::default()
-                    .fg(theme.selected_fg)
-                    .bg(theme.selected_bg)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg)
@@ -812,7 +822,7 @@ fn draw_completion_popup(f: &mut Frame, transcript_area: Rect, input_area: Rect,
             let match_style = base_style
                 .fg(theme.match_highlight)
                 .add_modifier(Modifier::BOLD);
-            let prefix = if is_selected { "▌ " } else { "  " };
+            let prefix = if is_selected { "› " } else { "  " };
             let positions = menu.match_positions.get(i).cloned().unwrap_or_default();
             build_completion_line(prefix, name, &positions, base_style, match_style)
         })
