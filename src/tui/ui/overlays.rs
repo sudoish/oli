@@ -117,10 +117,13 @@ pub(super) fn draw_approval_modal(
 /// `policy::render_unified_diff`'s `    + body` / `    - body` /
 /// `      body` format.
 pub(super) fn styled_diff_line(line: &str, width: u16, theme: &Theme) -> Line<'static> {
-    let trimmed = line.trim_start();
-    let (body_style, bg) = if trimmed.starts_with("+ ") {
+    // The sign lives in a fixed column (`    + ` / `    - `, four
+    // leading spaces); context rows carry six. Match the column, not
+    // the first non-space char, so a context line whose body starts
+    // with `+`/`-` doesn't get mis-tinted.
+    let (body_style, bg) = if line.starts_with("    + ") {
         (Style::default().fg(theme.diff_added), Some(theme.diff_add_bg))
-    } else if trimmed.starts_with("- ") {
+    } else if line.starts_with("    - ") {
         (Style::default().fg(theme.diff_removed), Some(theme.diff_del_bg))
     } else {
         (Style::default().fg(theme.dim), None)
@@ -949,5 +952,28 @@ mod tests {
         assert_eq!(Theme::light().diff_del_bg, Color::Rgb(0xff, 0xeb, 0xe9));
         assert_eq!(Theme::dark().diff_add_bg, Color::Rgb(0x21, 0x3a, 0x2b));
         assert_eq!(Theme::dimmed().diff_add_bg, Color::Rgb(0x1f, 0x2a, 0x1f));
+    }
+
+    #[test]
+    fn removed_line_whose_body_starts_with_a_sign_still_tints() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("    - - foo", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg == Some(theme.diff_del_bg)));
+        assert_eq!(line.spans[0].style.fg, Some(theme.diff_removed));
+    }
+
+    #[test]
+    fn context_line_whose_body_starts_with_plus_stays_dim() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("      + foo", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg.is_none()));
+        assert_eq!(line.spans[0].style.fg, Some(theme.dim));
+    }
+
+    #[test]
+    fn short_line_without_sign_column_stays_dim() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("abc", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg.is_none()));
     }
 }
