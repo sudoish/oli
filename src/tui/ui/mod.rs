@@ -6,7 +6,7 @@
 //! - **status row** (2 rows): spinner + elapsed while busy, a
 //!   tool-detail line while a tool runs; blank when idle.
 //! - **composer** (flex bottom, capped): borderless multi-line
-//!   tui-textarea on a tinted band.
+//!   tui-textarea on a tinted band, inset from all four band edges.
 //! - **footer** (1 row): identity left, context gauge right.
 //!
 //! Approval takes over the bottom pane (transcript + inline
@@ -29,6 +29,14 @@ use crate::tui::app::{App, Mode, ToolCardState, TranscriptItem};
 mod overlays;
 mod transcript;
 
+/// Blank band rows above and below the composer text, so the input
+/// doesn't sit flush against the status row or the footer.
+const COMPOSER_V_PAD: u16 = 1;
+/// Cols reserved left of the composer text: `TRANSCRIPT_H_PAD`, the
+/// `›` glyph, and a space. Matches the transcript's user-turn indent
+/// so typed text lines up with the prompt it becomes.
+const COMPOSER_GUTTER: u16 = TRANSCRIPT_H_PAD + 2;
+
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
 
@@ -47,10 +55,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
     }
 
     let input_lines = app.input.lines().len().max(1).min(8) as u16;
+    let input_height = input_lines + COMPOSER_V_PAD * 2;
     let chunks = Layout::vertical([
-        Constraint::Min(3),              // transcript
-        Constraint::Length(2),           // status row (+ tool detail)
-        Constraint::Length(input_lines), // composer (borderless)
+        Constraint::Min(3),               // transcript
+        Constraint::Length(2),            // status row (+ tool detail)
+        Constraint::Length(input_height), // composer (borderless, padded)
         Constraint::Length(1),           // footer
     ])
     .split(area);
@@ -155,11 +164,14 @@ pub(super) fn render_status_row(app: &App) -> Vec<Line<'static>> {
         Mode::Streaming { since } => ("Working", since),
         Mode::ToolRunning { since, .. } => ("Working", since),
     };
-    let secs = since.elapsed().as_secs();
+    let elapsed = since.elapsed();
+    let secs = elapsed.as_secs();
     let theme = &app.theme;
     let status = Line::from(vec![
         Span::styled(
-            format!("{} ", spinner_glyph(secs as f32)),
+            // Sub-second time so the spinner cycles ~10fps. Feeding
+            // whole seconds here would pin it to frame 0 forever.
+            format!("{} ", spinner_glyph(elapsed.as_secs_f32())),
             Style::default().fg(theme.accent),
         ),
         Span::styled(
@@ -298,8 +310,9 @@ pub(super) fn render_search_bar_right(app: &App) -> Vec<Span<'static>> {
     ]
 }
 
-/// Pick a frame of a 10-step braille spinner from elapsed seconds.
-/// Hand-rolled so we don't drag in `indicatif`.
+/// Pick a frame of a 10-step braille spinner from *fractional*
+/// elapsed seconds — 10 frames per second. Pass whole seconds and it
+/// pins to frame 0. Hand-rolled so we don't drag in `indicatif`.
 pub(super) fn spinner_glyph(secs: f32) -> char {
     const FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let idx = ((secs * 10.0) as usize) % FRAMES.len();
@@ -361,6 +374,41 @@ mod tests {
         app
     }
 
+    /// Render `draw_input` into a 20x3 buffer and return its rows.
+    fn render_composer(app: &App) -> Vec<String> {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        let mut term = Terminal::new(TestBackend::new(20, 3)).unwrap();
+        term.draw(|f| draw_input(f, f.area(), app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn composer_pads_text_on_all_four_sides() {
+        let mut app = App::new();
+        app.input = {
+            let mut t = tui_textarea::TextArea::new(vec!["hello".to_string()]);
+            t.set_placeholder_text("");
+            t
+        };
+        let rows = render_composer(&app);
+        assert_eq!(rows[0].trim(), "", "top row must be blank padding");
+        assert_eq!(rows[2].trim(), "", "bottom row must be blank padding");
+        // `›` sits one col in; text starts after the gutter, matching
+        // the transcript's user-turn indent.
+        let gutter: String = rows[1].chars().take(COMPOSER_GUTTER as usize).collect();
+        assert_eq!(gutter, " › ");
+        assert!(rows[1].starts_with(" › hello"), "got: {:?}", rows[1]);
+        assert!(rows[1].ends_with(' '), "right edge must stay padded");
+    }
+
     #[test]
     fn search_bar_left_is_empty_when_overlay_is_closed() {
         let app = app_with_status(StatusModel::default());
@@ -418,6 +466,17 @@ mod tests {
 
     fn line_text(line: &Line<'_>) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn spinner_animates_within_a_second() {
+        // Guard against the frozen-spinner regression: feeding whole
+        // seconds pins the glyph, so distinct sub-second offsets must
+        // yield distinct frames.
+        assert_ne!(spinner_glyph(0.0), spinner_glyph(0.5));
+        assert_ne!(spinner_glyph(0.1), spinner_glyph(0.2));
+        // Cycles back after 1s.
+        assert_eq!(spinner_glyph(0.0), spinner_glyph(1.0));
     }
 
     #[test]
@@ -557,8 +616,11 @@ mod tests {
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
-    // Borderless composer on a tinted band; `›` lives in a 2-col
-    // gutter left of the textarea (Codex composer shape).
+    // Borderless composer on a tinted band. The band is padded on all
+    // four sides: `COMPOSER_V_PAD` blank rows above/below the text and
+    // `COMPOSER_GUTTER` / `TRANSCRIPT_H_PAD` cols left/right. The `›`
+    // sits in the left gutter at the same column as the transcript's
+    // user-turn prefix, so the composer reads as the next user turn.
     f.render_widget(
         Block::default().style(Style::default().bg(theme.user_band_bg)),
         area,
@@ -569,18 +631,21 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     } else {
         Style::default().bg(theme.user_band_bg).add_modifier(Modifier::BOLD)
     };
+    let text_y = area.y + COMPOSER_V_PAD;
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" ".to_string(), Style::default().bg(theme.user_band_bg)),
+            Span::styled(" ".repeat(TRANSCRIPT_H_PAD as usize), Style::default().bg(theme.user_band_bg)),
             Span::styled("›".to_string(), glyph_style),
         ])),
-        Rect { x: area.x, y: area.y, width: 2, height: 1 },
+        Rect { x: area.x, y: text_y, width: COMPOSER_GUTTER, height: 1 },
     );
     let text_area = Rect {
-        x: area.x + 2,
-        y: area.y,
-        width: area.width.saturating_sub(2),
-        height: area.height,
+        x: area.x + COMPOSER_GUTTER,
+        y: text_y,
+        width: area
+            .width
+            .saturating_sub(COMPOSER_GUTTER + TRANSCRIPT_H_PAD),
+        height: area.height.saturating_sub(COMPOSER_V_PAD * 2).max(1),
     };
     if busy {
         let body = Paragraph::new(Line::from(Span::styled(
