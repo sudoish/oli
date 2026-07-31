@@ -1045,6 +1045,7 @@ fn render_paths(agent: &Agent) -> String {
         "Notes",
         crate::notes::filesystem::FilesystemNotesStore::default_dir().as_deref(),
     );
+    #[cfg(feature = "tui")]
     push_path(
         &mut out,
         "TUI history",

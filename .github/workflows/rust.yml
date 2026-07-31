@@ -10,13 +10,53 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-
+  test:
+    name: build + test
     runs-on: ubuntu-latest
-
     steps:
     - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
     - name: Build
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  features:
+    name: feature matrix
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          # Line-mode-only binary, as advertised in Cargo.toml.
+          - --no-default-features
+          # TUI without syntect.
+          - --no-default-features --features tui
+          # Everything, including the optional inline-image stack.
+          - --all-features
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+    - uses: Swatinem/rust-cache@v2
+    - name: Check ${{ matrix.features }}
+      run: cargo check ${{ matrix.features }}
+
+  # Advisory only. `cargo fmt --check` currently differs across 38 files and
+  # clippy reports 75 warnings, so neither gates the build yet — a red X on
+  # every push teaches people to ignore CI. Promote these to blocking (add
+  # `-D warnings`, drop continue-on-error) once the backlog is cleared.
+  lint:
+    name: fmt + clippy (advisory)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@stable
+      with:
+        components: rustfmt, clippy
+    - uses: Swatinem/rust-cache@v2
+    - name: Formatting
+      run: cargo fmt --all --check
+    - name: Clippy
+      run: cargo clippy --all-targets --all-features
