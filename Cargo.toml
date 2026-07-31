@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.95"
 description = "A minimal, hackable, single-binary terminal coding agent."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sudoish/oli"
+readme = "README.md"
+keywords = ["agent", "llm", "cli", "tui", "ai"]
+categories = ["command-line-utilities", "development-tools"]
 
 [features]
 # Default ships the full experience: TUI + code-fence syntax highlighting.
