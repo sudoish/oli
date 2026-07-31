@@ -1,144 +1,135 @@
 //! Per-overlay render code. One `pub(super) fn draw_*` per
 //! variant of `tui::app::Overlay`, plus the wizard helpers and
-//! the diff-line styling used by the approval modal.
+//! the diff-line styling shared with the approval pane.
 //!
-//! Layout is consistently a centered modal with a top-left
-//! titled border, an inner body, and (where useful) a one-line
-//! legend at the bottom.
+//! Approval renders as an inline bottom pane (see
+//! `approval_pane_lines`); the remaining overlays are centered
+//! modals with a dim rounded border, a `›` selection accent, and
+//! (where useful) a one-line legend at the bottom.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wrap};
 
 use crate::tui::app::{
-    App, ApprovalState, CopyFallbackState, HelpBrowserState, HistorySearchState, InlineHelpState,
-    SessionsPickerState,
+    APPROVAL_OPTIONS, App, ApprovalState, CopyFallbackState, HelpBrowserState, HistorySearchState,
+    InlineHelpState, SessionsPickerState,
 };
-use crate::tui::hints;
 use crate::tui::theme::Theme;
 use crate::tui::wizard::{DaemonStatus, PullStatus, WizardProvider, WizardState, WizardStep};
 
 use super::{centered_rect, clip_to_width};
 
-/// Centered overlay above the transcript. Width 80% of the
-/// terminal (clamped to [60, 120] cols), height 60% of the
-/// terminal (clamped to [10, 40] rows). `Clear` blanks the area
-/// underneath so the transcript bleed-through doesn't make the
-/// modal hard to read.
-pub(super) fn draw_approval_modal(
-    f: &mut Frame,
-    full_area: Rect,
-    approval: &ApprovalState,
-    app: &App,
-) {
-    let theme = &app.theme;
-    let modal = centered_rect(full_area, 80, 60).intersection(full_area);
-    f.render_widget(Clear, modal);
+/// Height of the inline approval pane for the given preview.
+/// Preview is capped at 10 rows; the pane never eats the whole
+/// frame below 3 transcript rows, and never shrinks below 10.
+pub(super) fn approval_pane_height(state: &ApprovalState, area: Rect) -> u16 {
+    let preview_rows = state.preview.lines().count().clamp(3, 10) as u16;
+    let reason_rows = u16::from(!state.reason.is_empty());
+    // title + blank + reason? + preview + blank + options + blank + hint
+    let want = 2 + reason_rows + preview_rows + 1 + APPROVAL_OPTIONS.len() as u16 + 2;
+    want.min(area.height.saturating_sub(3)).max(10)
+}
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(theme.match_highlight)
-                .add_modifier(Modifier::BOLD),
-        )
-        .title(Line::from(vec![
+/// Pure line builder for the inline approval pane (Codex shape):
+/// bold question, optional italic reason, tinted scrollable preview,
+/// numbered options with a `›` selection accent, dim confirm hint.
+pub(super) fn approval_pane_lines(
+    state: &ApprovalState,
+    preview_rows: usize,
+    inner_w: u16,
+    theme: &Theme,
+) -> Vec<Line<'static>> {
+    let title = match state.tool.to_ascii_lowercase().as_str() {
+        "edit" | "multiedit" | "write" => "Would you like to make the following edits?",
+        _ => "Would you like to run the following command?",
+    };
+    let mut lines: Vec<Line<'static>> = vec![
+        Line::from(Span::styled(
+            format!(" {}", title),
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
+        Line::raw(""),
+    ];
+    if !state.reason.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled(" Reason: ".to_string(), Style::default().fg(theme.dim)),
             Span::styled(
-                " ⚠ approve ",
-                Style::default()
-                    .fg(theme.match_highlight)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(" {} ", approval.tool),
-                Style::default()
-                    .fg(theme.selected_fg)
-                    .bg(theme.match_highlight)
-                    .add_modifier(Modifier::BOLD),
+                state.reason.clone(),
+                Style::default().add_modifier(Modifier::ITALIC),
             ),
         ]));
-    let inner = block.inner(modal);
-    f.render_widget(block, modal);
-
-    // Layout inside the modal: reason (1 line), preview (flex),
-    // legend (1 line).
-    let parts = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(3),
-        Constraint::Length(2),
-    ])
-    .split(inner);
-
-    // Reason header.
-    let reason = Paragraph::new(Line::from(vec![
-        Span::styled("  reason: ", Style::default().fg(theme.dim)),
-        Span::styled(approval.reason.as_str(), Style::default().fg(theme.fg)),
-    ]));
-    f.render_widget(reason, parts[0]);
-
-    // Diff / preview body. Lines starting with `+`/`-` (after the
-    // 4-space indent the diff renderer emits) get colored;
-    // everything else stays fg.
-    let lines: Vec<Line> = approval
-        .preview
-        .lines()
-        .map(|l| diff_line_to_styled(l, theme))
-        .collect();
-    let preview = Paragraph::new(lines)
-        .wrap(Wrap { trim: false })
-        .scroll((approval.scroll, 0));
-    f.render_widget(preview, parts[1]);
-
-    // Legend / single-key affordances.
-    let mut legend_spans: Vec<Span<'static>> = vec![Span::styled(
-        "  [y]es  [n]o  [a]llow this session  [A]llow always (persisted)  [d]eny session  [PgUp/Dn] scroll  [Esc] cancel",
+    }
+    let total = state.preview.lines().count();
+    let scroll = (state.scroll as usize).min(total.saturating_sub(preview_rows));
+    for l in state.preview.lines().skip(scroll).take(preview_rows) {
+        lines.push(styled_diff_line(l, inner_w, theme));
+    }
+    lines.push(Line::raw(""));
+    for (i, (label, key)) in APPROVAL_OPTIONS.iter().enumerate() {
+        let selected = i == state.selected;
+        let prefix = if selected { "› " } else { "  " };
+        let style = if selected {
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme.fg)
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{}{}. {} ({})", prefix, i + 1, label, key),
+            style,
+        )));
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "  Press enter to confirm or esc to cancel".to_string(),
         Style::default()
             .fg(theme.dim)
             .add_modifier(Modifier::ITALIC),
-    )];
-    // Fading hint: highlight `a` and `d` for first-time users.
-    if app.hint_is_unseen(hints::ids::APPROVAL_ALLOW) {
-        legend_spans.insert(
-            0,
-            Span::styled(
-                "  💡 ".to_string(),
-                Style::default().fg(theme.match_highlight),
-            ),
-        );
-    }
-    let legend = Paragraph::new(Line::from(legend_spans));
-    f.render_widget(legend, parts[2]);
+    )));
+    lines
 }
 
-/// Color a unified-diff line by its sign char. Renderer in
-/// `policy::render_unified_diff` emits `    + body` / `    - body`
-/// / `      body` (4 spaces indent + sign + space + body). Others
-/// (the "file: …", "(replace_all)" header lines etc) stay white.
-fn diff_line_to_styled<'a>(line: &'a str, theme: &Theme) -> Line<'a> {
-    let trimmed = line.trim_start();
-    if let Some(rest) = trimmed.strip_prefix("+ ") {
-        Line::from(vec![
-            Span::raw("    "),
-            Span::styled(
-                format!("+ {}", rest),
-                Style::default().fg(theme.diff_added),
-            ),
-        ])
-    } else if let Some(rest) = trimmed.strip_prefix("- ") {
-        Line::from(vec![
-            Span::raw("    "),
-            Span::styled(
-                format!("- {}", rest),
-                Style::default().fg(theme.diff_removed),
-            ),
-        ])
+/// Inline bottom-pane approval (replaces the old centered modal).
+/// Sizes the preview window to whatever rows are left after the
+/// fixed chrome (title/reason/options/hint) so long diffs scroll.
+pub(super) fn draw_approval_pane(f: &mut Frame, area: Rect, approval: &ApprovalState, app: &App) {
+    let preview_rows = (area.height as usize)
+        .saturating_sub(2 + usize::from(!approval.reason.is_empty()) + 1 + APPROVAL_OPTIONS.len() + 2)
+        .max(1);
+    let inner_w = area.width.saturating_sub(2);
+    let lines = approval_pane_lines(approval, preview_rows, inner_w, &app.theme);
+    let pane = Paragraph::new(lines).block(Block::default().padding(Padding::horizontal(1)));
+    f.render_widget(pane, area);
+}
+
+/// Codex-style diff row: sign-colored fg over a full-width bg tint
+/// for +/- lines; context lines stay dim and untinted. `width` pads
+/// the tint to the pane's inner width. Input is
+/// `policy::render_unified_diff`'s `    + body` / `    - body` /
+/// `      body` format.
+pub(super) fn styled_diff_line(line: &str, width: u16, theme: &Theme) -> Line<'static> {
+    // The sign lives in a fixed column (`    + ` / `    - `, four
+    // leading spaces); context rows carry six. Match the column, not
+    // the first non-space char, so a context line whose body starts
+    // with `+`/`-` doesn't get mis-tinted.
+    let (body_style, bg) = if line.starts_with("    + ") {
+        (Style::default().fg(theme.diff_added), Some(theme.diff_add_bg))
+    } else if line.starts_with("    - ") {
+        (Style::default().fg(theme.diff_removed), Some(theme.diff_del_bg))
     } else {
-        Line::from(Span::styled(
-            line.to_string(),
-            Style::default().fg(theme.fg),
-        ))
+        (Style::default().fg(theme.dim), None)
+    };
+    let pad = (width as usize).saturating_sub(line.chars().count());
+    match bg {
+        Some(bg) => Line::from(vec![
+            Span::styled(line.to_string(), body_style.bg(bg)),
+            Span::styled(" ".repeat(pad), Style::default().bg(bg)),
+        ]),
+        None => Line::from(Span::styled(line.to_string(), body_style)),
     }
 }
 
@@ -155,11 +146,8 @@ pub(super) fn draw_sessions_picker(
     f.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::BOLD),
-        )
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.dim))
         .title(Line::from(Span::styled(
             " /sessions  (↑↓ select · Enter copy `--resume` cmd · Esc close) ",
             Style::default()
@@ -196,15 +184,14 @@ pub(super) fn draw_sessions_picker(
             let selected = i == picker.selected;
             let style = if selected {
                 Style::default()
-                    .fg(theme.selected_fg)
-                    .bg(theme.selected_bg)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg)
             };
             Line::from(Span::styled(
                 if selected {
-                    format!("▌ {}", row.label)
+                    format!("› {}", row.label)
                 } else {
                     format!("  {}", row.label)
                 },
@@ -227,11 +214,8 @@ pub(super) fn draw_help_browser(
     f.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::BOLD),
-        )
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.dim))
         .title(Line::from(Span::styled(
             " /help  (↑↓ select · Esc close) ",
             Style::default()
@@ -266,15 +250,14 @@ pub(super) fn draw_help_browser(
             let selected = i == browser.selected;
             let style = if selected {
                 Style::default()
-                    .fg(theme.selected_fg)
-                    .bg(theme.selected_bg)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg)
             };
             Line::from(Span::styled(
                 if selected {
-                    format!("▌ /{}", name)
+                    format!("› /{}", name)
                 } else {
                     format!("  /{}", name)
                 },
@@ -316,7 +299,8 @@ pub(super) fn draw_inline_help(
     f.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.border))
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.dim))
         .title(Line::from(Span::styled(
             format!(" /{} ", card.name),
             Style::default()
@@ -357,11 +341,8 @@ pub(super) fn draw_history_search(
     f.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(theme.border)
-                .add_modifier(Modifier::BOLD),
-        )
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.dim))
         .title(Line::from(Span::styled(
             " (i-search) ↑↓ select · Enter load · Esc cancel ",
             Style::default()
@@ -428,15 +409,14 @@ pub(super) fn draw_history_search(
             let selected = i == search.selected;
             let style = if selected {
                 Style::default()
-                    .fg(theme.selected_fg)
-                    .bg(theme.selected_bg)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD)
             } else {
                 Style::default().fg(theme.fg)
             };
             Line::from(Span::styled(
                 if selected {
-                    format!("▌ {}", body)
+                    format!("› {}", body)
                 } else {
                     format!("  {}", body)
                 },
@@ -462,11 +442,8 @@ pub(super) fn draw_copy_fallback(
     f.render_widget(Clear, modal);
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(theme.match_highlight)
-                .add_modifier(Modifier::BOLD),
-        )
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.dim))
         .title(Line::from(vec![
             Span::styled(
                 " 📋 copy below ",
@@ -533,7 +510,7 @@ pub(super) fn draw_copy_fallback(
 /// First-run setup wizard overlay. Multi-step modal:
 /// Welcome → PickProvider → (EnterApiKey if applicable) →
 /// Confirm → Saved. Esc closes the wizard at any point.
-pub(super) fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState) {
+pub(super) fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState, theme: &Theme) {
     let modal = centered_rect(full_area, 80, 70).intersection(full_area);
     f.render_widget(Clear, modal);
 
@@ -548,11 +525,8 @@ pub(super) fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState) {
     };
     let block = Block::default()
         .borders(Borders::ALL)
-        .border_style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.dim))
         .title(Line::from(Span::styled(
             title,
             Style::default()
@@ -667,7 +641,7 @@ fn provider_lines(w: &WizardState) -> Vec<Line<'static>> {
         };
         out.push(Line::from(Span::styled(
             if selected {
-                format!("  ▌ {}", p.label())
+                format!("  › {}", p.label())
             } else {
                 format!("    {}", p.label())
             },
@@ -915,4 +889,109 @@ fn progress_bar(pct: f64, width: usize) -> String {
     }
     s.push(']');
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line_text(line: &Line<'_>) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn added_line_gets_tinted_full_width() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("    + hello", 20, &theme);
+        assert_eq!(line_text(&line).chars().count(), 20);
+        assert!(line.spans.iter().all(|s| s.style.bg == Some(theme.diff_add_bg)));
+        assert_eq!(line.spans[0].style.fg, Some(theme.diff_added));
+    }
+
+    #[test]
+    fn removed_line_gets_del_tint() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("    - gone", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg == Some(theme.diff_del_bg)));
+        assert_eq!(line.spans[0].style.fg, Some(theme.diff_removed));
+    }
+
+    #[test]
+    fn context_line_stays_dim_without_bg() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("      same", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg.is_none()));
+        assert_eq!(line.spans[0].style.fg, Some(theme.dim));
+    }
+
+    #[test]
+    fn light_theme_uses_github_pastels() {
+        assert_eq!(Theme::light().diff_add_bg, Color::Rgb(0xda, 0xfb, 0xe1));
+        assert_eq!(Theme::light().diff_del_bg, Color::Rgb(0xff, 0xeb, 0xe9));
+        assert_eq!(Theme::dark().diff_add_bg, Color::Rgb(0x21, 0x3a, 0x2b));
+        assert_eq!(Theme::dimmed().diff_add_bg, Color::Rgb(0x1f, 0x2a, 0x1f));
+    }
+
+    #[test]
+    fn removed_line_whose_body_starts_with_a_sign_still_tints() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("    - - foo", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg == Some(theme.diff_del_bg)));
+        assert_eq!(line.spans[0].style.fg, Some(theme.diff_removed));
+    }
+
+    #[test]
+    fn context_line_whose_body_starts_with_plus_stays_dim() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("      + foo", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg.is_none()));
+        assert_eq!(line.spans[0].style.fg, Some(theme.dim));
+    }
+
+    #[test]
+    fn short_line_without_sign_column_stays_dim() {
+        let theme = Theme::dark();
+        let line = styled_diff_line("abc", 20, &theme);
+        assert!(line.spans.iter().all(|s| s.style.bg.is_none()));
+    }
+
+    #[test]
+    fn approval_pane_lines_render_title_options_and_selection() {
+        let theme = Theme::dark();
+        let state = ApprovalState {
+            tool: "Bash".into(),
+            reason: "run it".into(),
+            preview: "    ls -la".into(),
+            scroll: 0,
+            selected: 1,
+        };
+        let lines = approval_pane_lines(&state, 5, 60, &theme);
+        let text: Vec<String> = lines.iter().map(line_text).collect();
+        assert!(text[0].contains("Would you like to run the following command?"));
+        assert!(text.iter().any(|l| l == "› 2. No (n)"));
+        assert!(text.iter().any(|l| l == "  1. Yes (y)"));
+        assert!(
+            text.iter()
+                .any(|l| l.contains("Press enter to confirm or esc to cancel"))
+        );
+        let selected = lines
+            .iter()
+            .find(|l| line_text(l).starts_with("› "))
+            .unwrap();
+        assert_eq!(selected.spans[0].style.fg, Some(theme.accent));
+    }
+
+    #[test]
+    fn approval_pane_uses_edit_title_for_edit_tools() {
+        let theme = Theme::dark();
+        let state = ApprovalState {
+            tool: "Edit".into(),
+            reason: String::new(),
+            preview: "    + x".into(),
+            scroll: 0,
+            selected: 0,
+        };
+        let lines = approval_pane_lines(&state, 5, 60, &theme);
+        assert!(line_text(&lines[0]).contains("make the following edits"));
+    }
 }

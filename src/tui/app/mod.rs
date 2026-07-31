@@ -21,8 +21,9 @@ pub mod search;
 mod transcript;
 
 pub use overlay::{
-    ApprovalState, CompletionKind, CompletionMenu, CopyFallbackState, HelpBrowserState,
-    HistorySearchState, InlineHelpState, Overlay, SessionPickerRow, SessionsPickerState,
+    APPROVAL_OPTIONS, ApprovalState, CompletionKind, CompletionMenu, CopyFallbackState,
+    HelpBrowserState, HistorySearchState, InlineHelpState, Overlay, SessionPickerRow,
+    SessionsPickerState,
 };
 #[allow(unused_imports)]
 pub use search::SearchState;
@@ -165,20 +166,27 @@ pub struct App {
     /// Stays `0` in fullscreen mode (the commit step never runs), so
     /// the viewport renders the whole transcript exactly as before.
     pub committed: usize,
+
+    /// Wall-clock start of the current turn, captured in
+    /// `on_turn_started`. Feeds the `Worked for …` label on the
+    /// turn separator emitted at `on_turn_finished`.
+    pub turn_started_at: Option<Instant>,
 }
 
 /// Position-stack depth for Ctrl+O / Ctrl+I jumps. The spec's
 /// "Done when" wants a stack of ≥ 8 entries.
 pub const SCROLL_HISTORY_CAP: usize = 16;
 
-/// Aggregate of every field the status bar can display. Optional
-/// fields render as "—" or get dropped on narrow terminals.
+/// Identity fields for the footer and welcome box. Optional
+/// fields are dropped from the footer when the terminal narrows.
 #[derive(Clone, Debug, Default)]
 pub struct StatusModel {
     pub session_id: Option<String>,
     pub model: String,
     pub ctx_window: u32,
     pub branch: Option<String>,
+    /// `~`-relativized cwd for the footer.
+    pub cwd: String,
     pub last_usage: Option<crate::providers::Usage>,
     pub session_usage: crate::providers::Usage,
 }
@@ -216,6 +224,7 @@ impl Default for App {
             scroll_pos_cursor: 0,
             focused_card_idx: None,
             committed: 0,
+            turn_started_at: None,
         }
     }
 }
@@ -231,11 +240,7 @@ impl App {
     pub fn new() -> Self {
         let mut app = Self::default();
         app.markdown_theme = MarkdownTheme::detect();
-        app.transcript.push(TranscriptItem::System {
-            body: "oli ready. type a message and press Enter (Shift+Enter for newline). \
-                   /help for commands, Ctrl+D to exit."
-                .into(),
-        });
+        app.transcript.push(TranscriptItem::Welcome);
         app
     }
 
@@ -355,6 +360,12 @@ impl App {
             }
             KeyCode::Char('}') if !ctrl && !alt && self.is_input_empty() => {
                 self.focus_next_card();
+                return SubmitAction::None;
+            }
+            KeyCode::Char('?')
+                if self.input.lines().len() == 1 && self.input.lines()[0].is_empty() =>
+            {
+                self.open_help_browser();
                 return SubmitAction::None;
             }
             // Position-stack jumps (X3): Ctrl+O steps back through
@@ -722,7 +733,7 @@ fn build_textarea() -> TextArea<'static> {
 
 fn build_textarea_with(lines: Vec<String>) -> TextArea<'static> {
     let mut t = TextArea::new(lines);
-    t.set_placeholder_text("type a message…  Shift+Enter for newline, Tab to complete");
+    t.set_placeholder_text("Ask oli to do anything");
     t
 }
 

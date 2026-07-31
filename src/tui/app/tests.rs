@@ -1187,3 +1187,75 @@ fn undo_clamps_committed_watermark() {
     assert_eq!(app.transcript.len(), 0);
     assert_eq!(app.committed, 0);
 }
+
+#[test]
+fn approval_selection_clamps_at_both_ends() {
+    use crate::tui::app::overlay::APPROVAL_OPTIONS;
+    let mut app = App::new();
+    app.on_approval_requested(
+        "Bash".into(),
+        serde_json::json!({"command":"ls"}),
+        "run".into(),
+    );
+    app.approval_select_prev();
+    assert_eq!(app.approval().unwrap().selected, 0);
+    for _ in 0..10 {
+        app.approval_select_next();
+    }
+    assert_eq!(app.approval().unwrap().selected, APPROVAL_OPTIONS.len() - 1);
+}
+
+#[test]
+fn approval_response_for_maps_list_order() {
+    use crate::tui::event::{ApprovalResponse, approval_response_for};
+    assert!(matches!(approval_response_for(0), ApprovalResponse::Yes));
+    assert!(matches!(approval_response_for(1), ApprovalResponse::No));
+    assert!(matches!(
+        approval_response_for(2),
+        ApprovalResponse::AlwaysAllow
+    ));
+    assert!(matches!(
+        approval_response_for(3),
+        ApprovalResponse::PersistAllow
+    ));
+    assert!(matches!(
+        approval_response_for(4),
+        ApprovalResponse::AlwaysDeny
+    ));
+}
+
+#[test]
+fn decision_cell_lands_in_transcript_with_glyph() {
+    use crate::tui::event::ApprovalResponse;
+    let mut app = App::new();
+    app.on_approval_requested(
+        "Bash".into(),
+        serde_json::json!({"command":"ls"}),
+        "run".into(),
+    );
+    app.note_approval_decision(&ApprovalResponse::Yes);
+    let last = app.transcript.last().unwrap();
+    match last {
+        TranscriptItem::System { body } => {
+            assert!(body.starts_with("✔ "), "got: {body}");
+            assert!(body.contains("Bash"), "got: {body}");
+        }
+        other => panic!("expected System, got {other:?}"),
+    }
+    app.note_approval_decision(&ApprovalResponse::AlwaysDeny);
+    match app.transcript.last().unwrap() {
+        TranscriptItem::System { body } => assert!(body.starts_with("✗ "), "got: {body}"),
+        _ => panic!(),
+    }
+}
+
+#[test]
+fn welcome_and_turn_rule_are_immediately_committable() {
+    let items = vec![
+        TranscriptItem::Welcome,
+        TranscriptItem::TurnRule {
+            elapsed: Duration::ZERO,
+        },
+    ];
+    assert_eq!(committable_count(&items, 0), 2);
+}

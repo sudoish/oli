@@ -140,4 +140,16 @@ pub enum ApprovalResponse {
     PersistAllow,
 }
 
+/// Map the inline approval list cursor to a response. Order must
+/// match `crate::tui::app::APPROVAL_OPTIONS`.
+pub fn approval_response_for(index: usize) -> ApprovalResponse {
+    match index {
+        0 => ApprovalResponse::Yes,
+        1 => ApprovalResponse::No,
+        2 => ApprovalResponse::AlwaysAllow,
+        3 => ApprovalResponse::PersistAllow,
+        _ => ApprovalResponse::AlwaysDeny,
+    }
+}
+
 
