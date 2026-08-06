@@ -166,7 +166,18 @@ fn default_parameters() -> Value {
 #[derive(Clone, Debug, Deserialize)]
 pub struct ProviderConfig {
     pub kind: String,
-    pub base_url: String,
+
+    /// API base URL. Optional, because some kinds have exactly one
+    /// sensible value and requiring it is just a trap: `openai-chatgpt`
+    /// always talks to the subscription endpoint, and `anthropic`
+    /// always talks to `api.anthropic.com`. `openai-compat` still
+    /// requires it — there is no default that could be right for
+    /// Ollama, OpenRouter, vLLM and OpenAI at once.
+    ///
+    /// Resolve with [`ProviderConfig::resolved_base_url`] rather than
+    /// reading this directly.
+    #[serde(default)]
+    pub base_url: Option<String>,
 
     #[serde(default)]
     pub api_key: Option<String>,
@@ -189,6 +200,37 @@ pub struct ProviderConfig {
     #[serde(default)]
     pub cache: Option<String>,
 }
+
+impl ProviderConfig {
+    /// The base URL to dial, applying the per-kind default when the
+    /// config omits one.
+    ///
+    /// Errors for kinds that have no meaningful default. The error
+    /// names the field and the kind, which is friendlier than serde's
+    /// `missing field \`base_url\`` with no indication of which of
+    /// several provider blocks is at fault.
+    pub fn resolved_base_url(&self, provider_name: &str) -> Result<String> {
+        if let Some(url) = self.base_url.as_deref() {
+            let trimmed = url.trim();
+            if !trimmed.is_empty() {
+                return Ok(trimmed.to_string());
+            }
+        }
+        match self.kind.as_str() {
+            "openai-chatgpt" => Ok(crate::auth::CHATGPT_BASE_URL.to_string()),
+            "anthropic" => Ok(DEFAULT_ANTHROPIC_BASE_URL.to_string()),
+            _ => Err(AgentError::Config(format!(
+                "provider '{}' (kind '{}') needs a `base_url` — there is no default for \
+                 this kind. For example: base_url = \"https://api.openai.com/v1\"",
+                provider_name, self.kind
+            ))),
+        }
+    }
+}
+
+/// Where the native Anthropic provider points when the config doesn't
+/// say. Matches what the README has always shown.
+pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
 impl Config {
     pub fn from_str(s: &str) -> Result<Self> {
@@ -259,7 +301,7 @@ impl Config {
             "openrouter".to_string(),
             ProviderConfig {
                 kind: "openai-compat".to_string(),
-                base_url,
+                base_url: Some(base_url),
                 api_key: None,
                 api_key_env: Some("OPENROUTER_API_KEY".to_string()),
                 default_model: Some("anthropic/claude-haiku-4.5".to_string()),
@@ -440,6 +482,99 @@ mod tests {
         let cfg = Config::from_str(SAMPLE).unwrap();
         // ollama provider has only `api_key`, no `api_key_env`.
         assert_eq!(cfg.resolve_api_key("ollama").unwrap(), "ollama");
+    }
+
+    #[test]
+    fn openai_compat_still_requires_an_explicit_base_url() {
+        // There is no default that is right for Ollama, OpenRouter,
+        // vLLM and OpenAI at once, so this stays required.
+        let cfg = Config::from_str(
+            r#"
+            default_provider = "x"
+            [providers.x]
+            kind = "openai-compat"
+            "#,
+        )
+        .unwrap();
+        let err = cfg
+            .provider("x")
+            .unwrap()
+            .resolved_base_url("x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("needs a `base_url`"), "{err}");
+        assert!(err.contains("'x'"), "{err}");
+    }
+
+    #[test]
+    fn chatgpt_and_anthropic_kinds_default_their_base_url() {
+        // Requiring a value with exactly one correct answer is a trap:
+        // a hand-written block that omits it used to fail to parse
+        // with no hint about which provider was at fault.
+        let cfg = Config::from_str(
+            r#"
+            default_provider = "codex"
+            [providers.codex]
+            kind = "openai-chatgpt"
+            [providers.claude]
+            kind = "anthropic"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.provider("codex")
+                .unwrap()
+                .resolved_base_url("codex")
+                .unwrap(),
+            "https://chatgpt.com/backend-api/codex"
+        );
+        assert_eq!(
+            cfg.provider("claude")
+                .unwrap()
+                .resolved_base_url("claude")
+                .unwrap(),
+            "https://api.anthropic.com"
+        );
+    }
+
+    #[test]
+    fn an_explicit_base_url_still_wins_over_the_default() {
+        let cfg = Config::from_str(
+            r#"
+            default_provider = "codex"
+            [providers.codex]
+            kind     = "openai-chatgpt"
+            base_url = "http://localhost:8080/proxy"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.provider("codex")
+                .unwrap()
+                .resolved_base_url("codex")
+                .unwrap(),
+            "http://localhost:8080/proxy"
+        );
+    }
+
+    #[test]
+    fn a_blank_base_url_is_treated_as_absent() {
+        let cfg = Config::from_str(
+            r#"
+            default_provider = "codex"
+            [providers.codex]
+            kind     = "openai-chatgpt"
+            base_url = "   "
+            "#,
+        )
+        .unwrap();
+        assert_eq!(
+            cfg.provider("codex")
+                .unwrap()
+                .resolved_base_url("codex")
+                .unwrap(),
+            "https://chatgpt.com/backend-api/codex"
+        );
     }
 
     #[test]

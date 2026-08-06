@@ -52,6 +52,7 @@ pub mod listener;
 pub mod login;
 pub mod oauth;
 pub mod pkce;
+pub mod provision;
 pub mod session;
 pub mod store;
 pub mod token;

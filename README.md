@@ -260,17 +260,28 @@ code is in the address bar regardless. `--paste` also works when ports
 Tokens land in `~/.config/oli/auth.json` (mode 0600) and are refreshed
 automatically before they expire. Point a provider at them:
 
+A successful login writes this block for you, sets `default_model` from
+the model list your subscription actually serves, and points
+`default_provider` at it. Other provider blocks are left untouched, so
+switching back is a one-line edit. Pass `--no-config` to store
+credentials and stop there.
+
 ```toml
 [providers.chatgpt]
 kind          = "openai-chatgpt"
-base_url      = "https://chatgpt.com/backend-api/codex"
-default_model = "gpt-5.1-codex"
+base_url      = "https://chatgpt.com/backend-api/codex"   # optional; this is the default
+default_model = "gpt-5.6-terra"
 ```
 
 Caveats worth knowing before you rely on it:
 
 - This endpoint speaks the **Responses API**, not Chat Completions. It is
   a separate transport from `openai-compat`, not a flag on it.
+- **The model names are not the public API's.** No `gpt-4o`, and no
+  `gpt-5.x-codex`. At the time of writing the subscription served
+  `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5` and `gpt-5.4-mini`. Since
+  that changes, nothing is hardcoded — `oli login` asks the endpoint and
+  `/model` lists what you can use.
 - Subscription auth is not a documented OpenAI feature and there is no
   client registration for third-party CLIs, so oli presents the same
   OAuth client id and `originator` as OpenAI's own CLI. Override with

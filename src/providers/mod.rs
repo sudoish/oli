@@ -54,35 +54,30 @@ pub fn build(cfg: &Config, provider_name: &str) -> Result<Box<dyn Provider>> {
                 .clone()
                 .or_else(|| cfg.default_model.clone())
                 .unwrap_or_default();
+            let base_url = pcfg.resolved_base_url(provider_name)?;
             let cache = openai_compat::CacheStrategy::resolve(
                 pcfg.cache.as_deref(),
-                &pcfg.base_url,
+                &base_url,
                 &model_hint,
             );
             Ok(Box::new(openai_compat::OpenAICompatProvider::with_cache(
-                pcfg.base_url.clone(),
-                api_key,
-                cache,
+                base_url, api_key, cache,
             )))
         }
         "anthropic" => {
             let api_key = cfg.resolve_api_key(provider_name)?;
             Ok(Box::new(anthropic::AnthropicProvider::new(
-                pcfg.base_url.clone(),
+                pcfg.resolved_base_url(provider_name)?,
                 api_key,
             )))
         }
         // ChatGPT subscription auth. Note this deliberately does *not*
         // call `resolve_api_key` — credentials come from `oli login`,
         // and refresh has to happen per-request rather than once here.
-        // An empty `base_url` falls back to the subscription endpoint,
-        // so a minimal provider block is just `kind` plus a model.
+        // `base_url` is optional for this kind: there is exactly one
+        // endpoint it could mean.
         "openai-chatgpt" => {
-            let base_url = if pcfg.base_url.trim().is_empty() {
-                crate::auth::CHATGPT_BASE_URL.to_string()
-            } else {
-                pcfg.base_url.clone()
-            };
+            let base_url = pcfg.resolved_base_url(provider_name)?;
             let auth = crate::auth::session::ChatGptAuth::new()?;
             Ok(Box::new(openai_responses::ResponsesProvider::new(
                 base_url, auth,

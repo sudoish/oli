@@ -19,13 +19,27 @@
 //! The translation is pure and unit-tested against fixtures; only
 //! [`ResponsesProvider`] itself touches the network.
 //!
-//! # Not exercised against the live endpoint
+//! # Models
 //!
-//! The request shape here is modelled on what OpenAI's own client
-//! sends. Which fields the backend actually *requires* is not
-//! documented and was not verified against a real subscription, so
-//! errors from the endpoint are surfaced verbatim rather than
-//! interpreted — see [`describe_endpoint_error`].
+//! The subscription serves a **different, smaller model set than the
+//! public API, with different slugs**. Neither `gpt-4o` nor any
+//! `gpt-5.x-codex` name is accepted; at the time of writing the list
+//! was `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`, `gpt-5.4-mini`.
+//! Since that will change, nothing here hardcodes a slug —
+//! [`ResponsesProvider::fetch_models`] asks the `/models` endpoint,
+//! and `oli login` writes the answer into the config.
+//!
+//! A wrong slug is rejected with `"The '<model>' model is not
+//! supported when using Codex with a ChatGPT account."`, which is
+//! surfaced verbatim.
+//!
+//! # Verified against the live endpoint
+//!
+//! The request shape, auth headers and streaming decode have been
+//! exercised end-to-end against a real ChatGPT subscription. Fields
+//! the backend *requires* are still undocumented, so errors are
+//! surfaced verbatim rather than interpreted — see
+//! [`describe_endpoint_error`].
 //!
 //! # Auth
 //!
@@ -61,6 +75,35 @@ fn originator() -> String {
         .ok()
         .filter(|v| !v.trim().is_empty())
         .unwrap_or_else(|| ORIGINATOR.to_string())
+}
+
+/// `client_version` sent to `/models`.
+///
+/// This is a **capability gate, not an identity**: the server filters
+/// the catalogue by it, returning only models the stated version is
+/// expected to handle. Sending Oli's own `0.1.0` returns an empty
+/// list — as do `0.9.0`, `0.20.0` and `0.45.0` — while `0.104.0`
+/// returns only the two oldest models. Anything from `1.0.0` up
+/// returns the current catalogue.
+///
+/// So this declares "implements the current Responses protocol",
+/// which is accurate: every model behind this gate was verified to
+/// work with the plain streaming request built by [`build_request`].
+/// The `use_responses_lite` and `code_mode_only` flags in the
+/// catalogue are hints for OpenAI's own client optimisations, not
+/// requirements.
+///
+/// Override with [`CLIENT_VERSION_ENV`] if the gate moves again.
+pub const MODELS_CLIENT_VERSION: &str = "1.0.0";
+
+/// Env var overriding [`MODELS_CLIENT_VERSION`].
+pub const CLIENT_VERSION_ENV: &str = "OLI_CHATGPT_CLIENT_VERSION";
+
+fn models_client_version() -> String {
+    std::env::var(CLIENT_VERSION_ENV)
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .unwrap_or_else(|| MODELS_CLIENT_VERSION.to_string())
 }
 
 /// Provider that speaks the Responses API with subscription auth.
@@ -124,6 +167,62 @@ impl ResponsesProvider {
         Ok(resp)
     }
 
+    /// Model slugs this subscription can actually use.
+    ///
+    /// The subscription backend serves a *different, smaller* model set
+    /// than the public API, and the slugs do not match the public ones
+    /// — no `gpt-4o`, and no `gpt-5.x-codex`. Guessing produces
+    /// `"The '<model>' model is not supported when using Codex with a
+    /// ChatGPT account."`, so this asks instead.
+    pub async fn fetch_models(&self) -> Result<Vec<ModelInfo>> {
+        let creds = self.auth.credentials().await?;
+        // `client_version` gates which models come back — see
+        // MODELS_CLIENT_VERSION. Sending Oli's own version returns an
+        // empty catalogue.
+        let url = format!(
+            "{}/models?client_version={}",
+            self.base_url,
+            models_client_version()
+        );
+
+        let mut builder = self
+            .client
+            .get(&url)
+            .bearer_auth(&creds.bearer)
+            .header("originator", originator());
+        if let Some(account_id) = &creds.account_id {
+            builder = builder.header("ChatGPT-Account-ID", account_id);
+        }
+
+        let resp = builder
+            .send()
+            .await
+            .map_err(|e| AgentError::Provider(format!("could not reach {url}: {e}")))?;
+        let status = resp.status().as_u16();
+        let body = resp.text().await.unwrap_or_default();
+        if !(200..300).contains(&status) {
+            return Err(AgentError::Provider(describe_endpoint_error(
+                status,
+                &body,
+                self.auth.store_path(),
+            )));
+        }
+
+        let models = parse_models(&body)?;
+        if models.is_empty() {
+            // Never a legitimate answer for a working subscription:
+            // it means the version gate moved and now excludes us.
+            return Err(AgentError::Provider(format!(
+                "the subscription returned an empty model list for client_version \
+                 {}. OpenAI gates the catalogue on that value, so it has probably \
+                 moved. Try setting {CLIENT_VERSION_ENV} to a higher version, or set \
+                 `default_model` by hand.",
+                models_client_version()
+            )));
+        }
+        Ok(models)
+    }
+
     /// Turn a non-2xx response into a loud provider error.
     async fn error_from(&self, resp: reqwest::Response) -> AgentError {
         let status = resp.status().as_u16();
@@ -134,6 +233,66 @@ impl ResponsesProvider {
             self.auth.store_path(),
         ))
     }
+}
+
+/// One entry from the subscription's model catalogue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModelInfo {
+    pub slug: String,
+    pub display_name: Option<String>,
+    pub description: Option<String>,
+    pub context_window: Option<u32>,
+}
+
+/// Parse the `/models` response.
+///
+/// Only `slug` is required; every other field is presentation. The
+/// catalogue gains fields regularly, so unknown ones are ignored
+/// rather than rejected.
+pub fn parse_models(body: &str) -> Result<Vec<ModelInfo>> {
+    let parsed: Value = serde_json::from_str(body)
+        .map_err(|e| AgentError::Provider(format!("could not parse the model list ({e})")))?;
+    let entries = parsed
+        .get("models")
+        .and_then(|m| m.as_array())
+        .ok_or_else(|| {
+            AgentError::Provider("the model list response had no `models` array".to_string())
+        })?;
+
+    Ok(entries
+        .iter()
+        .filter_map(|m| {
+            let slug = m.get("slug").and_then(|v| v.as_str())?;
+            Some(ModelInfo {
+                slug: slug.to_string(),
+                display_name: m
+                    .get("display_name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                description: m
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
+                context_window: m
+                    .get("context_window")
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u32),
+            })
+        })
+        .collect())
+}
+
+/// Pick a sensible default from a catalogue.
+///
+/// The list arrives newest-first, so the first general-purpose entry
+/// is the right default. Entries that are clearly not conversational
+/// models are skipped — `codex-auto-review` is a review-only model and
+/// would be a poor default for an interactive agent.
+pub fn preferred_model(models: &[ModelInfo]) -> Option<&ModelInfo> {
+    models
+        .iter()
+        .find(|m| !m.slug.contains("auto-review"))
+        .or_else(|| models.first())
 }
 
 /// Compose the user-facing message for a rejected request.
@@ -704,6 +863,17 @@ impl Provider for ResponsesProvider {
 
         Ok(acc.finish())
     }
+
+    /// Backs the `/model` slash command. Returns only what this
+    /// subscription actually serves.
+    async fn list_models(&self) -> Result<Vec<String>> {
+        Ok(self
+            .fetch_models()
+            .await?
+            .into_iter()
+            .map(|m| m.slug)
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -1241,12 +1411,109 @@ mod tests {
         assert_eq!(extract_error_message(&"x".repeat(9_000)).len(), 400);
     }
 
+    // ---- Model discovery -----------------------------------------
+
+    /// Trimmed from a real `/models` response. The slugs are the point:
+    /// the subscription backend serves neither the public API's names
+    /// nor any `gpt-5.x-codex` variant.
+    const MODELS_FIXTURE: &str = r#"{
+      "models": [
+        {"slug": "gpt-5.6-terra", "display_name": "GPT-5.6-Terra",
+         "description": "Balanced agentic coding model for everyday work.",
+         "context_window": 272000, "use_responses_lite": true},
+        {"slug": "gpt-5.6-luna", "display_name": "GPT-5.6-Luna", "context_window": 272000},
+        {"slug": "gpt-5.5", "display_name": "GPT-5.5", "context_window": 272000},
+        {"slug": "gpt-5.4-mini", "display_name": "GPT-5.4-Mini", "context_window": 272000},
+        {"slug": "codex-auto-review", "display_name": "Codex Auto Review"}
+      ]
+    }"#;
+
+    #[test]
+    fn parses_the_model_catalogue() {
+        let models = parse_models(MODELS_FIXTURE).unwrap();
+        assert_eq!(models.len(), 5);
+        assert_eq!(models[0].slug, "gpt-5.6-terra");
+        assert_eq!(models[0].display_name.as_deref(), Some("GPT-5.6-Terra"));
+        assert_eq!(models[0].context_window, Some(272_000));
+    }
+
+    #[test]
+    fn unknown_catalogue_fields_are_ignored() {
+        // The catalogue gains fields regularly; that must not break
+        // model discovery.
+        let models =
+            parse_models(r#"{"models":[{"slug":"m1","some_future_field":{"nested":true}}]}"#)
+                .unwrap();
+        assert_eq!(models[0].slug, "m1");
+    }
+
+    #[test]
+    fn entries_without_a_slug_are_skipped() {
+        let models =
+            parse_models(r#"{"models":[{"display_name":"nameless"},{"slug":"m1"}]}"#).unwrap();
+        assert_eq!(models.len(), 1);
+    }
+
+    #[test]
+    fn a_response_without_a_models_array_is_an_error() {
+        let err = parse_models(r#"{"error":{"message":"nope"}}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("`models` array"), "{err}");
+    }
+
+    #[test]
+    fn preferred_model_skips_the_review_only_model() {
+        let models = parse_models(MODELS_FIXTURE).unwrap();
+        assert_eq!(preferred_model(&models).unwrap().slug, "gpt-5.6-terra");
+
+        // Even when it is the only thing listed, something is better
+        // than nothing.
+        let only_review = parse_models(r#"{"models":[{"slug":"codex-auto-review"}]}"#).unwrap();
+        assert_eq!(
+            preferred_model(&only_review).unwrap().slug,
+            "codex-auto-review"
+        );
+    }
+
+    #[test]
+    fn preferred_model_of_an_empty_catalogue_is_none() {
+        assert!(preferred_model(&[]).is_none());
+    }
+
     #[test]
     fn session_id_is_uuid_shaped_and_unique() {
         let a = random_session_id();
         assert_eq!(a.len(), 36);
         assert_eq!(a.split('-').count(), 5);
         assert_ne!(a, random_session_id());
+    }
+
+    #[test]
+    fn models_client_version_is_above_the_observed_gate() {
+        // SAFETY: single-purpose env var, removed straight after.
+        unsafe { std::env::remove_var(CLIENT_VERSION_ENV) };
+        // Observed: 0.1.0 / 0.9.0 / 0.20.0 / 0.45.0 return nothing,
+        // 0.104.0 returns only the two oldest models, >=1.0.0 returns
+        // the full catalogue. Sending oli's own version would return
+        // an empty list, which is why this is a separate constant.
+        assert_ne!(MODELS_CLIENT_VERSION, env!("CARGO_PKG_VERSION"));
+        let major: u32 = MODELS_CLIENT_VERSION
+            .split('.')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(major >= 1, "{MODELS_CLIENT_VERSION} is below the gate");
+    }
+
+    #[test]
+    fn client_version_can_be_overridden() {
+        // SAFETY: as above.
+        unsafe { std::env::set_var(CLIENT_VERSION_ENV, "2.5.0") };
+        assert_eq!(models_client_version(), "2.5.0");
+        unsafe { std::env::remove_var(CLIENT_VERSION_ENV) };
+        assert_eq!(models_client_version(), MODELS_CLIENT_VERSION);
     }
 
     #[test]

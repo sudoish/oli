@@ -125,6 +125,84 @@ pub async fn run_paste(opts: &LoginOptions, store: &AuthStore) -> Result<Tokens>
     Ok(tokens)
 }
 
+/// Fetch the served model list and point `config.toml` at the
+/// subscription, printing what changed.
+///
+/// Called at the end of every login path. Failures here are reported
+/// but not fatal: the credentials are already saved, and telling
+/// someone their login failed because a config edit didn't land would
+/// be wrong.
+pub async fn provision_config(store: &AuthStore) -> Result<()> {
+    use crate::auth::provision;
+    use crate::auth::session::ChatGptAuth;
+    use crate::providers::openai_responses::{self, ResponsesProvider};
+
+    let provider = ResponsesProvider::new(
+        crate::auth::CHATGPT_BASE_URL,
+        ChatGptAuth::with_store(store.clone()),
+    );
+
+    // A wrong model id is the single most confusing failure on this
+    // endpoint — the slugs match neither the public API's nor Codex's
+    // — so ask rather than guess.
+    let models = match provider.fetch_models().await {
+        Ok(models) => {
+            if !models.is_empty() {
+                println!(
+                    "\nModels available on your plan:\n  {}",
+                    models
+                        .iter()
+                        .map(|m| m.slug.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
+            models
+        }
+        Err(e) => {
+            println!("\nCould not fetch the model list: {e}");
+            Vec::new()
+        }
+    };
+    // Order matters: `provision::apply` takes the first entry as the
+    // default. `codex-auto-review` is a review-only model and would be
+    // a poor interactive default, so hoist the preferred one.
+    let preferred = openai_responses::preferred_model(&models).map(|m| m.slug.clone());
+    let mut slugs: Vec<String> = models.into_iter().map(|m| m.slug).collect();
+    if let Some(preferred) = preferred
+        && let Some(idx) = slugs.iter().position(|s| *s == preferred)
+    {
+        slugs.swap(0, idx);
+    }
+
+    let Some(path) = crate::config::default_config_path() else {
+        println!("\nNo config directory; add a provider block by hand.");
+        return Ok(());
+    };
+
+    match provision::apply_to_file(&path, &slugs) {
+        Ok(changes) if changes.is_empty() => {
+            println!("\n{} already points at your subscription.", path.display());
+        }
+        Ok(changes) => {
+            println!("\nUpdated {}:", path.display());
+            for change in &changes {
+                println!("  {change}");
+            }
+        }
+        Err(e) => {
+            // Credentials are saved either way; say what is left to do.
+            println!(
+                "\nSigned in, but {} could not be updated: {e}\n\
+                 Add this by hand:\n\n  \
+                 [providers.chatgpt]\n  kind = \"openai-chatgpt\"\n",
+                path.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Prompt and read one line from stdin, off the async runtime.
 async fn read_line(prompt: &str) -> Result<String> {
     use std::io::{BufRead, Write};

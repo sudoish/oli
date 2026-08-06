@@ -34,6 +34,11 @@ serde = { version = "1.0.228", features = ["derive"] }
 async-trait = "0.1"
 thiserror = "2"
 toml = "0.8"
+# Format-preserving TOML editing for `oli login`, which rewrites the
+# user's hand-maintained config.toml. `toml` would round-trip it
+# through a value tree and drop every comment and blank line.
+# Already in the tree: `toml` is built on it.
+toml_edit = "0.25"
 glob = "0.3"
 futures = "0.3"
 rustyline = "14"

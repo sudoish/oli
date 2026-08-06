@@ -142,6 +142,12 @@ enum Cmd {
         /// containers — or when ports 1455/1457 are unavailable.
         #[arg(long)]
         paste: bool,
+
+        /// Store credentials but leave config.toml alone. Without
+        /// this, a successful login points `default_provider` at a
+        /// `kind = "openai-chatgpt"` block, creating one if needed.
+        #[arg(long)]
+        no_config: bool,
     },
 
     /// Discard stored ChatGPT subscription credentials.
@@ -163,7 +169,8 @@ async fn main() {
             no_browser,
             device_auth,
             paste,
-        }) => login_command(no_browser, device_auth, paste).await,
+            no_config,
+        }) => login_command(no_browser, device_auth, paste, no_config).await,
         Some(Cmd::Logout) => logout_command(),
         None => run(args).await,
     };
@@ -173,13 +180,19 @@ async fn main() {
     }
 }
 
-/// `oli login`. Runs the ChatGPT subscription OAuth flow and stores
-/// the resulting tokens. Does not touch `config.toml` — pointing a
-/// provider at these credentials is a separate, explicit step, so
-/// logging in can never silently change how an existing config
-/// authenticates.
-async fn login_command(no_browser: bool, device_auth: bool, paste: bool) -> Result<()> {
-    use oli::auth::login::{LoginOptions, run as run_login, run_paste};
+/// `oli login`. Runs the ChatGPT subscription OAuth flow, stores the
+/// tokens, then points `config.toml` at them — filling in `base_url`,
+/// setting `default_model` from the subscription's own model list, and
+/// switching `default_provider`. Other provider blocks are left
+/// untouched, so switching back is a one-line edit. `--no-config`
+/// stores credentials and stops there.
+async fn login_command(
+    no_browser: bool,
+    device_auth: bool,
+    paste: bool,
+    no_config: bool,
+) -> Result<()> {
+    use oli::auth::login::{LoginOptions, provision_config, run as run_login, run_paste};
     use oli::auth::store::AuthStore;
     use oli::auth::{ISSUER, client_id};
 
@@ -196,12 +209,14 @@ async fn login_command(no_browser: bool, device_auth: bool, paste: bool) -> Resu
         run_login(&opts, &store).await?;
     }
 
-    println!(
-        "\nTo use it, add a provider to your config:\n\n\
-         \x20 [providers.chatgpt]\n\
-         \x20 kind = \"openai-chatgpt\"\n\
-         \x20 base_url = \"https://chatgpt.com/backend-api/codex\"\n"
-    );
+    if no_config {
+        println!(
+            "\nCredentials saved. --no-config was set, so config.toml is unchanged; \n\
+             point a provider at them with `kind = \"openai-chatgpt\"`."
+        );
+    } else {
+        provision_config(&store).await?;
+    }
     Ok(())
 }
 

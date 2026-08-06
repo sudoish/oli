@@ -427,7 +427,11 @@ impl SlashCommand for Provider {
                 };
                 out.push_str(&format!(
                     "  {:<14}  kind={} url={}{}\n",
-                    name, pcfg.kind, pcfg.base_url, active
+                    name,
+                    pcfg.kind,
+                    pcfg.resolved_base_url(name)
+                        .unwrap_or_else(|_| "<unset>".to_string()),
+                    active
                 ));
             }
             return SlashOutcome::Continue(Some(out.trim_end().to_string()));
