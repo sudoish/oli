@@ -11,6 +11,7 @@
 //!   `state` nonce. Pure, no I/O.
 //! - [`token`] — the persisted token bundle and JWT claim decoding
 //!   (`chatgpt_plan_type`, `chatgpt_account_id`, `exp`). Pure.
+//! - [`store`] — `auth.json` at mode 0600, next to `config.toml`.
 //!
 //! # Protocol
 //!
@@ -41,6 +42,7 @@
 //! verbose rather than terse.
 
 pub mod pkce;
+pub mod store;
 pub mod token;
 
 /// OAuth issuer. Authorize, token exchange, refresh and revoke all
