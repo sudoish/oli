@@ -70,7 +70,8 @@ impl CallbackServer {
             "cannot bind the sign-in callback listener ({detail}). \
              Ports {CALLBACK_PORT} and {CALLBACK_PORT_FALLBACK} are the only ones OpenAI \
              accepts for this client, so free one of them (another `oli login` or a `codex` \
-             login may be holding it), use `oli login --device-auth`, or use API-key auth."
+             login may be holding it), or use `oli login --paste`, which needs no port at \
+             all. `oli login --device-auth` and API-key auth also work."
         )))
     }
 
@@ -93,8 +94,10 @@ impl CallbackServer {
                 .map_err(|_| {
                     AgentError::Auth(
                         "timed out waiting for the browser to complete sign-in. \
-                         Re-run `oli login`, or `oli login --device-auth` on a machine \
-                         with no browser."
+                         If the browser is on a different machine than Oli (SSH, \
+                         Tailscale, a container), its `localhost` is not this host's — \
+                         use `oli login --paste` and paste the redirect URL back, or \
+                         `oli login --device-auth`."
                             .to_string(),
                     )
                 })?;
@@ -165,6 +168,69 @@ pub fn interpret_callback(query: &str, expected_state: &str) -> Result<Callback>
                 .to_string(),
         )),
     }
+}
+
+/// Interpret something the user pasted back from a browser that could
+/// not reach this machine's loopback.
+///
+/// Accepts, in order of preference:
+/// 1. the whole redirect URL from the address bar,
+///    `http://localhost:1455/auth/callback?code=…&state=…`
+/// 2. just the query string, `code=…&state=…`
+/// 3. a bare authorization code
+///
+/// Case 3 cannot verify `state`, so it warns. That is a deliberate
+/// trade: in a paste flow the user is the transport, and the CSRF
+/// binding that `state` provides against a *drive-by* redirect does
+/// not apply to a value someone copied by hand. Refusing it would
+/// just push people toward worse workarounds.
+pub fn parse_pasted_redirect(input: &str, expected_state: &str) -> Result<Callback> {
+    let trimmed = input.trim().trim_matches(['"', '\'']);
+    if trimmed.is_empty() {
+        return Err(AgentError::Auth(
+            "nothing was pasted. Copy the whole URL from the browser's address bar \
+             after signing in — it starts with `http://localhost:` and the page \
+             failing to load is expected."
+                .to_string(),
+        ));
+    }
+
+    // A full URL: take everything after the first `?`.
+    if let Some((_, query)) = trimmed.split_once('?') {
+        return interpret_callback(query, expected_state);
+    }
+
+    // A bare query string.
+    if trimmed.contains("code=") || trimmed.contains("error=") {
+        return interpret_callback(trimmed, expected_state);
+    }
+
+    // A URL with no query at all is the most common paste mistake:
+    // copying before the redirect happened.
+    if trimmed.contains("://") || trimmed.contains('/') {
+        return Err(AgentError::Auth(format!(
+            "that URL has no authorization code in it ({trimmed}). \
+             Sign in first, then copy the address bar once it has changed to a \
+             `localhost` URL containing `?code=`."
+        )));
+    }
+
+    // Bare code.
+    if trimmed.split_whitespace().count() > 1 {
+        return Err(AgentError::Auth(
+            "that does not look like a redirect URL or an authorization code. \
+             Copy the whole URL from the browser's address bar after signing in."
+                .to_string(),
+        ));
+    }
+    crate::log_warn!(
+        "[auth] a bare authorization code was pasted, so the `state` value could not \
+         be checked against this login attempt"
+    );
+    Ok(Callback {
+        code: trimmed.to_string(),
+        state: expected_state.to_string(),
+    })
 }
 
 /// Read the request head and return the request target (the middle
@@ -453,6 +519,87 @@ mod tests {
         let msg = err.to_string();
         assert!(msg.contains("--device-auth"), "{msg}");
         assert!(msg.contains("API-key"), "{msg}");
+    }
+
+    // ---- Pasted redirects (remote / SSH / tailscale) --------------
+
+    #[test]
+    fn accepts_a_full_pasted_redirect_url() {
+        let cb = parse_pasted_redirect(
+            "http://localhost:1455/auth/callback?code=abc&state=s1",
+            "s1",
+        )
+        .unwrap();
+        assert_eq!(cb.code, "abc");
+    }
+
+    #[test]
+    fn accepts_a_url_with_surrounding_whitespace_and_quotes() {
+        // Terminals and chat clients love adding these.
+        let cb = parse_pasted_redirect(
+            "  \"http://localhost:1455/auth/callback?code=abc&state=s1\"  ",
+            "s1",
+        )
+        .unwrap();
+        assert_eq!(cb.code, "abc");
+    }
+
+    #[test]
+    fn accepts_a_bare_query_string() {
+        let cb = parse_pasted_redirect("code=abc&state=s1", "s1").unwrap();
+        assert_eq!(cb.code, "abc");
+    }
+
+    #[test]
+    fn accepts_a_bare_authorization_code() {
+        let cb = parse_pasted_redirect("just-the-code", "s1").unwrap();
+        assert_eq!(cb.code, "just-the-code");
+    }
+
+    #[test]
+    fn a_pasted_url_still_has_its_state_checked() {
+        let err = parse_pasted_redirect(
+            "http://localhost:1455/auth/callback?code=abc&state=wrong",
+            "s1",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("state mismatch"), "{err}");
+    }
+
+    #[test]
+    fn a_pasted_error_redirect_is_surfaced() {
+        let err = parse_pasted_redirect(
+            "http://localhost:1455/auth/callback?error=access_denied",
+            "s1",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("access_denied"), "{err}");
+    }
+
+    #[test]
+    fn empty_input_explains_what_to_copy() {
+        let err = parse_pasted_redirect("   ", "s1").unwrap_err().to_string();
+        assert!(err.contains("address bar"), "{err}");
+        assert!(err.contains("failing to load is expected"), "{err}");
+    }
+
+    #[test]
+    fn a_url_without_a_code_says_to_sign_in_first() {
+        // Copying the authorize URL instead of the redirect is the
+        // most common mistake in this flow.
+        let err = parse_pasted_redirect("https://auth.openai.com/oauth/authorize", "s1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("no authorization code"), "{err}");
+        assert!(err.contains("?code="), "{err}");
+    }
+
+    #[test]
+    fn prose_is_rejected_rather_than_treated_as_a_code() {
+        let err = parse_pasted_redirect("I signed in but nothing happened", "s1")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("does not look like"), "{err}");
     }
 
     #[test]

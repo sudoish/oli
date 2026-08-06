@@ -225,10 +225,37 @@ Plus/Pro subscription. API-key auth stays the default and is unaffected —
 this is an extra provider kind, not a replacement.
 
 ```console
-$ oli login                 # opens a browser
+$ oli login                 # opens a browser on this machine
+$ oli login --paste         # browser on another machine; paste the redirect URL back
 $ oli login --device-auth   # headless: shows a code to enter elsewhere
 $ oli logout                # discards the stored credentials
 ```
+
+**If oli is running on a remote host** (SSH, Tailscale, a container), use
+`--paste`. The redirect goes to `http://localhost:1455/auth/callback`,
+and that `localhost` is whichever machine the *browser* is on — not the
+one running oli, so the plain flow waits for a callback that can never
+arrive. With `--paste`, oli binds nothing, prints the sign-in URL, and
+waits for you to paste the redirect URL back:
+
+```console
+$ oli login --paste
+Open this URL in a browser — any machine, it does not have to be this one:
+
+  https://auth.openai.com/oauth/authorize?...
+
+After you sign in, the browser will try to reach
+http://localhost:1455/auth/callback and show a connection error. That is
+expected: nothing is listening there. Copy the full URL out of the
+address bar and paste it below.
+
+Pasted URL: http://localhost:1455/auth/callback?code=...&state=...
+Signed in as you@example.com (pro plan).
+```
+
+The connection error in the browser is not a failure — the authorization
+code is in the address bar regardless. `--paste` also works when ports
+1455 and 1457 are both busy, since it never binds one.
 
 Tokens land in `~/.config/oli/auth.json` (mode 0600) and are refreshed
 automatically before they expire. Point a provider at them:

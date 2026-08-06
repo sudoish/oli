@@ -6,12 +6,16 @@
 //!
 //! The listener is bound *before* the browser opens, so there is no
 //! window where the redirect arrives at a closed port.
+//!
+//! [`run_paste`] is the same flow minus the listener, for when the
+//! browser is on a different machine than Oli and `localhost` in the
+//! redirect therefore points somewhere else entirely.
 
-use crate::auth::listener::CallbackServer;
+use crate::auth::listener::{CallbackServer, parse_pasted_redirect};
 use crate::auth::oauth::{authorize_url, exchange_code};
 use crate::auth::store::AuthStore;
 use crate::auth::token::Tokens;
-use crate::auth::{ISSUER, client_id, pkce, redirect_uri};
+use crate::auth::{CALLBACK_PORT, ISSUER, client_id, pkce, redirect_uri};
 use crate::error::Result;
 
 /// Knobs for a login run. Defaults target the real issuer; tests and
@@ -49,7 +53,13 @@ pub async fn run(opts: &LoginOptions, store: &AuthStore) -> Result<Tokens> {
     if opts.open_browser && open_browser(&url) {
         println!("Opened your browser. Waiting for sign-in…");
     } else {
-        println!("Open the URL above in a browser. Waiting for sign-in…");
+        // If they open it on another machine, the redirect lands on
+        // that machine's localhost and this wait never ends. Say so
+        // now rather than after a ten-minute timeout.
+        println!(
+            "Open the URL above in a browser on this machine. Waiting for sign-in…\n\
+             (Browser on a different machine? Ctrl-C and use `oli login --paste`.)"
+        );
     }
 
     let callback = server.accept(&state).await?;
@@ -68,6 +78,67 @@ pub async fn run(opts: &LoginOptions, store: &AuthStore) -> Result<Tokens> {
     store.save(&tokens)?;
     println!("{}", describe(&tokens, store));
     Ok(tokens)
+}
+
+/// Browser login where the browser is on a *different machine* — SSH,
+/// a Tailscale-connected host, a container.
+///
+/// The redirect goes to `http://localhost:1455/…`, which resolves on
+/// whichever machine the browser is running on. When that isn't this
+/// one, nothing can catch it: the browser shows a connection error
+/// while the code sits unread in its address bar. So this mode skips
+/// the listener entirely and asks the user to paste that URL back.
+///
+/// The redirect URI still has to be the loopback one — it is
+/// allow-listed against the OAuth client and cannot be swapped for
+/// something reachable. Nothing needs to be listening on it, though,
+/// which also means this mode works when 1455 and 1457 are both busy.
+pub async fn run_paste(opts: &LoginOptions, store: &AuthStore) -> Result<Tokens> {
+    let pkce = pkce::generate();
+    let state = pkce::generate_state();
+    let redirect = redirect_uri(CALLBACK_PORT);
+    let url = authorize_url(&opts.issuer, &opts.client_id, &redirect, &pkce, &state);
+
+    println!(
+        "Open this URL in a browser — any machine, it does not have to be this one:\n\n  {url}\n\n\
+         After you sign in, the browser will try to reach {redirect}\n\
+         and show a connection error. That is expected: nothing is listening there.\n\
+         Copy the full URL out of the address bar and paste it below.\n"
+    );
+
+    let pasted = read_line("Pasted URL: ").await?;
+    let callback = parse_pasted_redirect(&pasted, &state)?;
+
+    let http = reqwest::Client::new();
+    let tokens = exchange_code(
+        &http,
+        &opts.issuer,
+        &opts.client_id,
+        &redirect,
+        &pkce,
+        &callback.code,
+    )
+    .await?;
+
+    store.save(&tokens)?;
+    println!("{}", describe(&tokens, store));
+    Ok(tokens)
+}
+
+/// Prompt and read one line from stdin, off the async runtime.
+async fn read_line(prompt: &str) -> Result<String> {
+    use std::io::{BufRead, Write};
+
+    let prompt = prompt.to_string();
+    tokio::task::spawn_blocking(move || {
+        print!("{prompt}");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line)?;
+        Ok(line)
+    })
+    .await
+    .map_err(|e| crate::error::AgentError::Auth(format!("could not read input: {e}")))?
 }
 
 /// One-line summary of who is now signed in and where that was
@@ -151,5 +222,84 @@ mod tests {
         let store = AuthStore::at(dir.path().join("auth.json"));
         let line = describe(&Tokens::default(), &store);
         assert!(line.contains("your ChatGPT account"), "{line}");
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    //! End-to-end cover for the paste flow's non-interactive half:
+    //! everything from a pasted URL through to a persisted bundle.
+    use super::*;
+    use crate::auth::listener::parse_pasted_redirect;
+    use crate::auth::pkce::Pkce;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn stub_token_endpoint(body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let _ = stream.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+            let _ = stream.flush().await;
+        });
+        format!("http://127.0.0.1:{port}")
+    }
+
+    #[tokio::test]
+    async fn a_pasted_redirect_completes_the_exchange_and_persists() {
+        let issuer = stub_token_endpoint(
+            r#"{"access_token":"at-1","refresh_token":"rt-1","id_token":"h.e30.s"}"#,
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let store = AuthStore::at(dir.path().join("auth.json"));
+
+        // What `run_paste` does between prompt and save.
+        let state = "state-xyz";
+        let pkce = Pkce {
+            verifier: "v".into(),
+            challenge: "c".into(),
+        };
+        let callback = parse_pasted_redirect(
+            "http://localhost:1455/auth/callback?code=the-code&state=state-xyz",
+            state,
+        )
+        .unwrap();
+        let tokens = exchange_code(
+            &reqwest::Client::new(),
+            &issuer,
+            "client-1",
+            &redirect_uri(CALLBACK_PORT),
+            &pkce,
+            &callback.code,
+        )
+        .await
+        .unwrap();
+        store.save(&tokens).unwrap();
+
+        assert_eq!(store.load().unwrap().unwrap().access_token, "at-1");
+    }
+
+    #[test]
+    fn the_paste_redirect_uri_matches_the_authorize_redirect_uri() {
+        // These must be byte-identical or the exchange is rejected
+        // with an opaque invalid_grant.
+        let pkce = Pkce {
+            verifier: "v".into(),
+            challenge: "c".into(),
+        };
+        let redirect = redirect_uri(CALLBACK_PORT);
+        let url = authorize_url("https://i", "c", &redirect, &pkce, "s");
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+        assert_eq!(redirect, "http://localhost:1455/auth/callback");
     }
 }

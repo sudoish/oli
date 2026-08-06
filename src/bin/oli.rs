@@ -127,14 +127,21 @@ enum Cmd {
     Login {
         /// Print the sign-in URL instead of launching a browser.
         /// Implied on a Linux session with no display.
-        #[arg(long, conflicts_with = "device_auth")]
+        #[arg(long, conflicts_with_all = ["device_auth", "paste"])]
         no_browser: bool,
 
         /// Headless sign-in: shows a code to enter on another
         /// device, with no local browser or callback port. Use this
         /// over SSH.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "paste")]
         device_auth: bool,
+
+        /// Sign in with a browser on a different machine, then paste
+        /// the redirect URL back here. Use this when the browser
+        /// can't reach this host's localhost — SSH, Tailscale,
+        /// containers — or when ports 1455/1457 are unavailable.
+        #[arg(long)]
+        paste: bool,
     },
 
     /// Discard stored ChatGPT subscription credentials.
@@ -155,7 +162,8 @@ async fn main() {
         Some(Cmd::Login {
             no_browser,
             device_auth,
-        }) => login_command(no_browser, device_auth).await,
+            paste,
+        }) => login_command(no_browser, device_auth, paste).await,
         Some(Cmd::Logout) => logout_command(),
         None => run(args).await,
     };
@@ -170,19 +178,21 @@ async fn main() {
 /// provider at these credentials is a separate, explicit step, so
 /// logging in can never silently change how an existing config
 /// authenticates.
-async fn login_command(no_browser: bool, device_auth: bool) -> Result<()> {
-    use oli::auth::login::{LoginOptions, run as run_login};
+async fn login_command(no_browser: bool, device_auth: bool, paste: bool) -> Result<()> {
+    use oli::auth::login::{LoginOptions, run as run_login, run_paste};
     use oli::auth::store::AuthStore;
     use oli::auth::{ISSUER, client_id};
 
     let store = AuthStore::default_location()?;
+    let opts = LoginOptions {
+        open_browser: !no_browser,
+        ..LoginOptions::default()
+    };
     if device_auth {
         oli::auth::device::run(ISSUER, &client_id(), &store).await?;
+    } else if paste {
+        run_paste(&opts, &store).await?;
     } else {
-        let opts = LoginOptions {
-            open_browser: !no_browser,
-            ..LoginOptions::default()
-        };
         run_login(&opts, &store).await?;
     }
 
