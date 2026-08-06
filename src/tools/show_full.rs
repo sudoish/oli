@@ -59,13 +59,13 @@ impl Tool for ShowFull {
     }
 
     async fn run(&self, args: Value, ctx: &ToolContext) -> Result<String> {
-        let id = args
-            .get("id")
-            .and_then(|v| v.as_u64())
-            .ok_or_else(|| ToolError::InvalidArguments {
-                tool: "ShowFull".into(),
-                detail: "missing or non-integer `id`".into(),
-            })?;
+        let id =
+            args.get("id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    tool: "ShowFull".into(),
+                    detail: "missing or non-integer `id`".into(),
+                })?;
         let offset = args
             .get("offset")
             .and_then(|v| v.as_u64())
@@ -77,18 +77,21 @@ impl Tool for ShowFull {
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_LIMIT);
 
-        let slice = ctx.read_full_result(id, offset, limit).ok_or_else(|| {
-            ToolError::InvalidArguments {
-                tool: "ShowFull".into(),
-                detail: format!(
-                    "cache id {} unknown (already evicted, or never recorded)",
-                    id
-                ),
-            }
-        })?;
+        let slice =
+            ctx.read_full_result(id, offset, limit)
+                .ok_or_else(|| ToolError::InvalidArguments {
+                    tool: "ShowFull".into(),
+                    detail: format!(
+                        "cache id {} unknown (already evicted, or never recorded)",
+                        id
+                    ),
+                })?;
 
         if slice.is_empty() {
-            return Ok(format!("[ShowFull(id={}): offset {} is at or past end of body]", id, offset));
+            return Ok(format!(
+                "[ShowFull(id={}): offset {} is at or past end of body]",
+                id, offset
+            ));
         }
 
         // Even ShowFull can hit the per-call truncation cap when
@@ -135,10 +138,7 @@ mod tests {
     async fn show_full_unknown_id_returns_invalid_arguments() {
         let ctx = ToolContext::new();
         let tool = ShowFull;
-        let err = tool
-            .run(json!({"id": 9999}), &ctx)
-            .await
-            .unwrap_err();
+        let err = tool.run(json!({"id": 9999}), &ctx).await.unwrap_err();
         assert!(err.to_string().contains("unknown"));
     }
 

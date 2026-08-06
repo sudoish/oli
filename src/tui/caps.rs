@@ -54,7 +54,10 @@ impl EnvSnapshot {
         K: Into<String>,
         V: Into<String>,
     {
-        let vars = pairs.into_iter().map(|(k, v)| (k.into(), v.into())).collect();
+        let vars = pairs
+            .into_iter()
+            .map(|(k, v)| (k.into(), v.into()))
+            .collect();
         Self { vars }
     }
 
@@ -302,10 +305,7 @@ mod tests {
 
     #[test]
     fn vscode_terminal_is_buffer_terminal() {
-        let env = snap(&[
-            ("TERM_PROGRAM", "vscode"),
-            ("TERM", "xterm-256color"),
-        ]);
+        let env = snap(&[("TERM_PROGRAM", "vscode"), ("TERM", "xterm-256color")]);
         let caps = Capabilities::detect_with_env(&env);
         assert!(caps.is_buffer_terminal);
         assert!(!caps.osc52);
@@ -332,10 +332,7 @@ mod tests {
 
     #[test]
     fn iterm2_picks_iterm2_graphics_not_kitty() {
-        let env = snap(&[
-            ("TERM_PROGRAM", "iTerm.app"),
-            ("TERM", "xterm-256color"),
-        ]);
+        let env = snap(&[("TERM_PROGRAM", "iTerm.app"), ("TERM", "xterm-256color")]);
         let caps = Capabilities::detect_with_env(&env);
         assert_eq!(caps.graphics, GraphicsKind::ITerm2);
         assert!(caps.osc52);

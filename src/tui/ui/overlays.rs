@@ -98,7 +98,9 @@ pub(super) fn approval_pane_lines(
 /// fixed chrome (title/reason/options/hint) so long diffs scroll.
 pub(super) fn draw_approval_pane(f: &mut Frame, area: Rect, approval: &ApprovalState, app: &App) {
     let preview_rows = (area.height as usize)
-        .saturating_sub(2 + usize::from(!approval.reason.is_empty()) + 1 + APPROVAL_OPTIONS.len() + 2)
+        .saturating_sub(
+            2 + usize::from(!approval.reason.is_empty()) + 1 + APPROVAL_OPTIONS.len() + 2,
+        )
         .max(1);
     let inner_w = area.width.saturating_sub(2);
     let lines = approval_pane_lines(approval, preview_rows, inner_w, &app.theme);
@@ -117,9 +119,15 @@ pub(super) fn styled_diff_line(line: &str, width: u16, theme: &Theme) -> Line<'s
     // the first non-space char, so a context line whose body starts
     // with `+`/`-` doesn't get mis-tinted.
     let (body_style, bg) = if line.starts_with("    + ") {
-        (Style::default().fg(theme.diff_added), Some(theme.diff_add_bg))
+        (
+            Style::default().fg(theme.diff_added),
+            Some(theme.diff_add_bg),
+        )
     } else if line.starts_with("    - ") {
-        (Style::default().fg(theme.diff_removed), Some(theme.diff_del_bg))
+        (
+            Style::default().fg(theme.diff_removed),
+            Some(theme.diff_del_bg),
+        )
     } else {
         (Style::default().fg(theme.dim), None)
     };
@@ -359,9 +367,7 @@ pub(super) fn draw_history_search(
         Span::styled("  search: ", Style::default().fg(theme.dim)),
         Span::styled(
             search.query.clone(),
-            Style::default()
-                .fg(theme.fg)
-                .add_modifier(Modifier::BOLD),
+            Style::default().fg(theme.fg).add_modifier(Modifier::BOLD),
         ),
         Span::styled(
             "▍",
@@ -536,8 +542,7 @@ pub(super) fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState, theme
     let inner = block.inner(modal);
     f.render_widget(block, modal);
 
-    let parts =
-        Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).split(inner);
+    let parts = Layout::vertical([Constraint::Min(3), Constraint::Length(2)]).split(inner);
 
     let (body_lines, legend) = match &w.step {
         WizardStep::Welcome => (welcome_lines(), "  [Enter] continue   [Esc] skip"),
@@ -549,10 +554,7 @@ pub(super) fn draw_wizard(f: &mut Frame, full_area: Rect, w: &WizardState, theme
             check_daemon_lines(w),
             "  [R] retry probe   [Enter] continue   [Backspace] back   [Esc] cancel",
         ),
-        WizardStep::PullModel => (
-            pull_model_lines(w),
-            pull_model_legend(w),
-        ),
+        WizardStep::PullModel => (pull_model_lines(w), pull_model_legend(w)),
         WizardStep::EnterApiKey => (
             api_key_lines(w),
             "  type your key   [Enter] continue   [Esc] cancel",
@@ -611,7 +613,8 @@ fn welcome_lines() -> Vec<Line<'static>> {
             Style::default().fg(Color::White),
         )),
         Line::from(Span::styled(
-            "  and confirm. Esc skips at any point — you can edit the file by hand later.".to_string(),
+            "  and confirm. Esc skips at any point — you can edit the file by hand later."
+                .to_string(),
             Style::default().fg(Color::White),
         )),
     ]
@@ -752,9 +755,7 @@ fn check_daemon_lines(w: &WizardState) -> Vec<Line<'static>> {
         DaemonStatus::Down(reason) => {
             out.push(Line::from(Span::styled(
                 format!("  ⚠ Ollama not reachable: {}", reason),
-                Style::default()
-                    .fg(Color::Red)
-                    .add_modifier(Modifier::BOLD),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             )));
             out.push(Line::raw(""));
             out.push(Line::from(Span::styled(
@@ -794,13 +795,13 @@ fn pull_model_lines(w: &WizardState) -> Vec<Line<'static>> {
         PullStatus::Idle => {
             if matches!(w.daemon, DaemonStatus::Up { .. }) {
                 out.push(Line::from(Span::styled(
-                    "  Not yet pulled. Press [P] to download (~4.5GB) or [Enter] to skip.".to_string(),
+                    "  Not yet pulled. Press [P] to download (~4.5GB) or [Enter] to skip."
+                        .to_string(),
                     Style::default().fg(Color::White),
                 )));
             } else {
                 out.push(Line::from(Span::styled(
-                    "  (skipped — daemon unreachable; pull later via `ollama pull`)"
-                        .to_string(),
+                    "  (skipped — daemon unreachable; pull later via `ollama pull`)".to_string(),
                     Style::default().fg(Color::DarkGray),
                 )));
             }
@@ -855,9 +856,7 @@ fn pull_model_lines(w: &WizardState) -> Vec<Line<'static>> {
 
 fn pull_model_legend(w: &WizardState) -> &'static str {
     match &w.pull {
-        PullStatus::InProgress { .. } => {
-            "  pulling — please wait   [Esc] cancel wizard"
-        }
+        PullStatus::InProgress { .. } => "  pulling — please wait   [Esc] cancel wizard",
         PullStatus::AlreadyPresent | PullStatus::Done => {
             "  [Enter] continue   [Backspace] back   [Esc] cancel"
         }
@@ -904,7 +903,11 @@ mod tests {
         let theme = Theme::dark();
         let line = styled_diff_line("    + hello", 20, &theme);
         assert_eq!(line_text(&line).chars().count(), 20);
-        assert!(line.spans.iter().all(|s| s.style.bg == Some(theme.diff_add_bg)));
+        assert!(
+            line.spans
+                .iter()
+                .all(|s| s.style.bg == Some(theme.diff_add_bg))
+        );
         assert_eq!(line.spans[0].style.fg, Some(theme.diff_added));
     }
 
@@ -912,7 +915,11 @@ mod tests {
     fn removed_line_gets_del_tint() {
         let theme = Theme::dark();
         let line = styled_diff_line("    - gone", 20, &theme);
-        assert!(line.spans.iter().all(|s| s.style.bg == Some(theme.diff_del_bg)));
+        assert!(
+            line.spans
+                .iter()
+                .all(|s| s.style.bg == Some(theme.diff_del_bg))
+        );
         assert_eq!(line.spans[0].style.fg, Some(theme.diff_removed));
     }
 
@@ -936,7 +943,11 @@ mod tests {
     fn removed_line_whose_body_starts_with_a_sign_still_tints() {
         let theme = Theme::dark();
         let line = styled_diff_line("    - - foo", 20, &theme);
-        assert!(line.spans.iter().all(|s| s.style.bg == Some(theme.diff_del_bg)));
+        assert!(
+            line.spans
+                .iter()
+                .all(|s| s.style.bg == Some(theme.diff_del_bg))
+        );
         assert_eq!(line.spans[0].style.fg, Some(theme.diff_removed));
     }
 

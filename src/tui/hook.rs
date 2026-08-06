@@ -210,11 +210,7 @@ pub fn render_result_summary(tool: &str, result: &str) -> (String, bool) {
                 "no matches".into()
             } else {
                 let n = trimmed.lines().filter(|l| !l.is_empty()).count();
-                format!(
-                    "{} match{}",
-                    n,
-                    if n == 1 { "" } else { "es" }
-                )
+                format!("{} match{}", n, if n == 1 { "" } else { "es" })
             }
         }
         "Glob" => {
@@ -222,11 +218,7 @@ pub fn render_result_summary(tool: &str, result: &str) -> (String, bool) {
                 "no matches".into()
             } else {
                 let n = trimmed.lines().filter(|l| !l.is_empty()).count();
-                format!(
-                    "{} file{}",
-                    n,
-                    if n == 1 { "" } else { "s" }
-                )
+                format!("{} file{}", n, if n == 1 { "" } else { "s" })
             }
         }
         "Task" => {

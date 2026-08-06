@@ -154,9 +154,8 @@ mod tests {
 
     #[test]
     fn missing_file_yields_empty_list() {
-        let list = PersistedAllowList::open_at(PathBuf::from(
-            "/tmp/__nope_oli_allow_does_not_exist__",
-        ));
+        let list =
+            PersistedAllowList::open_at(PathBuf::from("/tmp/__nope_oli_allow_does_not_exist__"));
         assert!(list.snapshot().is_empty());
     }
 
@@ -226,11 +225,7 @@ mod tests {
         // — start fresh" rather than panic-decoded.
         let dir = tempdir().unwrap();
         let path = dir.path().join("allow.json");
-        std::fs::write(
-            &path,
-            r#"{"version":99,"fingerprints":["Edit::stale"]}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{"version":99,"fingerprints":["Edit::stale"]}"#).unwrap();
         let list = PersistedAllowList::open_at(path);
         assert!(list.snapshot().is_empty());
     }

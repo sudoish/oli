@@ -58,7 +58,10 @@ pub fn spawn(
     plugin_slashes: Vec<Box<dyn SlashCommand>>,
     reloader: Option<Arc<PluginReloader>>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
-) -> (mpsc::UnboundedSender<AgentCommand>, tokio::task::JoinHandle<()>) {
+) -> (
+    mpsc::UnboundedSender<AgentCommand>,
+    tokio::task::JoinHandle<()>,
+) {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<AgentCommand>();
     let mut registry = SlashRegistry::default_set_with_reloader(reloader);
     for s in plugin_slashes {
@@ -200,10 +203,7 @@ async fn handle_slash(
         }
         None => {
             let head = trimmed.split_whitespace().next().unwrap_or("");
-            let _ = ui_tx.send(UiEvent::SystemNote(format!(
-                "unknown command: /{}",
-                head
-            )));
+            let _ = ui_tx.send(UiEvent::SystemNote(format!("unknown command: /{}", head)));
         }
     }
     let _ = ui_tx.send(UiEvent::SlashFinished);

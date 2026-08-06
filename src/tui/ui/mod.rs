@@ -60,7 +60,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Constraint::Min(3),               // transcript
         Constraint::Length(2),            // status row (+ tool detail)
         Constraint::Length(input_height), // composer (borderless, padded)
-        Constraint::Length(1),           // footer
+        Constraint::Length(1),            // footer
     ])
     .split(area);
 
@@ -215,7 +215,12 @@ pub(super) fn fmt_elapsed(secs: u64) -> String {
     } else if secs < 3600 {
         format!("{}m {:02}s", secs / 60, secs % 60)
     } else {
-        format!("{}h {:02}m {:02}s", secs / 3600, (secs % 3600) / 60, secs % 60)
+        format!(
+            "{}h {:02}m {:02}s",
+            secs / 3600,
+            (secs % 3600) / 60,
+            secs % 60
+        )
     }
 }
 
@@ -497,7 +502,11 @@ mod tests {
     fn context_gauge_renders_percent_left_with_threshold_colors() {
         let green = app_with_status(StatusModel {
             ctx_window: 100_000,
-            last_usage: Some(Usage { prompt_tokens: 30_000, completion_tokens: 5_000, total_tokens: 35_000 }),
+            last_usage: Some(Usage {
+                prompt_tokens: 30_000,
+                completion_tokens: 5_000,
+                total_tokens: 35_000,
+            }),
             ..Default::default()
         });
         let spans = context_gauge_spans(&green);
@@ -507,14 +516,22 @@ mod tests {
 
         let amber = app_with_status(StatusModel {
             ctx_window: 100_000,
-            last_usage: Some(Usage { prompt_tokens: 70_000, completion_tokens: 0, total_tokens: 70_000 }),
+            last_usage: Some(Usage {
+                prompt_tokens: 70_000,
+                completion_tokens: 0,
+                total_tokens: 70_000,
+            }),
             ..Default::default()
         });
         assert_eq!(context_gauge_spans(&amber)[0].style.fg, Some(Color::Yellow));
 
         let red = app_with_status(StatusModel {
             ctx_window: 100_000,
-            last_usage: Some(Usage { prompt_tokens: 90_000, completion_tokens: 0, total_tokens: 90_000 }),
+            last_usage: Some(Usage {
+                prompt_tokens: 90_000,
+                completion_tokens: 0,
+                total_tokens: 90_000,
+            }),
             ..Default::default()
         });
         assert_eq!(context_gauge_spans(&red)[0].style.fg, Some(Color::Red));
@@ -524,7 +541,11 @@ mod tests {
     fn context_gauge_falls_back_to_used_count_when_window_unknown() {
         let app = app_with_status(StatusModel {
             ctx_window: 0,
-            last_usage: Some(Usage { prompt_tokens: 12_345, completion_tokens: 0, total_tokens: 12_345 }),
+            last_usage: Some(Usage {
+                prompt_tokens: 12_345,
+                completion_tokens: 0,
+                total_tokens: 12_345,
+            }),
             ..Default::default()
         });
         let spans = context_gauge_spans(&app);
@@ -534,11 +555,23 @@ mod tests {
     #[test]
     fn status_row_blank_when_idle_and_when_approval_pending() {
         let app = app_with_status(StatusModel::default());
-        assert!(render_status_row(&app).iter().all(|l| line_text(l).is_empty()));
+        assert!(
+            render_status_row(&app)
+                .iter()
+                .all(|l| line_text(l).is_empty())
+        );
 
         let mut app = app_with_status(StatusModel::default());
-        app.on_approval_requested("Edit".into(), serde_json::json!({"file_path":"x"}), "edit".into());
-        assert!(render_status_row(&app).iter().all(|l| line_text(l).is_empty()));
+        app.on_approval_requested(
+            "Edit".into(),
+            serde_json::json!({"file_path":"x"}),
+            "edit".into(),
+        );
+        assert!(
+            render_status_row(&app)
+                .iter()
+                .all(|l| line_text(l).is_empty())
+        );
     }
 
     #[test]
@@ -629,15 +662,25 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let glyph_style = if busy {
         Style::default().fg(theme.dim).bg(theme.user_band_bg)
     } else {
-        Style::default().bg(theme.user_band_bg).add_modifier(Modifier::BOLD)
+        Style::default()
+            .bg(theme.user_band_bg)
+            .add_modifier(Modifier::BOLD)
     };
     let text_y = area.y + COMPOSER_V_PAD;
     f.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::styled(" ".repeat(TRANSCRIPT_H_PAD as usize), Style::default().bg(theme.user_band_bg)),
+            Span::styled(
+                " ".repeat(TRANSCRIPT_H_PAD as usize),
+                Style::default().bg(theme.user_band_bg),
+            ),
             Span::styled("›".to_string(), glyph_style),
         ])),
-        Rect { x: area.x, y: text_y, width: COMPOSER_GUTTER, height: 1 },
+        Rect {
+            x: area.x,
+            y: text_y,
+            width: COMPOSER_GUTTER,
+            height: 1,
+        },
     );
     let text_area = Rect {
         x: area.x + COMPOSER_GUTTER,
@@ -663,8 +706,8 @@ fn draw_input(f: &mut Frame, area: Rect, app: &App) {
 
 fn draw_footer(f: &mut Frame, area: Rect, app: &App) {
     let line = build_footer_line(app, area.width.saturating_sub(TRANSCRIPT_H_PAD * 2));
-    let footer = Paragraph::new(line)
-        .block(Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD)));
+    let footer =
+        Paragraph::new(line).block(Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD)));
     f.render_widget(footer, area);
 }
 
@@ -677,16 +720,17 @@ pub(super) fn build_footer_line(app: &App, width: u16) -> Line<'static> {
     let right = context_gauge_spans(app);
     let right_w = spans_width(&right) as u16;
 
-    let mut left: Vec<Span<'static>> = if app.focused_card_idx.is_some()
-        && matches!(app.mode, Mode::Idle)
-    {
-        vec![Span::styled(
-            "enter expand · {/} cards · esc clear".to_string(),
-            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
-        )]
-    } else {
-        footer_identity_spans(app, width.saturating_sub(right_w + 1))
-    };
+    let mut left: Vec<Span<'static>> =
+        if app.focused_card_idx.is_some() && matches!(app.mode, Mode::Idle) {
+            vec![Span::styled(
+                "enter expand · {/} cards · esc clear".to_string(),
+                Style::default()
+                    .fg(theme.dim)
+                    .add_modifier(Modifier::ITALIC),
+            )]
+        } else {
+            footer_identity_spans(app, width.saturating_sub(right_w + 1))
+        };
 
     let left_w = spans_width(&left) as u16;
     let pad = width.saturating_sub(left_w + right_w);
@@ -747,7 +791,10 @@ fn footer_identity_spans(app: &App, budget: u16) -> Vec<Span<'static>> {
     macro_rules! sep {
         () => {
             if !spans.is_empty() {
-                spans.push(Span::styled(" · ".to_string(), Style::default().fg(theme.dim)));
+                spans.push(Span::styled(
+                    " · ".to_string(),
+                    Style::default().fg(theme.dim),
+                ));
             }
         };
     }
@@ -775,7 +822,10 @@ fn footer_identity_spans(app: &App, budget: u16) -> Vec<Span<'static>> {
     }
     if show_model {
         sep!();
-        spans.push(Span::styled(app.status.model.clone(), Style::default().fg(theme.fg)));
+        spans.push(Span::styled(
+            app.status.model.clone(),
+            Style::default().fg(theme.fg),
+        ));
     }
     spans
 }

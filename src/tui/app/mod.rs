@@ -397,9 +397,7 @@ impl App {
             // expand/collapse on the card. Falls through to submit
             // when input has content (so a focused card doesn't
             // hijack the natural prompt-submit flow).
-            KeyCode::Enter
-                if self.focused_card_idx.is_some() && self.is_input_empty() =>
-            {
+            KeyCode::Enter if self.focused_card_idx.is_some() && self.is_input_empty() => {
                 self.toggle_focused_card_expanded();
             }
             KeyCode::Enter => return self.submit(),
@@ -672,12 +670,7 @@ impl App {
         // position first, then delete the typed prefix forward,
         // then insert the replacement.
         let (row, col) = self.input.cursor();
-        let line = self
-            .input
-            .lines()
-            .get(row)
-            .cloned()
-            .unwrap_or_default();
+        let line = self.input.lines().get(row).cloned().unwrap_or_default();
         let cursor_byte = line
             .char_indices()
             .nth(col)
@@ -707,7 +700,11 @@ impl App {
     fn detect_completion_context(&self) -> Option<CompletionContext> {
         let (row, col) = self.input.cursor();
         let line = self.input.lines().get(row)?;
-        let cursor_byte = line.char_indices().nth(col).map(|(b, _)| b).unwrap_or(line.len());
+        let cursor_byte = line
+            .char_indices()
+            .nth(col)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
         completion::detect(line, cursor_byte, row == 0)
     }
 
@@ -772,4 +769,3 @@ fn ta_input(key: KeyEvent) -> Input {
 
 #[cfg(test)]
 mod tests;
-

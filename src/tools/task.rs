@@ -207,12 +207,7 @@ mod tests {
         struct NoCall;
         #[async_trait]
         impl SubagentSpawner for NoCall {
-            async fn spawn(
-                &self,
-                _: &str,
-                _: usize,
-                _: Option<ToolContext>,
-            ) -> Result<String> {
+            async fn spawn(&self, _: &str, _: usize, _: Option<ToolContext>) -> Result<String> {
                 unreachable!("spawner must not be invoked when args invalid")
             }
         }
@@ -230,10 +225,7 @@ mod tests {
         let spawner = Arc::new(StubSpawner::new(&big));
         let task = Task::new(spawner);
         let ctx = ToolContext::new();
-        let out = task
-            .run(json!({"prompt": "go"}), &ctx)
-            .await
-            .unwrap();
+        let out = task.run(json!({"prompt": "go"}), &ctx).await.unwrap();
         assert!(
             out.contains("[... output truncated"),
             "expected truncation marker, got first 100 chars: {}",
@@ -254,10 +246,7 @@ mod tests {
         let ctx = ToolContext::new();
         // Cap above the answer length: nothing truncated.
         let out = task
-            .run(
-                json!({"prompt": "go", "max_result_bytes": 20_000}),
-                &ctx,
-            )
+            .run(json!({"prompt": "go", "max_result_bytes": 20_000}), &ctx)
             .await
             .unwrap();
         assert_eq!(out, answer);
@@ -268,12 +257,7 @@ mod tests {
         struct Failing;
         #[async_trait]
         impl SubagentSpawner for Failing {
-            async fn spawn(
-                &self,
-                _: &str,
-                _: usize,
-                _: Option<ToolContext>,
-            ) -> Result<String> {
+            async fn spawn(&self, _: &str, _: usize, _: Option<ToolContext>) -> Result<String> {
                 Err(crate::error::AgentError::Provider("boom".into()))
             }
         }

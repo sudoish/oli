@@ -151,5 +151,3 @@ pub fn approval_response_for(index: usize) -> ApprovalResponse {
         _ => ApprovalResponse::AlwaysDeny,
     }
 }
-
-

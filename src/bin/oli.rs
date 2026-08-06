@@ -10,9 +10,7 @@ use std::sync::Arc;
 
 use oli::agent::Agent;
 use oli::agent::context::SystemPromptBuilder;
-use oli::bootstrap::{
-    DefaultAgentSpawner, build_default_tools, build_memory, resolve_session_id,
-};
+use oli::bootstrap::{DefaultAgentSpawner, build_default_tools, build_memory, resolve_session_id};
 use oli::config::Config;
 use oli::error::Result;
 use oli::policy::{AlwaysDeny, ConfigPolicy, ReadlineApprover};
@@ -203,9 +201,7 @@ async fn ollama_post_init(
     provider: oli::wizard_init::WizardProvider,
     auto_pull: bool,
 ) -> Result<()> {
-    use oli::wizard_init::{
-        OllamaProbe, PullEvent, has_pulled_model, probe_ollama, pull_model,
-    };
+    use oli::wizard_init::{OllamaProbe, PullEvent, has_pulled_model, probe_ollama, pull_model};
     use std::io::Write;
     use std::time::Duration;
 
@@ -223,11 +219,7 @@ async fn ollama_post_init(
                 stdout,
                 "    install:  https://ollama.com/download   (then `ollama serve`)"
             );
-            let _ = writeln!(
-                stdout,
-                "    once running:  ollama pull {}",
-                model
-            );
+            let _ = writeln!(stdout, "    once running:  ollama pull {}", model);
             return Ok(());
         }
         OllamaProbe::Up { models } => {
@@ -255,14 +247,22 @@ async fn ollama_post_init(
         return Ok(());
     }
 
-    let _ = writeln!(stdout, "Pulling {} (this can take a few minutes) ...", model);
+    let _ = writeln!(
+        stdout,
+        "Pulling {} (this can take a few minutes) ...",
+        model
+    );
     let _ = stdout.flush();
     let mut last_pct: i32 = -1;
     pull_model(base_url, model, |ev| match ev {
         PullEvent::Phase(p) => {
             let _ = writeln!(std::io::stdout(), "  · {}", p);
         }
-        PullEvent::Progress { phase, completed, total } => {
+        PullEvent::Progress {
+            phase,
+            completed,
+            total,
+        } => {
             let pct = ((completed as f64 / total as f64) * 100.0) as i32;
             if pct != last_pct {
                 last_pct = pct;
@@ -315,18 +315,14 @@ fn prompt_provider() -> Result<oli::wizard_init::WizardProvider> {
         .lock()
         .read_line(&mut line)
         .map_err(|e| oli::error::AgentError::Config(format!("stdin read failed: {}", e)))?;
-    let idx: usize = line.trim().parse().map_err(|_| {
-        oli::error::AgentError::Config(format!("`{}` is not 1-3", line.trim()))
-    })?;
+    let idx: usize = line
+        .trim()
+        .parse()
+        .map_err(|_| oli::error::AgentError::Config(format!("`{}` is not 1-3", line.trim())))?;
     WizardProvider::all()
         .get(idx.wrapping_sub(1))
         .copied()
-        .ok_or_else(|| {
-            oli::error::AgentError::Config(format!(
-                "choice {} out of range (1-3)",
-                idx
-            ))
-        })
+        .ok_or_else(|| oli::error::AgentError::Config(format!("choice {} out of range (1-3)", idx)))
 }
 
 fn prompt_api_key(provider: oli::wizard_init::WizardProvider) -> Result<String> {
@@ -524,18 +520,11 @@ async fn run(args: Args) -> Result<()> {
                         .map(tui::ViewportChoice::parse)
                         .unwrap_or_default();
                     let caps = tui::caps::Capabilities::detect();
-                    let viewport =
-                        tui::resolve_mode(flag, cfg_choice, caps.auto_viewport());
-                    let mouse =
-                        tui::resolve_mouse(cfg.ui.mouse, caps.mouse, viewport);
-                    let osc52 = tui::caps::resolve_osc52(
-                        cfg.ui.osc52.as_deref(),
-                        caps.osc52,
-                    );
+                    let viewport = tui::resolve_mode(flag, cfg_choice, caps.auto_viewport());
+                    let mouse = tui::resolve_mouse(cfg.ui.mouse, caps.mouse, viewport);
+                    let osc52 = tui::caps::resolve_osc52(cfg.ui.osc52.as_deref(), caps.osc52);
                     let host_hint = caps.host.clone();
-                    let theme = tui::theme::load(
-                        cfg.ui.theme.as_deref().unwrap_or("dark"),
-                    );
+                    let theme = tui::theme::load(cfg.ui.theme.as_deref().unwrap_or("dark"));
                     return tui::run(
                         agent,
                         plugin_slashes,

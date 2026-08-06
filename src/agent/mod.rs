@@ -402,14 +402,18 @@ impl Agent {
             let resp = self.provider.chat_stream(req, sink_dyn).await?;
             if let Some(u) = resp.usage {
                 self.last_usage = Some(u);
-                self.session_usage.prompt_tokens =
-                    self.session_usage.prompt_tokens.saturating_add(u.prompt_tokens);
+                self.session_usage.prompt_tokens = self
+                    .session_usage
+                    .prompt_tokens
+                    .saturating_add(u.prompt_tokens);
                 self.session_usage.completion_tokens = self
                     .session_usage
                     .completion_tokens
                     .saturating_add(u.completion_tokens);
-                self.session_usage.total_tokens =
-                    self.session_usage.total_tokens.saturating_add(u.total_tokens);
+                self.session_usage.total_tokens = self
+                    .session_usage
+                    .total_tokens
+                    .saturating_add(u.total_tokens);
             }
 
             // Models without native tool-call support sometimes emit calls
@@ -1341,8 +1345,7 @@ mod tests {
         let mut hooks = HookRegistry::new();
         hooks.register(Injector);
 
-        let mut agent =
-            Agent::new(Box::new(provider), tools, "m".into()).with_hooks(hooks);
+        let mut agent = Agent::new(Box::new(provider), tools, "m".into()).with_hooks(hooks);
         agent.run("hi").await.unwrap();
 
         let saw = seen_args.lock().unwrap().clone().expect("tool ran");
@@ -1409,10 +1412,7 @@ mod tests {
             }
             async fn handle(&self, p: &HookPayload<'_>) -> HookOutcome {
                 if let HookPayload::Stop { final_content } = p {
-                    HookOutcome::Replace(Value::String(format!(
-                        "[audited] {}",
-                        final_content
-                    )))
+                    HookOutcome::Replace(Value::String(format!("[audited] {}", final_content)))
                 } else {
                     HookOutcome::Continue
                 }
@@ -1422,8 +1422,8 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("done")]);
         let mut hooks = HookRegistry::new();
         hooks.register(Auditor);
-        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
-            .with_hooks(hooks);
+        let mut agent =
+            Agent::new(Box::new(provider), Registry::new(), "m".into()).with_hooks(hooks);
         let out = agent.run("hi").await.unwrap();
         assert_eq!(out, "[audited] done");
     }

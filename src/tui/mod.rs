@@ -43,8 +43,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{
-    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent,
-    MouseEventKind,
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use futures::StreamExt;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
@@ -125,9 +124,7 @@ pub async fn run(
         while let Some(Ok(ev)) = events.next().await {
             match ev {
                 CtEvent::Key(k) => {
-                    if k.kind != KeyEventKind::Release
-                        && input_tx.send(UiEvent::Key(k)).is_err()
-                    {
+                    if k.kind != KeyEventKind::Release && input_tx.send(UiEvent::Key(k)).is_err() {
                         break;
                     }
                 }
@@ -179,9 +176,9 @@ pub async fn run(
         flush_committed(&mut guard, &mut app)?;
     }
     guard
-            .terminal_mut()
-            .draw(|f| ui::draw(f, &mut app))
-            .map_err(io_err)?;
+        .terminal_mut()
+        .draw(|f| ui::draw(f, &mut app))
+        .map_err(io_err)?;
 
     let frame_budget = Duration::from_millis(16); // ~60fps ceiling
     loop {
@@ -250,11 +247,9 @@ fn handle_event(
             name,
             accumulated_json,
         } => app.on_tool_args_chunk(provider_tool_id, name, accumulated_json),
-        UiEvent::ApprovalRequested {
-            tool,
-            args,
-            reason,
-        } => app.on_approval_requested(tool, args, reason),
+        UiEvent::ApprovalRequested { tool, args, reason } => {
+            app.on_approval_requested(tool, args, reason)
+        }
         UiEvent::UsageUpdate { last, session } => app.update_usage(last, session),
         UiEvent::UndoApplied {
             prompt_body,
@@ -315,9 +310,7 @@ fn handle_event(
                         completed,
                         total,
                     },
-                    crate::wizard_init::PullEvent::Done => {
-                        crate::tui::wizard::PullStatus::Done
-                    }
+                    crate::wizard_init::PullEvent::Done => crate::tui::wizard::PullStatus::Done,
                     crate::wizard_init::PullEvent::Error(msg) => {
                         crate::tui::wizard::PullStatus::Failed(msg)
                     }
@@ -712,7 +705,10 @@ mod tests {
     #[test]
     fn base64_encode_handles_full_blocks() {
         assert_eq!(base64_encode(b"Man"), "TWFu");
-        assert_eq!(base64_encode(b"Many hands make light work."), "TWFueSBoYW5kcyBtYWtlIGxpZ2h0IHdvcmsu");
+        assert_eq!(
+            base64_encode(b"Many hands make light work."),
+            "TWFueSBoYW5kcyBtYWtlIGxpZ2h0IHdvcmsu"
+        );
     }
 
     #[test]
@@ -906,10 +902,8 @@ fn handle_wizard_key(
             }
             KeyCode::Char('p') | KeyCode::Char('P') => {
                 let w = app.wizard_mut().unwrap();
-                if matches!(
-                    w.pull,
-                    PullStatus::Idle | PullStatus::Failed(_)
-                ) && matches!(w.daemon, DaemonStatus::Up { .. })
+                if matches!(w.pull, PullStatus::Idle | PullStatus::Failed(_))
+                    && matches!(w.daemon, DaemonStatus::Up { .. })
                 {
                     let base = w.current_provider().base_url().to_string();
                     let model = w.current_provider().default_model().to_string();
@@ -965,25 +959,15 @@ fn handle_wizard_key(
     }
 }
 
-fn spawn_ollama_probe(
-    ui_tx: mpsc::UnboundedSender<UiEvent>,
-    base_url: String,
-) {
+fn spawn_ollama_probe(ui_tx: mpsc::UnboundedSender<UiEvent>, base_url: String) {
     tokio::spawn(async move {
-        let probe = crate::wizard_init::probe_ollama(
-            &base_url,
-            std::time::Duration::from_secs(2),
-        )
-        .await;
+        let probe =
+            crate::wizard_init::probe_ollama(&base_url, std::time::Duration::from_secs(2)).await;
         let _ = ui_tx.send(UiEvent::WizardOllamaProbed(probe));
     });
 }
 
-fn spawn_ollama_pull(
-    ui_tx: mpsc::UnboundedSender<UiEvent>,
-    base_url: String,
-    model: String,
-) {
+fn spawn_ollama_pull(ui_tx: mpsc::UnboundedSender<UiEvent>, base_url: String, model: String) {
     tokio::spawn(async move {
         let tx = ui_tx.clone();
         let result = crate::wizard_init::pull_model(&base_url, &model, move |ev| {
@@ -1151,11 +1135,7 @@ fn flush_committed(guard: &mut TerminalGuard, app: &mut App) -> Result<()> {
     if new_committed <= app.committed {
         return Ok(());
     }
-    let width = guard
-        .terminal_mut()
-        .size()
-        .map(|s| s.width)
-        .unwrap_or(80);
+    let width = guard.terminal_mut().size().map(|s| s.width).unwrap_or(80);
     let (lines, height) = ui::committed_scrollback(app, width, app.committed..new_committed);
     if height > 0 {
         guard

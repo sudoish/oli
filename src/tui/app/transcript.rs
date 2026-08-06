@@ -47,7 +47,9 @@ pub enum ToolCardState {
         provider_tool_id: String,
         accumulated_json: String,
     },
-    Running { started_at: Instant },
+    Running {
+        started_at: Instant,
+    },
     Done {
         duration: Duration,
         summary: String,
@@ -137,8 +139,7 @@ impl App {
 
     pub fn on_tool_start(&mut self, id: u64, tool: String, args_preview: String) {
         if let Some(idx) = self.active_assistant.take() {
-            if let Some(TranscriptItem::Assistant { done, body, .. }) =
-                self.transcript.get_mut(idx)
+            if let Some(TranscriptItem::Assistant { done, body, .. }) = self.transcript.get_mut(idx)
             {
                 if !body.is_empty() {
                     *done = true;
@@ -159,22 +160,24 @@ impl App {
         // Streaming card; sequential tool dispatch within a turn
         // makes that unambiguous, the same pattern `TuiHook` uses for
         // Pre/Post correlation.
-        let streaming_idx = self
-            .transcript
-            .iter()
-            .enumerate()
-            .rev()
-            .find_map(|(i, item)| match item {
-                TranscriptItem::ToolCard {
-                    tool: t,
-                    state: ToolCardState::Streaming { .. },
-                    ..
-                } if t == &tool => Some(i),
-                _ => None,
-            });
+        let streaming_idx =
+            self.transcript
+                .iter()
+                .enumerate()
+                .rev()
+                .find_map(|(i, item)| match item {
+                    TranscriptItem::ToolCard {
+                        tool: t,
+                        state: ToolCardState::Streaming { .. },
+                        ..
+                    } if t == &tool => Some(i),
+                    _ => None,
+                });
         if let Some(idx) = streaming_idx {
             if let Some(TranscriptItem::ToolCard {
-                state, args_preview: ap, ..
+                state,
+                args_preview: ap,
+                ..
             }) = self.transcript.get_mut(idx)
             {
                 *state = ToolCardState::Running { started_at };
@@ -209,8 +212,7 @@ impl App {
         // item so the streaming card renders as a sibling, not an
         // appendage of in-progress text. Same shape as on_tool_start.
         if let Some(idx) = self.active_assistant.take() {
-            if let Some(TranscriptItem::Assistant { done, body, .. }) =
-                self.transcript.get_mut(idx)
+            if let Some(TranscriptItem::Assistant { done, body, .. }) = self.transcript.get_mut(idx)
             {
                 if !body.is_empty() {
                     *done = true;
@@ -224,7 +226,11 @@ impl App {
             .rev()
             .find_map(|item| match item {
                 TranscriptItem::ToolCard {
-                    state: ToolCardState::Streaming { provider_tool_id: pid, accumulated_json: acc },
+                    state:
+                        ToolCardState::Streaming {
+                            provider_tool_id: pid,
+                            accumulated_json: acc,
+                        },
                     ..
                 } if pid == &provider_tool_id => Some(acc),
                 _ => None,
@@ -282,7 +288,10 @@ impl App {
         // Codex-style separator: only turns that did real work
         // (≥ 1 tool card since the last user prompt) earn the rule.
         if self.turn_since_last_prompt_ran_tools() {
-            let elapsed = self.turn_started_at.map(|t| t.elapsed()).unwrap_or_default();
+            let elapsed = self
+                .turn_started_at
+                .map(|t| t.elapsed())
+                .unwrap_or_default();
             self.transcript.push(TranscriptItem::TurnRule { elapsed });
             self.note_arrival(1);
         }
@@ -302,8 +311,7 @@ impl App {
 
     pub fn on_turn_error(&mut self, msg: &str) {
         if let Some(idx) = self.active_assistant.take() {
-            if let Some(TranscriptItem::Assistant { done, body, .. }) =
-                self.transcript.get_mut(idx)
+            if let Some(TranscriptItem::Assistant { done, body, .. }) = self.transcript.get_mut(idx)
             {
                 if body.is_empty() {
                     *body = format!("(error: {})", msg);
@@ -320,8 +328,7 @@ impl App {
 
     pub fn on_turn_cancelled(&mut self) {
         if let Some(idx) = self.active_assistant.take() {
-            if let Some(TranscriptItem::Assistant { done, body, .. }) =
-                self.transcript.get_mut(idx)
+            if let Some(TranscriptItem::Assistant { done, body, .. }) = self.transcript.get_mut(idx)
             {
                 if body.is_empty() {
                     *body = "(cancelled before any output)".into();

@@ -138,10 +138,7 @@ fn apply_anthropic_cache_breakpoints(payload: &mut Value) {
     if let Some(tools) = payload.get_mut("tools").and_then(|t| t.as_array_mut()) {
         if let Some(last) = tools.last_mut() {
             if let Some(obj) = last.as_object_mut() {
-                obj.insert(
-                    "cache_control".to_string(),
-                    json!({"type": "ephemeral"}),
-                );
+                obj.insert("cache_control".to_string(), json!({"type": "ephemeral"}));
             }
         }
     }
@@ -183,11 +180,7 @@ impl Provider for OpenAICompatProvider {
         }
 
         let response: Value = serde_json::from_slice(&bytes).map_err(|e| {
-            AgentError::Provider(format!(
-                "parse response ({}B): {}",
-                bytes.len(),
-                e
-            ))
+            AgentError::Provider(format!("parse response ({}B): {}", bytes.len(), e))
         })?;
 
         // OpenRouter sometimes returns 200 OK with an `error` object in
@@ -461,7 +454,10 @@ fn format_embedded_error(err: &Value) -> String {
         .and_then(|m| m.get("raw"))
         .and_then(|v| v.as_str())
     {
-        let one_line: String = raw.chars().map(|c| if c == '\n' { ' ' } else { c }).collect();
+        let one_line: String = raw
+            .chars()
+            .map(|c| if c == '\n' { ' ' } else { c })
+            .collect();
         out.push_str(&format!(" — raw: {}", one_line));
     }
     out
@@ -482,7 +478,11 @@ mod tests {
     #[test]
     fn cache_strategy_resolve_none_or_empty_disables() {
         assert_eq!(
-            CacheStrategy::resolve(Some("none"), "https://openrouter.ai", "anthropic/claude-haiku"),
+            CacheStrategy::resolve(
+                Some("none"),
+                "https://openrouter.ai",
+                "anthropic/claude-haiku"
+            ),
             CacheStrategy::None
         );
         assert_eq!(
@@ -494,7 +494,11 @@ mod tests {
     #[test]
     fn cache_strategy_auto_detects_openrouter_routes_to_claude() {
         assert_eq!(
-            CacheStrategy::resolve(None, "https://openrouter.ai/api/v1", "anthropic/claude-haiku-4.5"),
+            CacheStrategy::resolve(
+                None,
+                "https://openrouter.ai/api/v1",
+                "anthropic/claude-haiku-4.5"
+            ),
             CacheStrategy::Anthropic
         );
         assert_eq!(
@@ -599,7 +603,11 @@ mod tests {
             "expected upstream tag: {}",
             msg
         );
-        assert!(msg.contains("rate-limited upstream"), "expected raw: {}", msg);
+        assert!(
+            msg.contains("rate-limited upstream"),
+            "expected raw: {}",
+            msg
+        );
     }
 
     #[test]

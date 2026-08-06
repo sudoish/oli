@@ -190,7 +190,13 @@ impl PluginReloader {
     pub async fn reload(&self) -> LoadedPlugins {
         let mut out = LoadedPlugins::default();
         for dir in &self.dirs {
-            load_dir(dir, self.tools_for_host.clone(), self.spawner.clone(), &mut out).await;
+            load_dir(
+                dir,
+                self.tools_for_host.clone(),
+                self.spawner.clone(),
+                &mut out,
+            )
+            .await;
         }
         out
     }
@@ -414,10 +420,7 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
                     "debug" => crate::diagnostics::Level::Debug,
                     _ => crate::diagnostics::Level::Info,
                 };
-                crate::diagnostics::push(
-                    lvl,
-                    format!("[plugin:{}] {} {}", plugin_id, level, msg),
-                );
+                crate::diagnostics::push(lvl, format!("[plugin:{}] {} {}", plugin_id, level, msg));
                 Ok(())
             })?;
         ctx.set("log", log)?;
@@ -822,8 +825,7 @@ where
     let counter_hook = counter.clone();
     let triggers = HookTriggers::new().every_nth_instruction(HOOK_INSTRUCTION_INTERVAL);
     lua.set_hook(triggers, move |_lua, _debug| {
-        let prior =
-            counter_hook.fetch_add(HOOK_INSTRUCTION_INTERVAL as usize, Ordering::Relaxed);
+        let prior = counter_hook.fetch_add(HOOK_INSTRUCTION_INTERVAL as usize, Ordering::Relaxed);
         if prior >= PLUGIN_INSTRUCTION_BUDGET {
             return Err(mlua::Error::RuntimeError(format!(
                 "plugin exceeded execution budget ({} instructions)",
@@ -1223,7 +1225,11 @@ return p
 
         // The good plugin still loads; the loopy one is skipped.
         let names: Vec<&str> = out.manifest.iter().map(|m| m.name.as_str()).collect();
-        assert!(names.contains(&"ok"), "expected `ok` to load; got {:?}", names);
+        assert!(
+            names.contains(&"ok"),
+            "expected `ok` to load; got {:?}",
+            names
+        );
         assert!(
             !names.contains(&"loopy-load"),
             "loopy-load should have been skipped"
@@ -1470,10 +1476,7 @@ return p
             args: &json!({}),
             result: "nothing sensitive here",
         };
-        assert!(matches!(
-            hook.handle(&clean).await,
-            HookOutcome::Continue
-        ));
+        assert!(matches!(hook.handle(&clean).await, HookOutcome::Continue));
 
         // Non-Bash tool output passes through even if it contains a
         // key-shaped string — e.g. the model reading a sample config.

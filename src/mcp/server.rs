@@ -101,20 +101,18 @@ impl McpServer {
     }
 
     async fn try_connect_stdio(&mut self) -> Result<()> {
-        let command = self
-            .cfg
-            .command
-            .as_ref()
-            .ok_or_else(|| AgentError::Config(format!("mcp `{}`: missing `command`", self.name)))?;
+        let command =
+            self.cfg.command.as_ref().ok_or_else(|| {
+                AgentError::Config(format!("mcp `{}`: missing `command`", self.name))
+            })?;
         let host_env = env_snapshot();
         // Expand `${VAR}` in env values now so a missing var fails the
         // server cleanly instead of silently passing an unsubstituted
         // template through to the child.
         let mut expanded_env = std::collections::HashMap::new();
         for (k, v) in &self.cfg.env {
-            let expanded = expand_env_vars(v, &host_env).map_err(|e| {
-                AgentError::Config(format!("mcp `{}` env {}: {}", self.name, k, e))
-            })?;
+            let expanded = expand_env_vars(v, &host_env)
+                .map_err(|e| AgentError::Config(format!("mcp `{}` env {}: {}", self.name, k, e)))?;
             expanded_env.insert(k.clone(), expanded);
         }
 
@@ -648,10 +646,7 @@ for line in iter(sys.stdin.readline, ''):
 
         // Trigger the server to push a list_changed notification.
         // `nudge` makes it emit the notification then respond.
-        let _ = server
-            .call_tool("nudge", json!({}))
-            .await
-            .expect("nudge");
+        let _ = server.call_tool("nudge", json!({})).await.expect("nudge");
 
         // Give the reader task a tick to ingest the notification.
         // 100ms is generous; it's a single line on a stdio buffer.

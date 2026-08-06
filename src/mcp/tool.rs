@@ -68,7 +68,10 @@ impl Tool for McpTool {
 /// `isError: true` results are prefixed so the model knows the call
 /// failed semantically (vs. transport-level failure).
 fn format_tool_result(result: &Value) -> String {
-    let is_error = result.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_error = result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let content = result.get("content").and_then(|v| v.as_array());
     let text = match content {
         Some(blocks) => {

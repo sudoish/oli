@@ -43,6 +43,14 @@ eventsource-stream = "0.2"
 similar = "2"
 libc = "0.2.186"
 nucleo-matcher = "0.3"
+# ChatGPT-subscription OAuth (`src/auth/`): PKCE S256 challenge, the
+# base64url-nopad alphabet shared by PKCE + JWT payloads, and a CSPRNG
+# for the code verifier / `state` nonce. Deliberately kept to three
+# small crates — percent-encoding, XDG lookup and clock arithmetic are
+# hand-rolled against `std` rather than pulling `url`/`dirs`/`chrono`.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"
 
 # Optional: gated behind feature flags above.
 # `unstable-rendered-line-info` exposes `Paragraph::line_count`, used to

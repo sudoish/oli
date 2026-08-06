@@ -1062,7 +1062,10 @@ fn render_paths(agent: &Agent) -> String {
 
 fn push_path(out: &mut String, label: &str, path: Option<&std::path::Path>) {
     let Some(p) = path else {
-        out.push_str(&format!("  {:<18} (no $HOME / $XDG_CONFIG_HOME)\n", format!("{}:", label)));
+        out.push_str(&format!(
+            "  {:<18} (no $HOME / $XDG_CONFIG_HOME)\n",
+            format!("{}:", label)
+        ));
         return;
     };
     let mark = if p.exists() { "" } else { "  (not present)" };
@@ -1866,7 +1869,9 @@ return p
             let trimmed = line.trim_end();
             let already_marked = trimmed.ends_with("(not present)");
             // Heuristic: extract the substring after the label colon.
-            let Some(colon) = line.find(':') else { continue };
+            let Some(colon) = line.find(':') else {
+                continue;
+            };
             let rest = line[colon + 1..].trim();
             // Skip the env-missing fallback message.
             if rest.starts_with('(') {

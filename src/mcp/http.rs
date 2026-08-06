@@ -176,11 +176,15 @@ impl McpTransport for HttpTransport {
 /// `id` matches `expected_id`. Other messages (server-initiated
 /// notifications, requests, log events) are dropped — v1 doesn't
 /// surface them to the agent.
-async fn parse_sse_for_id(resp: reqwest::Response, expected_id: i64, method: &str) -> Result<Value> {
+async fn parse_sse_for_id(
+    resp: reqwest::Response,
+    expected_id: i64,
+    method: &str,
+) -> Result<Value> {
     let mut stream = resp.bytes_stream().eventsource();
     while let Some(event) = stream.next().await {
-        let event = event
-            .map_err(|e| AgentError::Provider(format!("mcp http {} SSE: {}", method, e)))?;
+        let event =
+            event.map_err(|e| AgentError::Provider(format!("mcp http {} SSE: {}", method, e)))?;
         let parsed: Value = match serde_json::from_str(&event.data) {
             Ok(v) => v,
             Err(_) => continue,
@@ -305,9 +309,7 @@ mod tests {
     }
 
     fn find_subseq(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-        haystack
-            .windows(needle.len())
-            .position(|w| w == needle)
+        haystack.windows(needle.len()).position(|w| w == needle)
     }
 
     fn json_response(body: &str) -> Vec<u8> {
@@ -352,10 +354,9 @@ mod tests {
 
     #[tokio::test]
     async fn unary_json_response_returns_result() {
-        let (addr, _join) = fake_server(|_body| {
-            json_response(r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#)
-        })
-        .await;
+        let (addr, _join) =
+            fake_server(|_body| json_response(r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#))
+                .await;
         let url = format!("http://{}", addr);
         let t = HttpTransport::new(url, HashMap::new());
         let result = t.request("ping", json!({})).await.expect("request");

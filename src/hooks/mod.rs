@@ -238,7 +238,12 @@ mod tests {
         assert_eq!(
             recorded,
             vec![
-                "pre:Read", "pre:Read", "post:Read:ok", "post:Read:ok", "stop:done", "stop:done",
+                "pre:Read",
+                "pre:Read",
+                "post:Read:ok",
+                "post:Read:ok",
+                "stop:done",
+                "stop:done",
             ]
         );
     }

@@ -469,12 +469,7 @@ impl App {
         }
     }
 
-    pub fn on_approval_requested(
-        &mut self,
-        tool: String,
-        args: serde_json::Value,
-        reason: String,
-    ) {
+    pub fn on_approval_requested(&mut self, tool: String, args: serde_json::Value, reason: String) {
         self.overlay = Some(Overlay::Approval(ApprovalState {
             preview: crate::policy::preview_for(&tool, &args),
             tool,
