@@ -16,6 +16,8 @@
 //! - [`listener`] — loopback HTTP listener for the browser redirect.
 //! - [`login`] — orchestration behind `oli login`.
 //! - [`device`] — the headless path, `oli login --device-auth`.
+//! - [`session`] — live credentials for the request path, refreshing
+//!   before expiry so callers never see a token lifecycle.
 //!
 //! # Protocol
 //!
@@ -50,6 +52,7 @@ pub mod listener;
 pub mod login;
 pub mod oauth;
 pub mod pkce;
+pub mod session;
 pub mod store;
 pub mod token;
 

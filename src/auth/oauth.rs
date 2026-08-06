@@ -146,6 +146,104 @@ async fn post_token_endpoint(
     })
 }
 
+/// Why a refresh failed, and whether retrying could ever help.
+///
+/// The distinction drives behaviour, not just wording: a transient
+/// failure with an access token that still has life left in it is
+/// survivable and the session continues, while a permanent one means
+/// the stored bundle is dead and only `oli login` can fix it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefreshError {
+    /// The refresh token is gone for good — expired, reused, or
+    /// revoked. Re-authentication is the only path.
+    Permanent(String),
+    /// Network blip, 5xx, rate limit. Worth trying again later.
+    Transient(String),
+}
+
+impl std::fmt::Display for RefreshError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Permanent(m) | Self::Transient(m) => f.write_str(m),
+        }
+    }
+}
+
+impl RefreshError {
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::Permanent(_))
+    }
+}
+
+/// Decide whether a failed refresh is recoverable.
+///
+/// 401 and the three `refresh_token_*` error codes mean the credential
+/// itself is dead. Everything else — 500s, 429s, gateway HTML — is
+/// treated as transient, because guessing "permanent" would log the
+/// user out over a blip.
+pub fn classify_refresh_failure(status: u16, body: &str) -> RefreshError {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        #[serde(default)]
+        error: Option<String>,
+        #[serde(default)]
+        code: Option<String>,
+    }
+    let code = serde_json::from_str::<ErrorBody>(body)
+        .ok()
+        .and_then(|b| b.error.or(b.code))
+        .unwrap_or_default();
+
+    let message = describe_token_error(body);
+    match code.as_str() {
+        "refresh_token_expired" => {
+            RefreshError::Permanent(format!("your ChatGPT sign-in has expired ({message})"))
+        }
+        "refresh_token_reused" | "refresh_token_invalidated" => RefreshError::Permanent(format!(
+            "your ChatGPT sign-in is no longer valid ({message})"
+        )),
+        _ if status == 401 => RefreshError::Permanent(format!(
+            "OpenAI rejected the stored ChatGPT credentials ({message})"
+        )),
+        _ => RefreshError::Transient(format!("could not refresh (HTTP {status}): {message}")),
+    }
+}
+
+/// Trade a refresh token for a new access token.
+///
+/// Note the encoding: this grant posts **JSON**, unlike the
+/// authorization-code exchange above, which posts form data.
+pub async fn refresh_tokens(
+    http: &reqwest::Client,
+    issuer: &str,
+    client_id: &str,
+    previous: &Tokens,
+) -> std::result::Result<Tokens, RefreshError> {
+    let endpoint = format!("{}/oauth/token", issuer.trim_end_matches('/'));
+    let resp = http
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .json(&serde_json::json!({
+            "client_id": client_id,
+            "grant_type": "refresh_token",
+            "refresh_token": previous.refresh_token,
+        }))
+        .send()
+        .await
+        .map_err(|e| RefreshError::Transient(format!("could not reach {endpoint}: {e}")))?;
+
+    let status = resp.status().as_u16();
+    let body = resp.text().await.unwrap_or_default();
+    if !(200..300).contains(&status) {
+        return Err(classify_refresh_failure(status, &body));
+    }
+
+    let parsed: TokenResponse = serde_json::from_str(&body).map_err(|e| {
+        RefreshError::Transient(format!("refresh returned an unparseable response: {e}"))
+    })?;
+    Ok(parsed.into_tokens(Some(previous)))
+}
+
 /// Extract a human-readable message from a token-endpoint error body.
 ///
 /// The endpoint returns `{"error": "...", "error_description": "..."}`
@@ -464,5 +562,111 @@ mod tests {
 
         assert!(err.contains("could not reach"), "{err}");
         assert!(err.contains("API-key"), "{err}");
+    }
+
+    // ---- Refresh ---------------------------------------------------
+
+    #[test]
+    fn dead_refresh_tokens_are_classified_permanent() {
+        for code in [
+            "refresh_token_expired",
+            "refresh_token_reused",
+            "refresh_token_invalidated",
+        ] {
+            let body = format!(r#"{{"error":"{code}"}}"#);
+            assert!(
+                classify_refresh_failure(400, &body).is_permanent(),
+                "{code} should be permanent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_401_is_permanent() {
+        assert!(classify_refresh_failure(401, "{}").is_permanent());
+    }
+
+    #[test]
+    fn server_errors_are_transient_not_permanent() {
+        // Guessing "permanent" here would log the user out over a blip.
+        for status in [429, 500, 502, 503] {
+            assert!(
+                !classify_refresh_failure(status, "<html>oops</html>").is_permanent(),
+                "HTTP {status} should be transient"
+            );
+        }
+    }
+
+    #[test]
+    fn classification_reads_a_code_field_as_well_as_error() {
+        let by_code = classify_refresh_failure(400, r#"{"code":"refresh_token_expired"}"#);
+        assert!(by_code.is_permanent());
+    }
+
+    #[tokio::test]
+    async fn refresh_posts_json_and_keeps_the_old_refresh_token() {
+        let (issuer, served) = stub_once(200, r#"{"access_token":"new-at"}"#).await;
+        let previous = Tokens {
+            access_token: "old-at".into(),
+            refresh_token: "rt-1".into(),
+            id_token: "h.e30.s".into(),
+            account_id: Some("acct".into()),
+            last_refresh: Some(1),
+        };
+
+        let refreshed = refresh_tokens(&reqwest::Client::new(), &issuer, "c1", &previous)
+            .await
+            .unwrap();
+
+        assert_eq!(refreshed.access_token, "new-at");
+        // The response omitted refresh_token, meaning "keep yours".
+        assert_eq!(refreshed.refresh_token, "rt-1");
+        assert!(refreshed.last_refresh.unwrap() > 1);
+
+        let request = served.await.unwrap();
+        assert!(request.contains("application/json"), "{request}");
+        assert!(
+            request.contains("\"grant_type\":\"refresh_token\""),
+            "{request}"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_rotation_replaces_the_refresh_token() {
+        let (issuer, _served) =
+            stub_once(200, r#"{"access_token":"new-at","refresh_token":"rt-2"}"#).await;
+        let previous = Tokens {
+            refresh_token: "rt-1".into(),
+            ..Default::default()
+        };
+
+        let refreshed = refresh_tokens(&reqwest::Client::new(), &issuer, "c1", &previous)
+            .await
+            .unwrap();
+        assert_eq!(refreshed.refresh_token, "rt-2");
+    }
+
+    #[tokio::test]
+    async fn expired_refresh_token_surfaces_as_permanent() {
+        let (issuer, _served) = stub_once(
+            400,
+            r#"{"error":"refresh_token_expired","error_description":"too old"}"#,
+        )
+        .await;
+
+        let err = refresh_tokens(
+            &reqwest::Client::new(),
+            &issuer,
+            "c1",
+            &Tokens {
+                refresh_token: "rt".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(err.is_permanent());
+        assert!(err.to_string().contains("expired"), "{err}");
     }
 }
