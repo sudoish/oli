@@ -12,6 +12,9 @@
 //! - [`token`] — the persisted token bundle and JWT claim decoding
 //!   (`chatgpt_plan_type`, `chatgpt_account_id`, `exp`). Pure.
 //! - [`store`] — `auth.json` at mode 0600, next to `config.toml`.
+//! - [`oauth`] — authorize URL, code exchange, token-endpoint errors.
+//! - [`listener`] — loopback HTTP listener for the browser redirect.
+//! - [`login`] — orchestration behind `oli login`.
 //!
 //! # Protocol
 //!
@@ -41,6 +44,9 @@
 //! withdrawn without notice — which is why the error paths here are
 //! verbose rather than terse.
 
+pub mod listener;
+pub mod login;
+pub mod oauth;
 pub mod pkce;
 pub mod store;
 pub mod token;
@@ -114,6 +120,48 @@ pub fn form_encode(s: &str) -> String {
     out
 }
 
+/// Decode a percent-encoded query-string value. `+` becomes a space,
+/// per the `application/x-www-form-urlencoded` convention browsers use
+/// when building query strings.
+///
+/// Invalid escapes are passed through verbatim rather than rejected —
+/// this parses a redirect from a browser, and a mangled value is
+/// better surfaced downstream (as "state mismatch" or "no code") than
+/// as a parse error.
+pub fn form_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
+                    .ok()
+                    .and_then(|h| u8::from_str_radix(h, 16).ok());
+                match hex {
+                    Some(byte) => {
+                        out.push(byte);
+                        i += 3;
+                    }
+                    None => {
+                        out.push(bytes[i]);
+                        i += 1;
+                    }
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -177,5 +225,41 @@ mod tests {
     #[test]
     fn form_encode_handles_multibyte() {
         assert_eq!(form_encode("é"), "%C3%A9");
+    }
+
+    #[test]
+    fn form_decode_reverses_form_encode() {
+        for s in [
+            "plain",
+            "a b+c",
+            "http://localhost:1455/auth/callback",
+            "é",
+            "sk-abc_DEF-123.~",
+        ] {
+            assert_eq!(
+                form_decode(&form_encode(s)),
+                s,
+                "round trip failed for {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn form_decode_treats_plus_as_space() {
+        // Browsers emit `+` for spaces in query strings even though
+        // our encoder emits %20.
+        assert_eq!(form_decode("a+b"), "a b");
+    }
+
+    #[test]
+    fn form_decode_passes_through_invalid_escapes() {
+        assert_eq!(form_decode("100%"), "100%");
+        assert_eq!(form_decode("%zz"), "%zz");
+        assert_eq!(form_decode("%A"), "%A");
+    }
+
+    #[test]
+    fn form_decode_handles_multibyte_sequences() {
+        assert_eq!(form_decode("%C3%A9t%C3%A9"), "été");
     }
 }

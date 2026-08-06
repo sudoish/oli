@@ -117,6 +117,22 @@ enum Cmd {
         #[arg(long)]
         pull: bool,
     },
+
+    /// Sign in with a ChatGPT Plus/Pro subscription instead of an
+    /// OpenAI API key. Stores tokens in `~/.config/oli/auth.json`
+    /// (mode 0600) for use by a `kind = "openai-chatgpt"` provider.
+    ///
+    /// API-key auth is unaffected and remains the default — this is
+    /// an addition, not a replacement.
+    Login {
+        /// Print the sign-in URL instead of launching a browser.
+        /// Implied on a Linux session with no display.
+        #[arg(long)]
+        no_browser: bool,
+    },
+
+    /// Discard stored ChatGPT subscription credentials.
+    Logout,
 }
 
 #[tokio::main]
@@ -130,12 +146,59 @@ async fn main() {
             skip_ollama_check,
             pull,
         }) => init_command(provider, api_key, force, skip_ollama_check, pull).await,
+        Some(Cmd::Login { no_browser }) => login_command(no_browser).await,
+        Some(Cmd::Logout) => logout_command(),
         None => run(args).await,
     };
     if let Err(e) = result {
         eprintln!("{}", e);
         process::exit(1);
     }
+}
+
+/// `oli login`. Runs the ChatGPT subscription OAuth flow and stores
+/// the resulting tokens. Does not touch `config.toml` — pointing a
+/// provider at these credentials is a separate, explicit step, so
+/// logging in can never silently change how an existing config
+/// authenticates.
+async fn login_command(no_browser: bool) -> Result<()> {
+    use oli::auth::login::{LoginOptions, run as run_login};
+    use oli::auth::store::AuthStore;
+
+    let store = AuthStore::default_location()?;
+    let opts = LoginOptions {
+        open_browser: !no_browser,
+        ..LoginOptions::default()
+    };
+    run_login(&opts, &store).await?;
+
+    println!(
+        "\nTo use it, add a provider to your config:\n\n\
+         \x20 [providers.chatgpt]\n\
+         \x20 kind = \"openai-chatgpt\"\n\
+         \x20 base_url = \"https://chatgpt.com/backend-api/codex\"\n"
+    );
+    Ok(())
+}
+
+/// `oli logout`. Removes stored subscription credentials. Leaves
+/// config alone; a provider still pointed at `openai-chatgpt` will
+/// fail loudly and tell the user to log in again.
+fn logout_command() -> Result<()> {
+    use oli::auth::store::AuthStore;
+
+    let store = AuthStore::default_location()?;
+    let existed = store.exists();
+    store.clear()?;
+    if existed {
+        println!("Removed {}.", store.path().display());
+    } else {
+        println!(
+            "No stored ChatGPT credentials at {}.",
+            store.path().display()
+        );
+    }
+    Ok(())
 }
 
 /// Headless `oli init`. Writes the same config the TUI wizard
