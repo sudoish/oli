@@ -15,6 +15,7 @@
 //! - [`oauth`] — authorize URL, code exchange, token-endpoint errors.
 //! - [`listener`] — loopback HTTP listener for the browser redirect.
 //! - [`login`] — orchestration behind `oli login`.
+//! - [`device`] — the headless path, `oli login --device-auth`.
 //!
 //! # Protocol
 //!
@@ -44,6 +45,7 @@
 //! withdrawn without notice — which is why the error paths here are
 //! verbose rather than terse.
 
+pub mod device;
 pub mod listener;
 pub mod login;
 pub mod oauth;

@@ -127,8 +127,14 @@ enum Cmd {
     Login {
         /// Print the sign-in URL instead of launching a browser.
         /// Implied on a Linux session with no display.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "device_auth")]
         no_browser: bool,
+
+        /// Headless sign-in: shows a code to enter on another
+        /// device, with no local browser or callback port. Use this
+        /// over SSH.
+        #[arg(long)]
+        device_auth: bool,
     },
 
     /// Discard stored ChatGPT subscription credentials.
@@ -146,7 +152,10 @@ async fn main() {
             skip_ollama_check,
             pull,
         }) => init_command(provider, api_key, force, skip_ollama_check, pull).await,
-        Some(Cmd::Login { no_browser }) => login_command(no_browser).await,
+        Some(Cmd::Login {
+            no_browser,
+            device_auth,
+        }) => login_command(no_browser, device_auth).await,
         Some(Cmd::Logout) => logout_command(),
         None => run(args).await,
     };
@@ -161,16 +170,21 @@ async fn main() {
 /// provider at these credentials is a separate, explicit step, so
 /// logging in can never silently change how an existing config
 /// authenticates.
-async fn login_command(no_browser: bool) -> Result<()> {
+async fn login_command(no_browser: bool, device_auth: bool) -> Result<()> {
     use oli::auth::login::{LoginOptions, run as run_login};
     use oli::auth::store::AuthStore;
+    use oli::auth::{ISSUER, client_id};
 
     let store = AuthStore::default_location()?;
-    let opts = LoginOptions {
-        open_browser: !no_browser,
-        ..LoginOptions::default()
-    };
-    run_login(&opts, &store).await?;
+    if device_auth {
+        oli::auth::device::run(ISSUER, &client_id(), &store).await?;
+    } else {
+        let opts = LoginOptions {
+            open_browser: !no_browser,
+            ..LoginOptions::default()
+        };
+        run_login(&opts, &store).await?;
+    }
 
     println!(
         "\nTo use it, add a provider to your config:\n\n\
