@@ -9,6 +9,10 @@
 //!   `tool_use` blocks back to the agent loop.
 //! - [`openai_compat`] — OpenAI / OpenRouter / Ollama / vLLM /
 //!   anything that speaks OpenAI's `/chat/completions` shape.
+//! - [`openai_responses`] — ChatGPT Plus/Pro subscription auth. Not a
+//!   variant of the above: it speaks the Responses API against
+//!   `chatgpt.com/backend-api/codex` and authenticates with OAuth
+//!   tokens from `oli login` rather than an API key.
 //!
 //! `build()` is the factory the binary calls at startup: it reads
 //! `default_provider` from `Config`, instantiates the matching
@@ -28,6 +32,7 @@ use crate::error::{AgentError, Result};
 
 pub mod anthropic;
 pub mod openai_compat;
+pub mod openai_responses;
 
 /// Centralized provider factory. Mapping `kind -> impl Provider`
 /// lives here so adding a new provider doesn't require touching
@@ -67,9 +72,25 @@ pub fn build(cfg: &Config, provider_name: &str) -> Result<Box<dyn Provider>> {
                 api_key,
             )))
         }
+        // ChatGPT subscription auth. Note this deliberately does *not*
+        // call `resolve_api_key` — credentials come from `oli login`,
+        // and refresh has to happen per-request rather than once here.
+        // An empty `base_url` falls back to the subscription endpoint,
+        // so a minimal provider block is just `kind` plus a model.
+        "openai-chatgpt" => {
+            let base_url = if pcfg.base_url.trim().is_empty() {
+                crate::auth::CHATGPT_BASE_URL.to_string()
+            } else {
+                pcfg.base_url.clone()
+            };
+            let auth = crate::auth::session::ChatGptAuth::new()?;
+            Ok(Box::new(openai_responses::ResponsesProvider::new(
+                base_url, auth,
+            )))
+        }
         other => Err(AgentError::Config(format!(
             "unsupported provider kind '{other}' for '{provider_name}' \
-             (try 'openai-compat' or 'anthropic')"
+             (try 'openai-compat', 'anthropic', or 'openai-chatgpt')"
         ))),
     }
 }

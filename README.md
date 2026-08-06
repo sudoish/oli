@@ -218,6 +218,40 @@ supports_native_tool_calls      = true
 supports_streaming_tool_deltas  = true
 ```
 
+### Signing in with a ChatGPT subscription
+
+Instead of an OpenAI API key, oli can authenticate against a ChatGPT
+Plus/Pro subscription. API-key auth stays the default and is unaffected —
+this is an extra provider kind, not a replacement.
+
+```console
+$ oli login                 # opens a browser
+$ oli login --device-auth   # headless: shows a code to enter elsewhere
+$ oli logout                # discards the stored credentials
+```
+
+Tokens land in `~/.config/oli/auth.json` (mode 0600) and are refreshed
+automatically before they expire. Point a provider at them:
+
+```toml
+[providers.chatgpt]
+kind          = "openai-chatgpt"
+base_url      = "https://chatgpt.com/backend-api/codex"
+default_model = "gpt-5.1-codex"
+```
+
+Caveats worth knowing before you rely on it:
+
+- This endpoint speaks the **Responses API**, not Chat Completions. It is
+  a separate transport from `openai-compat`, not a flag on it.
+- Subscription auth is not a documented OpenAI feature and there is no
+  client registration for third-party CLIs, so oli presents the same
+  OAuth client id and `originator` as OpenAI's own CLI. Override with
+  `OLI_CHATGPT_CLIENT_ID` / `OLI_CHATGPT_ORIGINATOR` if you have your own.
+- OpenAI's tolerance for this is informal and could end. If it does,
+  every failure path names the API-key fallback explicitly rather than
+  failing cryptically.
+
 A more loaded config with multiple providers and a stricter policy:
 
 ```toml
