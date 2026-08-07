@@ -316,8 +316,6 @@ mod tests {
         ctx.insert_canonical_read(PathBuf::from("/tmp/replayed"))
             .await;
         assert_eq!(*count.lock().unwrap(), 0, "replay must not re-log");
-        assert!(ctx.was_read("/tmp/replayed").await || true);
-        // (`was_read` would re-canonicalize; we just care the logger wasn't poked.)
     }
 
     #[tokio::test]
