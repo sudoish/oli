@@ -776,6 +776,15 @@ fn sessions_picker_pick_returns_selected_id() {
 }
 
 #[test]
+fn model_picker_selects_the_active_model_and_navigates() {
+    let mut app = App::new();
+    app.open_model_picker(vec!["small".into(), "large".into()], "large");
+    assert_eq!(app.model_picker().unwrap().selected, 1);
+    app.model_picker_navigate(1);
+    assert_eq!(app.model_picker_pick(), Some("small".into()));
+}
+
+#[test]
 fn inline_help_pulls_description_from_slash_meta() {
     let mut app = App::new();
     app.set_slash_meta(vec![("cost".into(), "show token usage".into())]);

@@ -229,6 +229,8 @@ fn handle_event(
         UiEvent::TurnCancelled => app.on_turn_cancelled(),
         UiEvent::SystemNote(body) => app.on_system_note(body),
         UiEvent::SlashFinished => app.on_slash_finished(),
+        UiEvent::ModelsListed { models, error } => on_models_listed(app, models, error),
+        UiEvent::ModelChanged(model) => app.status.model = model,
         UiEvent::Quit => app.request_quit(),
         UiEvent::ToolStart {
             id,
@@ -339,6 +341,10 @@ fn on_key(
         }
         Some(Overlay::SessionsPicker(_)) => {
             handle_sessions_picker_key(app, key);
+            return;
+        }
+        Some(Overlay::ModelPicker(_)) => {
+            handle_model_picker_key(app, key, cmd_tx);
             return;
         }
         Some(Overlay::HelpBrowser(_)) => {
@@ -497,6 +503,10 @@ fn on_key(
             if trimmed == "sessions" {
                 let entries = collect_session_picker_rows();
                 app.open_sessions_picker(entries);
+                return;
+            }
+            if trimmed == "model" {
+                let _ = cmd_tx.send(AgentCommand::ListModels);
                 return;
             }
             if trimmed == "undo" {
@@ -779,6 +789,38 @@ mod tests {
     }
 
     #[test]
+    fn models_listed_opens_picker_sorted_and_deduped() {
+        let mut app = App::new();
+        app.status.model = "b".into();
+        on_models_listed(&mut app, vec!["c".into(), "a".into(), "c".into()], None);
+        let picker = app.model_picker().expect("picker should be open");
+        assert_eq!(picker.models, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn models_listed_empty_reports_instead_of_opening_picker() {
+        let mut app = App::new();
+        on_models_listed(&mut app, Vec::new(), Some("401 unauthorized".into()));
+        assert!(app.model_picker().is_none());
+    }
+
+    #[test]
+    fn model_picker_enter_dispatches_a_model_slash() {
+        use crossterm::event::KeyEvent;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.open_model_picker(vec!["small".into(), "large".into()], "small");
+        app.model_picker_navigate(1);
+        handle_model_picker_key(&mut app, KeyEvent::from(KeyCode::Enter), &cmd_tx);
+        assert!(app.model_picker().is_none());
+        match cmd_rx.try_recv() {
+            Ok(AgentCommand::Slash { line, .. }) => assert_eq!(line, "model large"),
+            _ => panic!("expected a `model large` slash command"),
+        }
+    }
+
+    #[test]
     fn copy_slash_without_assistant_messages_does_not_open_fallback() {
         // No transcript content → system note, no modal. Avoids an
         // empty modal that the user has to dismiss for no reason.
@@ -798,6 +840,45 @@ fn on_mouse(app: &mut App, m: MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollUp => app.scroll_wheel_up(3),
         MouseEventKind::ScrollDown => app.scroll_wheel_down(3),
+        _ => {}
+    }
+}
+
+fn on_models_listed(app: &mut App, mut models: Vec<String>, error: Option<String>) {
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        app.on_system_note(match error {
+            Some(error) => format!("could not list models: {}", error),
+            None => "provider doesn't expose a model list — use `/model <id>` to switch".into(),
+        });
+        return;
+    }
+    let active = app.status.model.clone();
+    app.open_model_picker(models, &active);
+}
+
+fn handle_model_picker_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+) {
+    match key.code {
+        KeyCode::Up => app.model_picker_navigate(-1),
+        KeyCode::Down => app.model_picker_navigate(1),
+        KeyCode::Esc => app.close_model_picker(),
+        KeyCode::Enter => {
+            let picked = app.model_picker_pick();
+            app.close_model_picker();
+            if let Some(model) = picked {
+                let (cancel_tx, cancel) = oneshot::channel();
+                app.set_cancel_sender(cancel_tx);
+                let _ = cmd_tx.send(AgentCommand::Slash {
+                    line: format!("model {}", model),
+                    cancel,
+                });
+            }
+        }
         _ => {}
     }
 }

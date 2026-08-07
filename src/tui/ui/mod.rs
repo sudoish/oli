@@ -81,6 +81,9 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         // Approval is handled above as a bottom pane, not a modal.
         Some(Overlay::Approval(_)) => {}
         Some(Overlay::SessionsPicker(s)) => overlays::draw_sessions_picker(f, area, s, &app.theme),
+        Some(Overlay::ModelPicker(s)) => {
+            overlays::draw_model_picker(f, area, s, &app.status.model, &app.theme)
+        }
         Some(Overlay::HelpBrowser(s)) => overlays::draw_help_browser(f, area, s, &app.theme),
         Some(Overlay::InlineHelp(s)) => overlays::draw_inline_help(f, area, s, &app.theme),
         Some(Overlay::HistorySearch(s)) => overlays::draw_history_search(f, area, s, app),

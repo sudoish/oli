@@ -15,7 +15,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wr
 
 use crate::tui::app::{
     APPROVAL_OPTIONS, App, ApprovalState, CopyFallbackState, HelpBrowserState, HistorySearchState,
-    InlineHelpState, SessionsPickerState,
+    InlineHelpState, ModelPickerState, SessionsPickerState,
 };
 use crate::tui::theme::Theme;
 use crate::tui::wizard::{DaemonStatus, PullStatus, WizardProvider, WizardState, WizardStep};
@@ -203,6 +203,64 @@ pub(super) fn draw_sessions_picker(
                 } else {
                     format!("  {}", row.label)
                 },
+                style,
+            ))
+        })
+        .collect();
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
+/// `/model` picker overlay. The active model is marked with a check.
+pub(super) fn draw_model_picker(
+    f: &mut Frame,
+    full_area: Rect,
+    picker: &ModelPickerState,
+    active_model: &str,
+    theme: &Theme,
+) {
+    let modal = centered_rect(full_area, 70, 60).intersection(full_area);
+    f.render_widget(Clear, modal);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme.dim))
+        .title(Line::from(Span::styled(
+            " /model  (↑↓ select · Enter switch · Esc close) ",
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+    let inner = block.inner(modal);
+    f.render_widget(block, modal);
+    let visible = inner.height as usize;
+    let start = picker
+        .selected
+        .saturating_sub(visible.saturating_sub(1))
+        .min(picker.models.len().saturating_sub(visible));
+    let lines: Vec<Line<'static>> = picker
+        .models
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible)
+        .map(|(i, model)| {
+            let selected = i == picker.selected;
+            let style = if selected {
+                Style::default()
+                    .fg(theme.accent)
+                    .add_modifier(Modifier::BOLD)
+            } else if model == active_model {
+                Style::default().fg(theme.dim)
+            } else {
+                Style::default().fg(theme.fg)
+            };
+            Line::from(Span::styled(
+                format!(
+                    "{}{}{}",
+                    if selected { "› " } else { "  " },
+                    model,
+                    if model == active_model { " ✓" } else { "" }
+                ),
                 style,
             ))
         })
