@@ -32,6 +32,13 @@ pub enum AgentError {
 
     #[error("plugin error: {0}")]
     Plugin(String),
+
+    /// Subscription-auth failure (`src/auth/`). Separate from
+    /// `Config` so the login flow and the request path can be verbose
+    /// about *why* auth failed and point at the API-key fallback,
+    /// without that phrasing leaking into ordinary config errors.
+    #[error("auth error: {0}")]
+    Auth(String),
 }
 
 impl From<mlua::Error> for AgentError {

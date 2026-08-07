@@ -144,17 +144,18 @@ pub enum OllamaProbe {
 #[derive(Clone, Debug, PartialEq)]
 pub enum PullEvent {
     Phase(String),
-    Progress { phase: String, completed: u64, total: u64 },
+    Progress {
+        phase: String,
+        completed: u64,
+        total: u64,
+    },
     Done,
     Error(String),
 }
 
 pub fn ollama_api_base(provider_base_url: &str) -> String {
     let trimmed = provider_base_url.trim_end_matches('/');
-    trimmed
-        .strip_suffix("/v1")
-        .unwrap_or(trimmed)
-        .to_string()
+    trimmed.strip_suffix("/v1").unwrap_or(trimmed).to_string()
 }
 
 pub fn has_pulled_model(probe: &OllamaProbe, model: &str) -> bool {
@@ -164,10 +165,7 @@ pub fn has_pulled_model(probe: &OllamaProbe, model: &str) -> bool {
     }
 }
 
-pub async fn probe_ollama(
-    provider_base_url: &str,
-    timeout: std::time::Duration,
-) -> OllamaProbe {
+pub async fn probe_ollama(provider_base_url: &str, timeout: std::time::Duration) -> OllamaProbe {
     #[derive(serde::Deserialize)]
     struct TagsResp {
         models: Vec<TagEntry>,
@@ -448,7 +446,8 @@ mod tests {
 
     #[test]
     fn parse_pull_chunk_extracts_progress_bytes() {
-        let line = r#"{"status":"downloading","digest":"sha256:abc","total":4682766080,"completed":1024}"#;
+        let line =
+            r#"{"status":"downloading","digest":"sha256:abc","total":4682766080,"completed":1024}"#;
         let ev = parse_pull_chunk(line).unwrap();
         assert_eq!(
             ev,
@@ -475,8 +474,7 @@ mod tests {
 
     #[test]
     fn parse_pull_chunk_surfaces_error_field() {
-        let ev =
-            parse_pull_chunk(r#"{"status":"","error":"model not found"}"#).unwrap();
+        let ev = parse_pull_chunk(r#"{"status":"","error":"model not found"}"#).unwrap();
         assert_eq!(ev, PullEvent::Error("model not found".into()));
     }
 
@@ -496,9 +494,7 @@ mod tests {
 
     #[test]
     fn has_pulled_model_false_when_daemon_down() {
-        let probe = OllamaProbe::Down {
-            reason: "x".into(),
-        };
+        let probe = OllamaProbe::Down { reason: "x".into() };
         assert!(!has_pulled_model(&probe, "qwen2.5-coder:7b"));
     }
 }

@@ -30,11 +30,7 @@ pub fn truncate(s: &str, max_bytes: usize) -> String {
 ///
 /// Returns the input unchanged if it's already within
 /// `max_bytes` — no caching, no marker.
-pub fn truncate_with_cache(
-    ctx: &crate::tools::ToolContext,
-    s: &str,
-    max_bytes: usize,
-) -> String {
+pub fn truncate_with_cache(ctx: &crate::tools::ToolContext, s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }
@@ -110,9 +106,7 @@ mod tests {
             .and_then(|s| s.split(',').next())
             .expect("id in marker");
         let id: u64 = id_str.parse().expect("numeric id");
-        let full = ctx
-            .read_full_result(id, 0, 0)
-            .expect("cache hit");
+        let full = ctx.read_full_result(id, 0, 0).expect("cache hit");
         assert_eq!(full, big);
     }
 }

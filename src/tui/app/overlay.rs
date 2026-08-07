@@ -75,6 +75,14 @@ pub struct SessionPickerRow {
     pub label: String,
 }
 
+/// `/model` modal. Lists models exposed by the active provider.
+/// Enter selects the highlighted model; Esc leaves it unchanged.
+#[derive(Debug, Clone)]
+pub struct ModelPickerState {
+    pub models: Vec<String>,
+    pub selected: usize,
+}
+
 /// `/help` browser. Two-pane: list on the left, full description
 /// of the highlighted command on the right. Esc / Enter closes.
 #[derive(Debug, Clone)]
@@ -136,6 +144,7 @@ pub struct HistorySearchState {
 pub enum Overlay {
     Approval(ApprovalState),
     SessionsPicker(SessionsPickerState),
+    ModelPicker(ModelPickerState),
     HelpBrowser(HelpBrowserState),
     InlineHelp(InlineHelpState),
     HistorySearch(HistorySearchState),
@@ -172,6 +181,13 @@ impl App {
     pub fn sessions_picker(&self) -> Option<&SessionsPickerState> {
         match &self.overlay {
             Some(Overlay::SessionsPicker(s)) => Some(s),
+            _ => None,
+        }
+    }
+
+    pub fn model_picker(&self) -> Option<&ModelPickerState> {
+        match &self.overlay {
+            Some(Overlay::ModelPicker(s)) => Some(s),
             _ => None,
         }
     }
@@ -280,6 +296,34 @@ impl App {
     pub fn sessions_picker_pick(&self) -> Option<String> {
         let p = self.sessions_picker()?;
         p.entries.get(p.selected).map(|r| r.id.clone())
+    }
+
+    pub fn open_model_picker(&mut self, models: Vec<String>, active_model: &str) {
+        let selected = models
+            .iter()
+            .position(|model| model == active_model)
+            .unwrap_or(0);
+        self.overlay = Some(Overlay::ModelPicker(ModelPickerState { models, selected }));
+    }
+
+    pub fn close_model_picker(&mut self) {
+        if matches!(self.overlay, Some(Overlay::ModelPicker(_))) {
+            self.overlay = None;
+        }
+    }
+
+    pub fn model_picker_navigate(&mut self, delta: i32) {
+        if let Some(Overlay::ModelPicker(p)) = &mut self.overlay {
+            if p.models.is_empty() {
+                return;
+            }
+            p.selected = (p.selected as i32 + delta).rem_euclid(p.models.len() as i32) as usize;
+        }
+    }
+
+    pub fn model_picker_pick(&self) -> Option<String> {
+        let p = self.model_picker()?;
+        p.models.get(p.selected).cloned()
     }
 
     pub fn open_wizard(&mut self) {
@@ -469,12 +513,7 @@ impl App {
         }
     }
 
-    pub fn on_approval_requested(
-        &mut self,
-        tool: String,
-        args: serde_json::Value,
-        reason: String,
-    ) {
+    pub fn on_approval_requested(&mut self, tool: String, args: serde_json::Value, reason: String) {
         self.overlay = Some(Overlay::Approval(ApprovalState {
             preview: crate::policy::preview_for(&tool, &args),
             tool,

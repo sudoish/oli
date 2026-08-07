@@ -87,11 +87,7 @@ pub fn resolve_session_id(
 /// mirrors future reads into the same file.
 pub async fn build_memory(
     session_id: Option<&str>,
-) -> Result<(
-    Box<dyn Memory>,
-    Vec<PathBuf>,
-    Option<Arc<dyn ReadLogger>>,
-)> {
+) -> Result<(Box<dyn Memory>, Vec<PathBuf>, Option<Arc<dyn ReadLogger>>)> {
     let inner: Box<dyn Memory> = Box::new(LinearWithCompact::new());
     match session_id {
         Some(id) => {
@@ -130,8 +126,7 @@ impl SubagentSpawner for DefaultAgentSpawner {
         parent_ctx: Option<crate::tools::ToolContext>,
     ) -> Result<String> {
         let model = self.cfg.model_for(&self.provider_name)?;
-        let provider: Box<dyn ProviderTrait> =
-            providers::build(&self.cfg, &self.provider_name)?;
+        let provider: Box<dyn ProviderTrait> = providers::build(&self.cfg, &self.provider_name)?;
         let mut tools = build_default_tools(&self.cfg, self.notes_store.clone());
         for tool in mcp::build_tools(&self.mcp_handles).await {
             tools.register_box(tool);

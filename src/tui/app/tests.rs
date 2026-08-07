@@ -270,7 +270,10 @@ fn tool_start_flips_mode_to_tool_running() {
     app.on_tool_start(1, "grep".into(), "pattern=foo".into());
     match &app.mode {
         Mode::ToolRunning { tool, .. } => assert_eq!(tool, "grep"),
-        other => panic!("expected ToolRunning, got {:?}", std::mem::discriminant(other)),
+        other => panic!(
+            "expected ToolRunning, got {:?}",
+            std::mem::discriminant(other)
+        ),
     }
 }
 
@@ -297,7 +300,13 @@ fn tool_done_returns_to_thinking_when_no_tools_pending() {
     let mut app = App::new();
     app.on_turn_started();
     app.on_tool_start(1, "grep".into(), "".into());
-    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true, String::new());
+    app.on_tool_done(
+        1,
+        Duration::from_millis(500),
+        "ok".into(),
+        true,
+        String::new(),
+    );
     assert!(matches!(app.mode, Mode::Thinking { .. }));
 }
 
@@ -307,7 +316,13 @@ fn tool_done_stays_in_tool_running_when_other_tools_pending() {
     app.on_turn_started();
     app.on_tool_start(1, "grep".into(), "".into());
     app.on_tool_start(2, "read".into(), "".into());
-    app.on_tool_done(1, Duration::from_millis(500), "ok".into(), true, String::new());
+    app.on_tool_done(
+        1,
+        Duration::from_millis(500),
+        "ok".into(),
+        true,
+        String::new(),
+    );
     // Tool 2 is still running; mode should remain ToolRunning.
     assert!(matches!(app.mode, Mode::ToolRunning { .. }));
 }
@@ -317,7 +332,13 @@ fn content_chunk_after_tool_done_flips_to_streaming() {
     let mut app = App::new();
     app.on_turn_started();
     app.on_tool_start(1, "grep".into(), "".into());
-    app.on_tool_done(1, Duration::from_millis(1), "ok".into(), true, String::new());
+    app.on_tool_done(
+        1,
+        Duration::from_millis(1),
+        "ok".into(),
+        true,
+        String::new(),
+    );
     assert!(matches!(app.mode, Mode::Thinking { .. }));
     app.on_content_chunk("here's what I found");
     assert!(matches!(app.mode, Mode::Streaming { .. }));
@@ -373,7 +394,9 @@ fn tool_args_chunk_updates_accumulated_json_on_subsequent_chunks() {
     assert_eq!(cards.len(), 1);
     match cards[0] {
         TranscriptItem::ToolCard {
-            state: ToolCardState::Streaming { accumulated_json, .. },
+            state: ToolCardState::Streaming {
+                accumulated_json, ..
+            },
             ..
         } => {
             assert_eq!(accumulated_json, "{\"file_path\":\"src/foo.rs\"");
@@ -425,7 +448,13 @@ fn tool_start_upgrades_matching_streaming_card_to_running() {
         _ => panic!("expected ToolCard at slot {}", streaming_idx),
     }
     // ToolDone for id=7 must close this exact card.
-    app.on_tool_done(7, Duration::from_millis(1), "ok".into(), true, String::new());
+    app.on_tool_done(
+        7,
+        Duration::from_millis(1),
+        "ok".into(),
+        true,
+        String::new(),
+    );
     match &app.transcript[streaming_idx] {
         TranscriptItem::ToolCard { state, .. } => {
             assert!(matches!(state, ToolCardState::Done { .. }));
@@ -457,7 +486,13 @@ fn assistant_continuation_after_tool_creates_a_new_item() {
     app.on_turn_started();
     app.on_content_chunk("first ");
     app.on_tool_start(1, "Read".into(), "x".into());
-    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true, String::new());
+    app.on_tool_done(
+        1,
+        Duration::from_millis(1),
+        "1 line".into(),
+        true,
+        String::new(),
+    );
     app.on_content_chunk("second");
     let bodies: Vec<&str> = app
         .transcript
@@ -741,6 +776,15 @@ fn sessions_picker_pick_returns_selected_id() {
 }
 
 #[test]
+fn model_picker_selects_the_active_model_and_navigates() {
+    let mut app = App::new();
+    app.open_model_picker(vec!["small".into(), "large".into()], "large");
+    assert_eq!(app.model_picker().unwrap().selected, 1);
+    app.model_picker_navigate(1);
+    assert_eq!(app.model_picker_pick(), Some("small".into()));
+}
+
+#[test]
 fn inline_help_pulls_description_from_slash_meta() {
     let mut app = App::new();
     app.set_slash_meta(vec![("cost".into(), "show token usage".into())]);
@@ -763,8 +807,9 @@ fn undo_pops_the_last_user_prompt_and_returns_its_body() {
     let mut app = App::new();
     // Simulate a turn: user prompt + assistant response +
     // tool card. Undo should drop them all.
-    app.transcript
-        .push(TranscriptItem::UserPrompt { body: "first prompt".into() });
+    app.transcript.push(TranscriptItem::UserPrompt {
+        body: "first prompt".into(),
+    });
     app.transcript.push(TranscriptItem::Assistant {
         body: "first response".into(),
         done: true,
@@ -773,7 +818,13 @@ fn undo_pops_the_last_user_prompt_and_returns_its_body() {
     app.on_content_chunk("...");
     // Simulate a tool round mid-turn.
     app.on_tool_start(1, "Read".into(), "x".into());
-    app.on_tool_done(1, Duration::from_millis(1), "1 line".into(), true, String::new());
+    app.on_tool_done(
+        1,
+        Duration::from_millis(1),
+        "1 line".into(),
+        true,
+        String::new(),
+    );
     app.on_content_chunk("more");
     app.on_turn_finished("");
 
@@ -1039,7 +1090,10 @@ fn toggle_focused_card_expanded_flips_state() {
     let expanded_after_second = matches!(
         &app.transcript[0],
         TranscriptItem::ToolCard {
-            state: ToolCardState::Done { expanded: false, .. },
+            state: ToolCardState::Done {
+                expanded: false,
+                ..
+            },
             ..
         }
     );

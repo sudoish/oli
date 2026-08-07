@@ -27,13 +27,18 @@ syntax-highlight = ["tui", "dep:syntect"]
 images = ["tui", "dep:ratatui-image", "dep:image"]
 
 [dependencies]
-tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "signal"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "process", "fs", "signal", "sync"] }
 clap = { version = "4.3.14", features = ["derive"] }
 serde_json = "1.0.149"
 serde = { version = "1.0.228", features = ["derive"] }
 async-trait = "0.1"
 thiserror = "2"
 toml = "0.8"
+# Format-preserving TOML editing for `oli login`, which rewrites the
+# user's hand-maintained config.toml. `toml` would round-trip it
+# through a value tree and drop every comment and blank line.
+# Already in the tree: `toml` is built on it.
+toml_edit = "0.25"
 glob = "0.3"
 futures = "0.3"
 rustyline = "14"
@@ -43,6 +48,14 @@ eventsource-stream = "0.2"
 similar = "2"
 libc = "0.2.186"
 nucleo-matcher = "0.3"
+# ChatGPT-subscription OAuth (`src/auth/`): PKCE S256 challenge, the
+# base64url-nopad alphabet shared by PKCE + JWT payloads, and a CSPRNG
+# for the code verifier / `state` nonce. Deliberately kept to three
+# small crates — percent-encoding, XDG lookup and clock arithmetic are
+# hand-rolled against `std` rather than pulling `url`/`dirs`/`chrono`.
+sha2 = "0.10"
+base64 = "0.22"
+rand = "0.9"
 
 # Optional: gated behind feature flags above.
 # `unstable-rendered-line-info` exposes `Paragraph::line_count`, used to

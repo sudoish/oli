@@ -43,8 +43,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{
-    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent,
-    MouseEventKind,
+    Event as CtEvent, EventStream, KeyCode, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
 };
 use futures::StreamExt;
 use ratatui::widgets::{Paragraph, Widget, Wrap};
@@ -125,9 +124,7 @@ pub async fn run(
         while let Some(Ok(ev)) = events.next().await {
             match ev {
                 CtEvent::Key(k) => {
-                    if k.kind != KeyEventKind::Release
-                        && input_tx.send(UiEvent::Key(k)).is_err()
-                    {
+                    if k.kind != KeyEventKind::Release && input_tx.send(UiEvent::Key(k)).is_err() {
                         break;
                     }
                 }
@@ -179,9 +176,9 @@ pub async fn run(
         flush_committed(&mut guard, &mut app)?;
     }
     guard
-            .terminal_mut()
-            .draw(|f| ui::draw(f, &mut app))
-            .map_err(io_err)?;
+        .terminal_mut()
+        .draw(|f| ui::draw(f, &mut app))
+        .map_err(io_err)?;
 
     let frame_budget = Duration::from_millis(16); // ~60fps ceiling
     loop {
@@ -232,6 +229,8 @@ fn handle_event(
         UiEvent::TurnCancelled => app.on_turn_cancelled(),
         UiEvent::SystemNote(body) => app.on_system_note(body),
         UiEvent::SlashFinished => app.on_slash_finished(),
+        UiEvent::ModelsListed { models, error } => on_models_listed(app, models, error),
+        UiEvent::ModelChanged(model) => app.status.model = model,
         UiEvent::Quit => app.request_quit(),
         UiEvent::ToolStart {
             id,
@@ -250,11 +249,9 @@ fn handle_event(
             name,
             accumulated_json,
         } => app.on_tool_args_chunk(provider_tool_id, name, accumulated_json),
-        UiEvent::ApprovalRequested {
-            tool,
-            args,
-            reason,
-        } => app.on_approval_requested(tool, args, reason),
+        UiEvent::ApprovalRequested { tool, args, reason } => {
+            app.on_approval_requested(tool, args, reason)
+        }
         UiEvent::UsageUpdate { last, session } => app.update_usage(last, session),
         UiEvent::UndoApplied {
             prompt_body,
@@ -315,9 +312,7 @@ fn handle_event(
                         completed,
                         total,
                     },
-                    crate::wizard_init::PullEvent::Done => {
-                        crate::tui::wizard::PullStatus::Done
-                    }
+                    crate::wizard_init::PullEvent::Done => crate::tui::wizard::PullStatus::Done,
                     crate::wizard_init::PullEvent::Error(msg) => {
                         crate::tui::wizard::PullStatus::Failed(msg)
                     }
@@ -346,6 +341,10 @@ fn on_key(
         }
         Some(Overlay::SessionsPicker(_)) => {
             handle_sessions_picker_key(app, key);
+            return;
+        }
+        Some(Overlay::ModelPicker(_)) => {
+            handle_model_picker_key(app, key, cmd_tx);
             return;
         }
         Some(Overlay::HelpBrowser(_)) => {
@@ -504,6 +503,10 @@ fn on_key(
             if trimmed == "sessions" {
                 let entries = collect_session_picker_rows();
                 app.open_sessions_picker(entries);
+                return;
+            }
+            if trimmed == "model" {
+                let _ = cmd_tx.send(AgentCommand::ListModels);
                 return;
             }
             if trimmed == "undo" {
@@ -712,7 +715,10 @@ mod tests {
     #[test]
     fn base64_encode_handles_full_blocks() {
         assert_eq!(base64_encode(b"Man"), "TWFu");
-        assert_eq!(base64_encode(b"Many hands make light work."), "TWFueSBoYW5kcyBtYWtlIGxpZ2h0IHdvcmsu");
+        assert_eq!(
+            base64_encode(b"Many hands make light work."),
+            "TWFueSBoYW5kcyBtYWtlIGxpZ2h0IHdvcmsu"
+        );
     }
 
     #[test]
@@ -783,6 +789,38 @@ mod tests {
     }
 
     #[test]
+    fn models_listed_opens_picker_sorted_and_deduped() {
+        let mut app = App::new();
+        app.status.model = "b".into();
+        on_models_listed(&mut app, vec!["c".into(), "a".into(), "c".into()], None);
+        let picker = app.model_picker().expect("picker should be open");
+        assert_eq!(picker.models, vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn models_listed_empty_reports_instead_of_opening_picker() {
+        let mut app = App::new();
+        on_models_listed(&mut app, Vec::new(), Some("401 unauthorized".into()));
+        assert!(app.model_picker().is_none());
+    }
+
+    #[test]
+    fn model_picker_enter_dispatches_a_model_slash() {
+        use crossterm::event::KeyEvent;
+
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut app = App::new();
+        app.open_model_picker(vec!["small".into(), "large".into()], "small");
+        app.model_picker_navigate(1);
+        handle_model_picker_key(&mut app, KeyEvent::from(KeyCode::Enter), &cmd_tx);
+        assert!(app.model_picker().is_none());
+        match cmd_rx.try_recv() {
+            Ok(AgentCommand::Slash { line, .. }) => assert_eq!(line, "model large"),
+            _ => panic!("expected a `model large` slash command"),
+        }
+    }
+
+    #[test]
     fn copy_slash_without_assistant_messages_does_not_open_fallback() {
         // No transcript content → system note, no modal. Avoids an
         // empty modal that the user has to dismiss for no reason.
@@ -802,6 +840,45 @@ fn on_mouse(app: &mut App, m: MouseEvent) {
     match m.kind {
         MouseEventKind::ScrollUp => app.scroll_wheel_up(3),
         MouseEventKind::ScrollDown => app.scroll_wheel_down(3),
+        _ => {}
+    }
+}
+
+fn on_models_listed(app: &mut App, mut models: Vec<String>, error: Option<String>) {
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        app.on_system_note(match error {
+            Some(error) => format!("could not list models: {}", error),
+            None => "provider doesn't expose a model list — use `/model <id>` to switch".into(),
+        });
+        return;
+    }
+    let active = app.status.model.clone();
+    app.open_model_picker(models, &active);
+}
+
+fn handle_model_picker_key(
+    app: &mut App,
+    key: crossterm::event::KeyEvent,
+    cmd_tx: &mpsc::UnboundedSender<AgentCommand>,
+) {
+    match key.code {
+        KeyCode::Up => app.model_picker_navigate(-1),
+        KeyCode::Down => app.model_picker_navigate(1),
+        KeyCode::Esc => app.close_model_picker(),
+        KeyCode::Enter => {
+            let picked = app.model_picker_pick();
+            app.close_model_picker();
+            if let Some(model) = picked {
+                let (cancel_tx, cancel) = oneshot::channel();
+                app.set_cancel_sender(cancel_tx);
+                let _ = cmd_tx.send(AgentCommand::Slash {
+                    line: format!("model {}", model),
+                    cancel,
+                });
+            }
+        }
         _ => {}
     }
 }
@@ -906,10 +983,8 @@ fn handle_wizard_key(
             }
             KeyCode::Char('p') | KeyCode::Char('P') => {
                 let w = app.wizard_mut().unwrap();
-                if matches!(
-                    w.pull,
-                    PullStatus::Idle | PullStatus::Failed(_)
-                ) && matches!(w.daemon, DaemonStatus::Up { .. })
+                if matches!(w.pull, PullStatus::Idle | PullStatus::Failed(_))
+                    && matches!(w.daemon, DaemonStatus::Up { .. })
                 {
                     let base = w.current_provider().base_url().to_string();
                     let model = w.current_provider().default_model().to_string();
@@ -965,25 +1040,15 @@ fn handle_wizard_key(
     }
 }
 
-fn spawn_ollama_probe(
-    ui_tx: mpsc::UnboundedSender<UiEvent>,
-    base_url: String,
-) {
+fn spawn_ollama_probe(ui_tx: mpsc::UnboundedSender<UiEvent>, base_url: String) {
     tokio::spawn(async move {
-        let probe = crate::wizard_init::probe_ollama(
-            &base_url,
-            std::time::Duration::from_secs(2),
-        )
-        .await;
+        let probe =
+            crate::wizard_init::probe_ollama(&base_url, std::time::Duration::from_secs(2)).await;
         let _ = ui_tx.send(UiEvent::WizardOllamaProbed(probe));
     });
 }
 
-fn spawn_ollama_pull(
-    ui_tx: mpsc::UnboundedSender<UiEvent>,
-    base_url: String,
-    model: String,
-) {
+fn spawn_ollama_pull(ui_tx: mpsc::UnboundedSender<UiEvent>, base_url: String, model: String) {
     tokio::spawn(async move {
         let tx = ui_tx.clone();
         let result = crate::wizard_init::pull_model(&base_url, &model, move |ev| {
@@ -1151,11 +1216,7 @@ fn flush_committed(guard: &mut TerminalGuard, app: &mut App) -> Result<()> {
     if new_committed <= app.committed {
         return Ok(());
     }
-    let width = guard
-        .terminal_mut()
-        .size()
-        .map(|s| s.width)
-        .unwrap_or(80);
+    let width = guard.terminal_mut().size().map(|s| s.width).unwrap_or(80);
     let (lines, height) = ui::committed_scrollback(app, width, app.committed..new_committed);
     if height > 0 {
         guard

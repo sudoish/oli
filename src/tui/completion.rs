@@ -123,7 +123,11 @@ pub fn path_candidates(base_dir: &Path, query: &str) -> Vec<String> {
             continue;
         }
         let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        let label = if is_dir { format!("{}/", raw) } else { raw.clone() };
+        let label = if is_dir {
+            format!("{}/", raw)
+        } else {
+            raw.clone()
+        };
         let rel = if base_dir == Path::new(".") {
             label
         } else {
@@ -268,7 +272,9 @@ mod tests {
         // Fuzzy: `alpha.rs` matches strongly (prefix), `beta.rs` matches
         // weakly (contains `a`), `nested` doesn't match.
         assert!(
-            got.first().map(|s| s.ends_with("alpha.rs")).unwrap_or(false),
+            got.first()
+                .map(|s| s.ends_with("alpha.rs"))
+                .unwrap_or(false),
             "expected alpha.rs first, got {:?}",
             got
         );

@@ -230,12 +230,7 @@ impl ToolContext {
     /// of `0` means "to end of body". The slice is rounded back
     /// to the nearest UTF-8 char boundary so the caller never
     /// hands a malformed string back to the model.
-    pub fn read_full_result(
-        &self,
-        id: u64,
-        offset: usize,
-        limit: usize,
-    ) -> Option<String> {
+    pub fn read_full_result(&self, id: u64, offset: usize, limit: usize) -> Option<String> {
         let cache = self.result_cache.lock().unwrap();
         let body = cache.entries.get(&id)?;
         let total = body.len();
@@ -321,8 +316,6 @@ mod tests {
         ctx.insert_canonical_read(PathBuf::from("/tmp/replayed"))
             .await;
         assert_eq!(*count.lock().unwrap(), 0, "replay must not re-log");
-        assert!(ctx.was_read("/tmp/replayed").await || true);
-        // (`was_read` would re-canonicalize; we just care the logger wasn't poked.)
     }
 
     #[tokio::test]
@@ -387,9 +380,6 @@ mod tests {
         ctx.mark_read(f.path()).await;
         let entries = log.lock().unwrap().clone();
         assert_eq!(entries.len(), 1);
-        assert_eq!(
-            entries[0],
-            tokio::fs::canonicalize(f.path()).await.unwrap()
-        );
+        assert_eq!(entries[0], tokio::fs::canonicalize(f.path()).await.unwrap());
     }
 }

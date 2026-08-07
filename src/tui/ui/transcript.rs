@@ -164,7 +164,8 @@ pub(super) fn build_transcript_lines_range(
                     let (prefix, prefix_style) = if idx == 0 {
                         (
                             "› ",
-                            band.add_modifier(Modifier::BOLD).add_modifier(Modifier::DIM),
+                            band.add_modifier(Modifier::BOLD)
+                                .add_modifier(Modifier::DIM),
                         )
                     } else {
                         ("  ", band)
@@ -185,7 +186,9 @@ pub(super) fn build_transcript_lines_range(
                         Span::styled("• ".to_string(), Style::default().fg(theme.dim)),
                         Span::styled(
                             "waiting for first token".to_string(),
-                            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+                            Style::default()
+                                .fg(theme.dim)
+                                .add_modifier(Modifier::ITALIC),
                         ),
                     ]));
                 } else {
@@ -270,7 +273,10 @@ fn render_welcome(app: &App, width: u16) -> Vec<Line<'static>> {
     let inner = width.saturating_sub(2).clamp(20, 56) as usize;
     let dim = Style::default().fg(theme.dim);
     let mut out: Vec<Line<'static>> = Vec::new();
-    out.push(Line::from(Span::styled(format!("╭{}╮", "─".repeat(inner)), dim)));
+    out.push(Line::from(Span::styled(
+        format!("╭{}╮", "─".repeat(inner)),
+        dim,
+    )));
     out.push(welcome_row(
         vec![
             Span::styled(">_ ".to_string(), dim),
@@ -309,7 +315,10 @@ fn render_welcome(app: &App, width: u16) -> Vec<Line<'static>> {
         inner,
         theme,
     ));
-    out.push(Line::from(Span::styled(format!("╰{}╯", "─".repeat(inner)), dim)));
+    out.push(Line::from(Span::styled(
+        format!("╰{}╯", "─".repeat(inner)),
+        dim,
+    )));
     out.push(Line::raw(""));
     out.push(Line::from(Span::styled(
         "  To get started, describe a task or try one of these commands:".to_string(),
@@ -347,7 +356,10 @@ fn turn_separator(width: u16, elapsed: Duration, theme: &Theme) -> Line<'static>
     if elapsed.as_secs() > 60 {
         let label = format!("─ Worked for {} ", super::fmt_elapsed(elapsed.as_secs()));
         let fill = w.saturating_sub(label.chars().count());
-        Line::from(Span::styled(format!("{}{}", label, "─".repeat(fill)), style))
+        Line::from(Span::styled(
+            format!("{}{}", label, "─".repeat(fill)),
+            style,
+        ))
     } else {
         Line::from(Span::styled("─".repeat(w), style))
     }
@@ -506,10 +518,7 @@ fn highlight_line_spans(
         while cursor < span_text.len() {
             match span_lc[cursor..].find(needle_lc) {
                 None => {
-                    new_spans.push(Span::styled(
-                        span_text[cursor..].to_string(),
-                        span.style,
-                    ));
+                    new_spans.push(Span::styled(span_text[cursor..].to_string(), span.style));
                     break;
                 }
                 Some(rel) => {
@@ -521,10 +530,7 @@ fn highlight_line_spans(
                             span.style,
                         ));
                     }
-                    new_spans.push(Span::styled(
-                        span_text[start..end].to_string(),
-                        hl_style,
-                    ));
+                    new_spans.push(Span::styled(span_text[start..end].to_string(), hl_style));
                     cursor = end;
                 }
             }
@@ -561,12 +567,17 @@ fn render_tool_card_line(
     let mut spans: Vec<Span<'static>> = if focused {
         vec![Span::styled(
             "› ".to_string(),
-            Style::default().fg(theme.accent).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
         )]
     } else {
         match state {
             ToolCardState::Streaming { .. } => {
-                vec![Span::styled("• ".to_string(), Style::default().fg(theme.dim))]
+                vec![Span::styled(
+                    "• ".to_string(),
+                    Style::default().fg(theme.dim),
+                )]
             }
             ToolCardState::Running { started_at } => {
                 let secs = started_at.elapsed().as_secs_f32();
@@ -632,13 +643,11 @@ fn connector_lines(body: Vec<String>, body_style: Style, theme: &Theme) -> Vec<L
 /// Running: nothing. Done+ok: one dim summary connector. Done+fail:
 /// ≤3-line error tail so failures survive the collapse. Expanded:
 /// full output under connectors (40-line cap).
-fn render_tool_card_detail(
-    tool: &str,
-    state: &ToolCardState,
-    theme: &Theme,
-) -> Vec<Line<'static>> {
+fn render_tool_card_detail(tool: &str, state: &ToolCardState, theme: &Theme) -> Vec<Line<'static>> {
     match state {
-        ToolCardState::Streaming { accumulated_json, .. } => connector_lines(
+        ToolCardState::Streaming {
+            accumulated_json, ..
+        } => connector_lines(
             extract_streaming_peek(tool, accumulated_json),
             Style::default().fg(theme.dim),
             theme,
@@ -659,7 +668,9 @@ fn render_tool_card_detail(
                 } else {
                     connector_lines(
                         vec![summary.clone()],
-                        Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(theme.dim)
+                            .add_modifier(Modifier::ITALIC),
                         theme,
                     )
                 }
@@ -692,7 +703,9 @@ fn expanded_output_lines(full_output: &str, theme: &Theme, ok: bool) -> Vec<Line
     if trimmed.is_empty() {
         return connector_lines(
             vec!["(no output)".to_string()],
-            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
             theme,
         );
     }
@@ -710,14 +723,19 @@ fn expanded_output_lines(full_output: &str, theme: &Theme, ok: bool) -> Vec<Line
     let total = all.len();
     let body_style = Style::default().fg(if ok { theme.fg } else { theme.diff_removed });
     let mut out = connector_lines(
-        all.iter().take(EXPANDED_LINE_CAP).map(|s| s.to_string()).collect(),
+        all.iter()
+            .take(EXPANDED_LINE_CAP)
+            .map(|s| s.to_string())
+            .collect(),
         body_style,
         theme,
     );
     if total > EXPANDED_LINE_CAP {
         out.push(Line::from(Span::styled(
             format!("    … +{} more lines", total - EXPANDED_LINE_CAP),
-            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
         )));
     }
     out
@@ -763,17 +781,16 @@ fn image_marker_lines(marker: &ImageMarker, theme: &Theme) -> Vec<Line<'static>>
                 .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(Span::styled(
-            dims_line,
-            Style::default().fg(theme.fg),
-        )),
+        Line::from(Span::styled(dims_line, Style::default().fg(theme.fg))),
         Line::from(Span::styled(
             format!("    {}", marker.path),
             Style::default().fg(theme.dim),
         )),
         Line::from(Span::styled(
             hint.to_string(),
-            Style::default().fg(theme.dim).add_modifier(Modifier::ITALIC),
+            Style::default()
+                .fg(theme.dim)
+                .add_modifier(Modifier::ITALIC),
         )),
     ]
 }
@@ -815,10 +832,7 @@ fn extract_streaming_peek(tool: &str, accumulated_json: &str) -> Vec<String> {
         return Vec::new();
     };
 
-    raw.lines()
-        .take(6)
-        .map(|s| s.to_string())
-        .collect()
+    raw.lines().take(6).map(|s| s.to_string()).collect()
 }
 
 /// Lenient scan for a partial `"<field>":"..."` value in JSON
@@ -892,8 +906,7 @@ mod tests {
     #[test]
     fn apply_search_highlight_empty_query_is_noop() {
         let lines = vec![Line::from(Span::raw("hello world".to_string()))];
-        let (out, idxs) =
-            apply_search_highlight(lines.clone(), "", Color::Yellow, Color::Black);
+        let (out, idxs) = apply_search_highlight(lines.clone(), "", Color::Yellow, Color::Black);
         assert!(idxs.is_empty());
         assert_eq!(line_text(&out[0]), "hello world");
     }
@@ -905,15 +918,13 @@ mod tests {
             Line::from(Span::raw("ok".to_string())),
             Line::from(Span::raw("PANIC again".to_string())),
         ];
-        let (out, idxs) =
-            apply_search_highlight(lines, "panic", Color::Yellow, Color::Black);
+        let (out, idxs) = apply_search_highlight(lines, "panic", Color::Yellow, Color::Black);
         assert_eq!(idxs, vec![0, 2]);
         // The needle text round-trips and shares a single span
         // with the highlight style.
         let hl_present = |line: &Line<'_>| {
             line.spans.iter().any(|s| {
-                s.style.bg == Some(Color::Yellow)
-                    && s.content.eq_ignore_ascii_case("panic")
+                s.style.bg == Some(Color::Yellow) && s.content.eq_ignore_ascii_case("panic")
             })
         };
         assert!(hl_present(&out[0]));
@@ -934,12 +945,7 @@ mod tests {
             Span::styled("hel".to_string(), Style::default().fg(Color::Red)),
             Span::styled("lo world".to_string(), Style::default().fg(Color::Blue)),
         ]);
-        let (out, idxs) = apply_search_highlight(
-            vec![line],
-            "ello",
-            Color::Yellow,
-            Color::Black,
-        );
+        let (out, idxs) = apply_search_highlight(vec![line], "ello", Color::Yellow, Color::Black);
         // The whole line *is* counted as a match (the
         // concatenated text contains 'ello'), but no span got
         // re-styled because no individual span contains it.
@@ -958,8 +964,7 @@ mod tests {
             "before MATCH after".to_string(),
             Style::default().fg(Color::Red),
         ));
-        let (out, idxs) =
-            apply_search_highlight(vec![line], "match", Color::Yellow, Color::Black);
+        let (out, idxs) = apply_search_highlight(vec![line], "match", Color::Yellow, Color::Black);
         assert_eq!(idxs, vec![0]);
         // Three spans now: "before ", "MATCH", " after".
         let texts: Vec<&str> = out[0].spans.iter().map(|s| s.content.as_ref()).collect();
@@ -979,8 +984,9 @@ mod tests {
     #[test]
     fn user_prompt_renders_full_width_banded_block() {
         let mut app = empty_app();
-        app.transcript
-            .push(TranscriptItem::UserPrompt { body: "hi there".into() });
+        app.transcript.push(TranscriptItem::UserPrompt {
+            body: "hi there".into(),
+        });
         let lines = build_transcript_lines(&app, 40);
         let band = Some(app.theme.user_band_bg);
         let body = lines
@@ -1017,7 +1023,11 @@ mod tests {
         assert!(visual.len() >= 3, "expected wrap, got {}", visual.len());
         assert!(line_text(visual[0]).starts_with("› "));
         for cont in &visual[1..] {
-            assert!(line_text(cont).starts_with("  "), "got: {:?}", line_text(cont));
+            assert!(
+                line_text(cont).starts_with("  "),
+                "got: {:?}",
+                line_text(cont)
+            );
         }
         for l in visual {
             assert_eq!(line_text(l).chars().count(), 20);
@@ -1077,7 +1087,11 @@ mod tests {
             .iter()
             .find(|l| line_text(l).contains("boom"))
             .expect("error line");
-        assert!(line_text(err).starts_with("■ "), "got: {:?}", line_text(err));
+        assert!(
+            line_text(err).starts_with("■ "),
+            "got: {:?}",
+            line_text(err)
+        );
         assert_eq!(err.spans[0].style.fg, Some(app.theme.tool_err));
     }
 
@@ -1115,9 +1129,8 @@ mod tests {
 
     #[test]
     fn anchor_to_bottom_passes_through_when_content_overflows() {
-        let content: Vec<Line<'static>> = (0..20)
-            .map(|i| Line::raw(format!("line-{}", i)))
-            .collect();
+        let content: Vec<Line<'static>> =
+            (0..20).map(|i| Line::raw(format!("line-{}", i))).collect();
         let result = anchor_to_bottom(content.clone(), 40, 10);
         assert_eq!(result.len(), content.len());
         assert_eq!(line_text(&result[0]), "line-0");
@@ -1129,10 +1142,8 @@ mod tests {
         // with one short line, visual height = 4. Pane height 10
         // should leave 6 blank rows at the top.
         let long: String = "x".repeat(100);
-        let content: Vec<Line<'static>> = vec![
-            Line::raw(long.clone()),
-            Line::raw("short".to_string()),
-        ];
+        let content: Vec<Line<'static>> =
+            vec![Line::raw(long.clone()), Line::raw("short".to_string())];
         let result = anchor_to_bottom(content, 40, 10);
         // 6 blank rows + 1 long line + 1 short line = 8 entries
         // (the long line stays as one Line; wrap happens at render
@@ -1148,8 +1159,9 @@ mod tests {
     #[test]
     fn user_turn_indices_match_each_user_prompt_header() {
         let mut app = App::new();
-        app.transcript
-            .push(TranscriptItem::UserPrompt { body: "first".into() });
+        app.transcript.push(TranscriptItem::UserPrompt {
+            body: "first".into(),
+        });
         app.transcript.push(TranscriptItem::Assistant {
             body: "a".into(),
             done: true,
@@ -1196,10 +1208,20 @@ mod tests {
         // not re-emit them (re-emitting is what orphaned stale rows).
         let mut app = App::new();
         app.transcript = vec![
-            TranscriptItem::UserPrompt { body: "alpha".into() },
-            TranscriptItem::Assistant { body: "beta".into(), done: true },
-            TranscriptItem::UserPrompt { body: "gamma".into() },
-            TranscriptItem::Assistant { body: "delta".into(), done: true },
+            TranscriptItem::UserPrompt {
+                body: "alpha".into(),
+            },
+            TranscriptItem::Assistant {
+                body: "beta".into(),
+                done: true,
+            },
+            TranscriptItem::UserPrompt {
+                body: "gamma".into(),
+            },
+            TranscriptItem::Assistant {
+                body: "delta".into(),
+                done: true,
+            },
         ];
         app.committed = 2;
         let text = build_transcript_lines(&app, 40)
@@ -1219,9 +1241,16 @@ mod tests {
         // sub-range emits only those items, not the whole transcript.
         let mut app = App::new();
         app.transcript = vec![
-            TranscriptItem::UserPrompt { body: "alpha".into() },
-            TranscriptItem::Assistant { body: "beta".into(), done: true },
-            TranscriptItem::UserPrompt { body: "gamma".into() },
+            TranscriptItem::UserPrompt {
+                body: "alpha".into(),
+            },
+            TranscriptItem::Assistant {
+                body: "beta".into(),
+                done: true,
+            },
+            TranscriptItem::UserPrompt {
+                body: "gamma".into(),
+            },
         ];
         let text = build_transcript_lines_range(&app, 40, 0..1)
             .iter()
@@ -1229,8 +1258,14 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(text.contains("alpha"));
-        assert!(!text.contains("beta"), "out-of-range item emitted: {text:?}");
-        assert!(!text.contains("gamma"), "out-of-range item emitted: {text:?}");
+        assert!(
+            !text.contains("beta"),
+            "out-of-range item emitted: {text:?}"
+        );
+        assert!(
+            !text.contains("gamma"),
+            "out-of-range item emitted: {text:?}"
+        );
     }
 
     #[test]
@@ -1253,7 +1288,11 @@ mod tests {
         let json = r#"{"file_path":"a.rs","content":"line1\nline2\nline3"}"#;
         assert_eq!(
             extract_streaming_peek("Write", json),
-            vec!["line1".to_string(), "line2".to_string(), "line3".to_string()],
+            vec![
+                "line1".to_string(),
+                "line2".to_string(),
+                "line3".to_string()
+            ],
         );
     }
 
@@ -1444,8 +1483,12 @@ mod tests {
             expanded: true,
         };
         let detail = render_tool_card_detail("Read", &state, &theme);
-        assert_eq!(detail.len(), 4, "expected 4-line chip, got {:?}",
-            detail.iter().map(line_text).collect::<Vec<_>>());
+        assert_eq!(
+            detail.len(),
+            4,
+            "expected 4-line chip, got {:?}",
+            detail.iter().map(line_text).collect::<Vec<_>>()
+        );
         assert!(line_text(&detail[0]).contains("photo.png"));
         assert_eq!(line_text(&detail[1]), "    1024x768 PNG");
         assert_eq!(line_text(&detail[2]), "    /tmp/photo.png");
@@ -1513,15 +1556,19 @@ mod tests {
         });
         // Sanity: unfocused renders the `• ` bullet leader.
         let lines = build_transcript_lines(&app, 40);
-        assert!(lines
-            .iter()
-            .any(|l| line_text(l).starts_with("• Read a.rs")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| line_text(l).starts_with("• Read a.rs"))
+        );
         // Focus the card and re-render: leader flips to `› `.
         app.focused_card_idx = Some(0);
         let lines = build_transcript_lines(&app, 40);
-        assert!(lines
-            .iter()
-            .any(|l| line_text(l).starts_with("› Read a.rs")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| line_text(l).starts_with("› Read a.rs"))
+        );
     }
 
     #[test]
@@ -1591,7 +1638,13 @@ mod tests {
 
         app.on_turn_started();
         app.on_tool_start(1, "Bash".into(), "ls".into());
-        app.on_tool_done(1, Duration::from_millis(5), "ok".into(), true, String::new());
+        app.on_tool_done(
+            1,
+            Duration::from_millis(5),
+            "ok".into(),
+            true,
+            String::new(),
+        );
         app.on_turn_finished("");
         let lines = build_transcript_lines(&app, 40);
         let rule = lines

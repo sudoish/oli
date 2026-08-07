@@ -251,16 +251,18 @@ mod tests {
         let target = dir.path().to_str().unwrap().to_string();
         let ctx = ToolContext::new();
         let out = Bash
-            .run(
-                json!({ "command": "pwd", "cwd": target.clone() }),
-                &ctx,
-            )
+            .run(json!({ "command": "pwd", "cwd": target.clone() }), &ctx)
             .await
             .unwrap();
         // macOS canonicalizes /var/folders/... → /private/var/folders/... so we just
         // check that the resolved tempdir basename is in the output rather than
         // string-equality.
-        let leaf = dir.path().file_name().unwrap().to_string_lossy().to_string();
+        let leaf = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert!(
             out.contains(&leaf),
             "expected pwd output to contain {}, got {}",
@@ -276,19 +278,18 @@ mod tests {
         let ctx = ToolContext::new();
 
         // Set cwd via first call.
-        Bash.run(
-            json!({ "command": "true", "cwd": target.clone() }),
-            &ctx,
-        )
-        .await
-        .unwrap();
-
-        // Second call without cwd should inherit it.
-        let out = Bash
-            .run(json!({ "command": "pwd" }), &ctx)
+        Bash.run(json!({ "command": "true", "cwd": target.clone() }), &ctx)
             .await
             .unwrap();
-        let leaf = dir.path().file_name().unwrap().to_string_lossy().to_string();
+
+        // Second call without cwd should inherit it.
+        let out = Bash.run(json!({ "command": "pwd" }), &ctx).await.unwrap();
+        let leaf = dir
+            .path()
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         assert!(
             out.contains(&leaf),
             "second call should inherit cwd, got {}",
@@ -321,10 +322,7 @@ mod tests {
         // we can verify the kill. Otherwise pg_guard.drop fires
         // after the assertion has already run.
         {
-            let bash_fut = Bash.run(
-                json!({"command": cmd, "timeout_ms": 30_000}),
-                &ctx,
-            );
+            let bash_fut = Bash.run(json!({"command": cmd, "timeout_ms": 30_000}), &ctx);
             tokio::pin!(bash_fut);
             tokio::select! {
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {}
@@ -354,14 +352,15 @@ mod tests {
         let ctx = ToolContext::new();
         let started = std::time::Instant::now();
         let out = Bash
-            .run(
-                json!({ "command": "sleep 10", "timeout_ms": 200 }),
-                &ctx,
-            )
+            .run(json!({ "command": "sleep 10", "timeout_ms": 200 }), &ctx)
             .await
             .unwrap();
         let elapsed = started.elapsed();
-        assert!(out.contains("timed out"), "expected timeout marker: {}", out);
+        assert!(
+            out.contains("timed out"),
+            "expected timeout marker: {}",
+            out
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "timeout should fire within ~2s, took {:?}",

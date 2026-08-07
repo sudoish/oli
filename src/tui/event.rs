@@ -58,6 +58,13 @@ pub enum UiEvent {
         prompt_body: Option<String>,
         load_into_input: bool,
     },
+    /// Active provider finished listing models for the `/model` picker.
+    ModelsListed {
+        models: Vec<String>,
+        error: Option<String>,
+    },
+    /// `/model <id>` completed; update the status-bar identity.
+    ModelChanged(String),
 
     // ----- Tool-card events (Phase H) -----
     /// Agent dispatched a tool. The render loop pushes a Running
@@ -151,5 +158,3 @@ pub fn approval_response_for(index: usize) -> ApprovalResponse {
         _ => ApprovalResponse::AlwaysDeny,
     }
 }
-
-

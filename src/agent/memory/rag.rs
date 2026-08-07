@@ -142,9 +142,7 @@ impl Memory for EmbeddingRagMemory {
                             .map(|e| (i, cosine_similarity(e, &query_emb)))
                     })
                     .collect();
-                scored.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal)
-                });
+                scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
                 scored.truncate(self.top_k);
                 // Restore chronological order so the model reads the
                 // retrieved snippets in the order they happened.
@@ -291,7 +289,9 @@ fn parse_embedding_response(v: &Value) -> Result<Vec<f32>> {
     let arr = v
         .get("embedding")
         .and_then(|x| x.as_array())
-        .ok_or_else(|| AgentError::Provider("embedding response missing `embedding` array".into()))?;
+        .ok_or_else(|| {
+            AgentError::Provider("embedding response missing `embedding` array".into())
+        })?;
     Ok(arr
         .iter()
         .filter_map(|x| x.as_f64().map(|f| f as f32))
@@ -408,7 +408,8 @@ mod tests {
             m.record(json!({"role":"user","content": body})).await;
         }
         // Latest message is the query.
-        m.record(json!({"role":"user","content":"what was the alpha fact?"})).await;
+        m.record(json!({"role":"user","content":"what was the alpha fact?"}))
+            .await;
 
         let snap = m.snapshot().await;
         // Should contain at least one message mentioning "alpha facts"
@@ -456,11 +457,16 @@ mod tests {
         let mut m = EmbeddingRagMemory::new(Arc::new(KeywordEmbedder))
             .with_recent_window(1)
             .with_top_k(3);
-        m.record(json!({"role":"user","content":"turn 0 alpha"})).await;
-        m.record(json!({"role":"user","content":"turn 1 alpha"})).await;
-        m.record(json!({"role":"user","content":"turn 2 filler"})).await;
-        m.record(json!({"role":"user","content":"turn 3 alpha"})).await;
-        m.record(json!({"role":"user","content":"query about alpha"})).await;
+        m.record(json!({"role":"user","content":"turn 0 alpha"}))
+            .await;
+        m.record(json!({"role":"user","content":"turn 1 alpha"}))
+            .await;
+        m.record(json!({"role":"user","content":"turn 2 filler"}))
+            .await;
+        m.record(json!({"role":"user","content":"turn 3 alpha"}))
+            .await;
+        m.record(json!({"role":"user","content":"query about alpha"}))
+            .await;
 
         let snap = m.snapshot().await;
         let alpha_indices: Vec<usize> = snap
@@ -520,7 +526,8 @@ mod tests {
     async fn truncate_drops_messages_above_n() {
         let mut m = EmbeddingRagMemory::new(Arc::new(KeywordEmbedder));
         for i in 0..5 {
-            m.record(json!({"role":"user","content":format!("msg{}", i)})).await;
+            m.record(json!({"role":"user","content":format!("msg{}", i)}))
+                .await;
         }
         assert_eq!(m.len(), 5);
         m.truncate(2).await;

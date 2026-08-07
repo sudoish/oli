@@ -35,6 +35,7 @@
 //! [`McpHandle`]: mcp::McpHandle
 
 pub mod agent;
+pub mod auth;
 pub mod bootstrap;
 pub mod config;
 pub mod diagnostics;

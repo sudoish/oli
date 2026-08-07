@@ -136,9 +136,7 @@ mod tests {
         // Disposable allow-list backed by a tempfile so the
         // tests don't touch the user's real config dir.
         let dir = tempfile::tempdir().unwrap();
-        let persisted = Arc::new(PersistedAllowList::open_at(
-            dir.path().join("allow.json"),
-        ));
+        let persisted = Arc::new(PersistedAllowList::open_at(dir.path().join("allow.json")));
         // Leak the tempdir for the lifetime of the test — its
         // path lives inside `persisted` and we don't want it
         // unlinked while the file is in use.
@@ -187,7 +185,8 @@ mod tests {
         // First request — user says always-allow.
         let a1 = approver.clone();
         let f1 = tokio::spawn(async move {
-            a1.approve("Edit", &json!({"file_path":"x"}), "edit x").await
+            a1.approve("Edit", &json!({"file_path":"x"}), "edit x")
+                .await
         });
         let _ = rx.recv().await;
         pending
@@ -203,7 +202,8 @@ mod tests {
         // the approver auto-resolves from the allow set.
         let a2 = approver.clone();
         let f2 = tokio::spawn(async move {
-            a2.approve("Edit", &json!({"file_path":"x"}), "edit x").await
+            a2.approve("Edit", &json!({"file_path":"x"}), "edit x")
+                .await
         });
         // The future resolves quickly without us sending anything.
         let resolved = tokio::time::timeout(std::time::Duration::from_millis(100), f2)
@@ -227,7 +227,8 @@ mod tests {
 
         let a1 = approver.clone();
         let f1 = tokio::spawn(async move {
-            a1.approve("Bash", &json!({"command":"rm -rf /"}), "danger").await
+            a1.approve("Bash", &json!({"command":"rm -rf /"}), "danger")
+                .await
         });
         let _ = rx.recv().await;
         pending
@@ -241,7 +242,8 @@ mod tests {
 
         let a2 = approver.clone();
         let f2 = tokio::spawn(async move {
-            a2.approve("Bash", &json!({"command":"rm -rf /"}), "danger").await
+            a2.approve("Bash", &json!({"command":"rm -rf /"}), "danger")
+                .await
         });
         let denied = tokio::time::timeout(std::time::Duration::from_millis(100), f2)
             .await
@@ -258,7 +260,8 @@ mod tests {
 
         let a1 = approver.clone();
         let f1 = tokio::spawn(async move {
-            a1.approve("Bash", &json!({"command":"cargo test"}), "ok").await
+            a1.approve("Bash", &json!({"command":"cargo test"}), "ok")
+                .await
         });
         let _ = rx.recv().await;
         pending
@@ -273,7 +276,8 @@ mod tests {
         // Different command — must prompt again.
         let a2 = approver.clone();
         let f2 = tokio::spawn(async move {
-            a2.approve("Bash", &json!({"command":"rm -rf /"}), "boom").await
+            a2.approve("Bash", &json!({"command":"rm -rf /"}), "boom")
+                .await
         });
         // Verify a fresh ApprovalRequested arrives.
         let ev = tokio::time::timeout(std::time::Duration::from_millis(100), rx.recv())
@@ -312,7 +316,8 @@ mod tests {
         // First request — user types capital `A`.
         let a1 = approver.clone();
         let f1 = tokio::spawn(async move {
-            a1.approve("Bash", &json!({"command":"cargo test"}), "ok").await
+            a1.approve("Bash", &json!({"command":"cargo test"}), "ok")
+                .await
         });
         // Wait for the approver to stash the sender, then
         // respond. We can't recv on the dropped rx1 (tx still
@@ -339,7 +344,8 @@ mod tests {
         let fresh_approver = Arc::new(TuiApprover::new(tx2, pending2, fresh_persisted));
         let a2 = fresh_approver.clone();
         let f2 = tokio::spawn(async move {
-            a2.approve("Bash", &json!({"command":"cargo test"}), "ok").await
+            a2.approve("Bash", &json!({"command":"cargo test"}), "ok")
+                .await
         });
         let allowed = tokio::time::timeout(std::time::Duration::from_millis(200), f2)
             .await
@@ -357,7 +363,8 @@ mod tests {
         let approver = Arc::new(approver);
         let a1 = approver.clone();
         let f1 = tokio::spawn(async move {
-            a1.approve("Edit", &json!({"file_path":"x"}), "edit x").await
+            a1.approve("Edit", &json!({"file_path":"x"}), "edit x")
+                .await
         });
         let _ = rx.recv().await;
         // Drop the sender without sending. This simulates a TUI

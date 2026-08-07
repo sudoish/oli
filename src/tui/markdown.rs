@@ -202,10 +202,8 @@ impl Renderer {
             if line.is_empty() {
                 continue;
             }
-            self.cur.push(Span::styled(
-                line.to_string(),
-                self.current_inline_style(),
-            ));
+            self.cur
+                .push(Span::styled(line.to_string(), self.current_inline_style()));
         }
     }
 
@@ -228,8 +226,7 @@ impl Renderer {
                 // CommonMark renders these as a space; we do the
                 // same so word-wrapped paragraphs flow correctly.
                 if !self.cur.is_empty() {
-                    self.cur
-                        .push(Span::raw(" ".to_string()));
+                    self.cur.push(Span::raw(" ".to_string()));
                 }
             }
             Event::HardBreak => self.flush_line(),
@@ -265,9 +262,7 @@ impl Renderer {
                 };
                 self.cur.push(Span::styled(
                     prefix,
-                    Style::default()
-                        .fg(color)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(color).add_modifier(Modifier::BOLD),
                 ));
                 self.bold += 1;
             }
@@ -413,10 +408,8 @@ impl Renderer {
                         continue;
                     }
                 };
-                let mut spans: Vec<Span<'static>> = vec![Span::styled(
-                    "  │ ",
-                    Style::default().fg(Color::Cyan),
-                )];
+                let mut spans: Vec<Span<'static>> =
+                    vec![Span::styled("  │ ", Style::default().fg(Color::Cyan))];
                 for (style, frag) in highlighted {
                     let frag = frag.trim_end_matches('\n');
                     if frag.is_empty() {

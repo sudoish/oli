@@ -200,11 +200,7 @@ impl Memory for PersistedMemory {
     }
 }
 
-async fn replay_into(
-    path: &Path,
-    mem: &mut dyn Memory,
-    reads: &mut Vec<PathBuf>,
-) -> Result<()> {
+async fn replay_into(path: &Path, mem: &mut dyn Memory, reads: &mut Vec<PathBuf>) -> Result<()> {
     let body = tokio::fs::read_to_string(path).await?;
     for line in body.lines() {
         if line.trim().is_empty() {

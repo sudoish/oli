@@ -49,6 +49,8 @@ pub enum AgentCommand {
     /// is `true` when the trigger was Ctrl+E (edit-and-rerun) so
     /// the popped prompt is dropped back into the input box.
     Undo { load_into_input: bool },
+    /// Enumerate models for the active provider without changing the agent.
+    ListModels,
     /// Tear-down signal so the driver task exits cleanly.
     Shutdown,
 }
@@ -58,7 +60,10 @@ pub fn spawn(
     plugin_slashes: Vec<Box<dyn SlashCommand>>,
     reloader: Option<Arc<PluginReloader>>,
     ui_tx: mpsc::UnboundedSender<UiEvent>,
-) -> (mpsc::UnboundedSender<AgentCommand>, tokio::task::JoinHandle<()>) {
+) -> (
+    mpsc::UnboundedSender<AgentCommand>,
+    tokio::task::JoinHandle<()>,
+) {
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<AgentCommand>();
     let mut registry = SlashRegistry::default_set_with_reloader(reloader);
     for s in plugin_slashes {
@@ -82,6 +87,20 @@ pub fn spawn(
                         load_into_input,
                     });
                 }
+                AgentCommand::ListModels => match agent.provider.list_models().await {
+                    Ok(models) => {
+                        let _ = ui_tx.send(UiEvent::ModelsListed {
+                            models,
+                            error: None,
+                        });
+                    }
+                    Err(error) => {
+                        let _ = ui_tx.send(UiEvent::ModelsListed {
+                            models: Vec::new(),
+                            error: Some(error.to_string()),
+                        });
+                    }
+                },
             }
         }
     });
@@ -175,6 +194,7 @@ async fn handle_slash(
         return;
     }
 
+    let model_before = agent.model.clone();
     let outcome = registry.dispatch(trimmed, agent).await;
     match outcome {
         Some(SlashOutcome::Continue(Some(msg))) => {
@@ -200,11 +220,11 @@ async fn handle_slash(
         }
         None => {
             let head = trimmed.split_whitespace().next().unwrap_or("");
-            let _ = ui_tx.send(UiEvent::SystemNote(format!(
-                "unknown command: /{}",
-                head
-            )));
+            let _ = ui_tx.send(UiEvent::SystemNote(format!("unknown command: /{}", head)));
         }
+    }
+    if agent.model != model_before {
+        let _ = ui_tx.send(UiEvent::ModelChanged(agent.model.clone()));
     }
     let _ = ui_tx.send(UiEvent::SlashFinished);
 }

@@ -151,7 +151,15 @@ pub struct ConfigPolicy {
 /// prefixes for its read endpoints; everything else (save_, create_,
 /// update_, delete_, run_, exec_, ...) stays in the Ask path.
 const PURE_READ_PREFIXES: &[&str] = &[
-    "get_", "list_", "search_", "fetch_", "read_", "describe_", "show_", "find_", "query_",
+    "get_",
+    "list_",
+    "search_",
+    "fetch_",
+    "read_",
+    "describe_",
+    "show_",
+    "find_",
+    "query_",
 ];
 
 impl ConfigPolicy {
@@ -633,7 +641,8 @@ mod tests {
     #[test]
     fn write_preview_reports_size_and_truncates_long_content_for_new_file() {
         let big = "line\n".repeat(100);
-        let args = json!({"file_path":"/tmp/__nonexistent_file_for_write_preview__","content": big});
+        let args =
+            json!({"file_path":"/tmp/__nonexistent_file_for_write_preview__","content": big});
         let s = render_write_preview(&args);
         assert!(s.contains("file: /tmp/"));
         assert!(s.contains("500 bytes"));
@@ -672,11 +681,17 @@ mod tests {
 
     #[test]
     fn unified_diff_truncates_long_diffs_with_marker() {
-        let old = (0..200).map(|i| format!("line {}\n", i)).collect::<String>();
+        let old = (0..200)
+            .map(|i| format!("line {}\n", i))
+            .collect::<String>();
         let new = (0..200)
             .map(|i| format!("LINE {}\n", i))
             .collect::<String>();
         let s = render_unified_diff(&old, &new, 20);
-        assert!(s.contains("more lines"), "expected truncation marker: {}", s);
+        assert!(
+            s.contains("more lines"),
+            "expected truncation marker: {}",
+            s
+        );
     }
 }

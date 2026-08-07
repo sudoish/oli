@@ -230,7 +230,9 @@ mod tests {
         // mtime resolution is 1s; tempfiles on tmpfs/APFS see ms-level
         // resolution but a small sleep is harmless and portable.
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-        tokio::fs::write(f.path(), "external mutation\n").await.unwrap();
+        tokio::fs::write(f.path(), "external mutation\n")
+            .await
+            .unwrap();
 
         let out = Edit
             .run(

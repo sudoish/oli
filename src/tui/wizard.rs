@@ -28,7 +28,9 @@ pub enum WizardStep {
     PullModel,
     EnterApiKey,
     Confirm,
-    Saved { path: PathBuf },
+    Saved {
+        path: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
