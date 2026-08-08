@@ -605,20 +605,22 @@ A user inside any modern terminal can:
 
 | ID | Item                                              | Status |
 | -- | ------------------------------------------------- | ------ |
-| W1 | `Viewport::Inline` mode + `--inline`/`--fullscreen` | TODO |
-| W2 | Capability detection (`src/tui/caps.rs`) + auto-mode | TODO |
-| W3 | Mouse capture as opt-in (inline default off)      | TODO |
-| W4 | OSC52 clipboard with copy-fallback modal          | TODO |
-| W5 | No-hang terminal queries (100 ms gates)           | TODO |
-| W6 | Kitty keyboard protocol opt-in                    | TODO |
-| W7 | Inline-mode scroll vs host-buffer scrollback docs | TODO |
-| X1 | Fuzzy completion via `nucleo`                     | TODO |
-| X2 | In-transcript search (`/` + n/N)                  | TODO |
-| X3 | Turn-jump navigation (`[`/`]` + Ctrl+O/I)         | TODO |
-| X4 | Context-aware keybinding hints                    | TODO |
-| Y1 | `src/tui/theme.rs` + named themes via config      | TODO |
-| Y2 | Inline streaming diff for Edit / Write            | TODO |
+| W1 | `Viewport::Inline` mode + `--inline`/`--fullscreen` | DONE |
+| W2 | Capability detection (`src/tui/caps.rs`) + auto-mode | DONE |
+| W3 | Mouse capture as opt-in (inline default off)      | DONE |
+| W4 | OSC52 clipboard with copy-fallback modal          | DONE |
+| W5 | No-hang terminal queries (100 ms gates)           | DONE |
+| W6 | Kitty keyboard protocol opt-in                    | DONE |
+| W7 | Inline-mode scroll vs host-buffer scrollback docs | DONE |
+| X1 | Fuzzy completion via `nucleo`                     | DONE |
+| X2 | In-transcript search (`/` + n/N)                  | DONE |
+| X3 | Turn-jump navigation (`[`/`]` + Ctrl+O/I)         | DONE |
+| X4 | Context-aware keybinding hints                    | DONE |
+| Y1 | `src/tui/theme.rs` + named themes via config      | DONE |
+| Y2 | Inline streaming diff for Edit / Write            | DONE |
 | Y3 | Inline image rendering (`images` feature)         | DONE (marker + parser + feature-gated picker; frame-level widget draw deferred) |
-| Y4 | Per-tool card expand-in-place                     | TODO |
+| Y4 | Per-tool card expand-in-place                     | DONE |
+
+All 14 phases shipped across PRs #7 / #8 / #9 / #10 against `sudoish/oli`.
 
 Mirror commit SHAs into `specs/progress.md` at each phase boundary.
