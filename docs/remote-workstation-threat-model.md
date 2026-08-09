@@ -13,7 +13,7 @@ flowchart LR
         L[Laptop<br/>user + tailnet device identity]
     end
 
-    subgraph T[Tailnet policy boundary]
+    subgraph T[Tailnet reachability boundary]
         W[Remote workstation<br/>Linux user + tailnet device identity]
         O[oli process<br/>provider and tool policy]
         R[Source checkout]
@@ -30,7 +30,7 @@ flowchart LR
     end
 
     L -->|Tailscale SSH, or SSH over WireGuard/TCP 22| W
-    O -->|HTTPS provider protocol| M
+    O -.->|HTTPS provider protocol (remote providers only)| M
     O -->|OAuth authorization URL| B
     B -->|pasted localhost redirect URL or device approval| O
     O -.->|OSC52 escape sequence through SSH| L
@@ -39,7 +39,10 @@ flowchart LR
 The browser and oli may run on different hosts. `oli login --paste` carries the
 OAuth redirect URL back through the existing terminal session; device auth
 carries only a short-lived user code. The browser never connects inbound to the
-workstation. Provider traffic is outbound HTTPS from the workstation.
+workstation. Remote provider traffic is outbound HTTPS from the workstation.
+Local providers (e.g., `http://localhost:11434/v1` for Ollama) remain confined
+to the workstation and do not cross a network boundary; they are excluded from
+the "Provider trust boundary" shown above.
 
 ## Identities and protocols
 
@@ -105,10 +108,10 @@ devices; it does not encrypt data at rest or constrain a process after login.
 
 | Threat | Consequence | Required response or control |
 |---|---|---|
-| Lost or stolen laptop | An active device session may reach the workstation | Revoke the tailnet device immediately, invalidate identity-provider sessions, and rotate laptop-held SSH/provider credentials; require local disk encryption and screen lock |
+| Lost or stolen laptop | An active device session may reach the workstation | Revoke the tailnet device immediately, invalidate identity-provider sessions, and rotate laptop-held authentication material (tailnet/device identity and SSH keys per the chosen SSH mode); require local disk encryption and screen lock |
 | Compromised laptop | Attacker acts as the developer and can copy terminal output | Revoke the device and user sessions, inspect workstation auth logs and oli sessions, rotate credentials, and rebuild the laptop before reenrollment |
 | Compromised workstation | Attacker reads source, transcripts, config, and provider tokens and can alter oli | Isolate and revoke the node, rotate every credential present, preserve evidence, rebuild from a trusted image, and restore only reviewed source; tailnet policy cannot contain an attacker already on the host |
-| Stolen provider credential | Attacker consumes provider access outside the tailnet | Keep credentials only on the workstation with mode `0600`, use environment or secret-manager injection for API keys where practical, revoke at the provider, and review usage |
+| Stolen provider credential | Attacker consumes provider access outside the tailnet | Provider credentials and `~/.config/oli/auth.json` remain only on the workstation (never on the laptop) with mode `0600`; use environment or secret-manager injection for API keys where practical, revoke at the provider, and review usage |
 | Leaked pasted redirect URL | OAuth code may be exchanged before expiry | Paste only into the intended oli process, never logs or chat, complete promptly, and restart login if exposed; PKCE limits use without the workstation's verifier |
 | Overbroad tailnet policy | Unintended identities can attempt workstation login | Use a dedicated workstation tag or group, default deny, review policy changes, and test both allowed and denied identities |
 | Public SSH exposure | Internet attackers bypass the intended private-reachability boundary | Remove public addresses where possible and deny inbound TCP 22 in host and cloud firewalls; verify from a non-tailnet network |
