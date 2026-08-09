@@ -382,7 +382,8 @@ mod tests {
     #[test]
     fn render_toml_makes_automatic_tool_execution_explicit() {
         let body = render_toml(WizardProvider::Ollama, "");
-        assert!(body.contains("[policy]\nmode = \"auto\""), "{body}");
+        let cfg = crate::config::Config::from_str(&body).expect("must parse as Config");
+        assert_eq!(cfg.policy.mode, crate::policy::PolicyMode::Auto);
     }
 
     #[test]
