@@ -42,9 +42,8 @@ pub struct Config {
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
 
-    /// Policy / approval rules. When the section is missing, baked-in
-    /// defaults (Read/Glob/Grep auto-allow, Edit/Write/Bash ask, common
-    /// dev commands on the bash allowlist) are used.
+    /// Tool execution policy. A missing section runs tools automatically;
+    /// `mode = "ask"` enables the granular approval rules.
     #[serde(default)]
     pub policy: PolicyConfig,
 
@@ -447,6 +446,26 @@ mod tests {
         assert_eq!(cfg.default_model.as_deref(), Some("qwen2.5-coder:7b"));
         assert_eq!(cfg.providers.len(), 2);
         assert_eq!(cfg.providers["ollama"].kind, "openai-compat");
+    }
+
+    #[test]
+    fn missing_policy_mode_defaults_to_auto() {
+        let cfg = Config::from_str(SAMPLE).unwrap();
+        assert_eq!(cfg.policy.mode, crate::policy::PolicyMode::Auto);
+    }
+
+    #[test]
+    fn policy_mode_can_enable_approvals() {
+        let cfg = Config::from_str(&format!("{SAMPLE}\n[policy]\nmode = \"ask\"\n")).unwrap();
+        assert_eq!(cfg.policy.mode, crate::policy::PolicyMode::Ask);
+    }
+
+    #[test]
+    fn invalid_policy_mode_is_rejected() {
+        let err = Config::from_str(&format!("{SAMPLE}\n[policy]\nmode = \"sometimes\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unknown variant"), "{err}");
     }
 
     #[test]

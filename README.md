@@ -13,8 +13,8 @@
 A minimal, hackable, single-binary terminal coding agent.
 
 `oli` is a Rust REPL/TUI that drives an LLM through a small set of code-aware
-tools (`Read`, `Write`, `Edit`, `Bash`, `Grep`, `Glob`, `Task`) with a
-policy-gated approval flow. It runs locally against [Ollama] by default,
+tools (`Read`, `Write`, `Edit`, `Bash`, `Grep`, `Glob`, `Task`) with automatic
+tool execution by default and an opt-in approval flow. It runs locally against [Ollama] by default,
 flips to any OpenAI-compatible endpoint (OpenRouter, OpenAI, LM Studio,
 vLLM, llama.cpp server) with a config change, and speaks the native
 Anthropic Messages API when you want prompt caching.
@@ -175,8 +175,9 @@ overlays. A repo-root `AGENTS.md` is found from any subdirectory.
 
 ### Approval flow
 
-When the policy returns `Ask` (default for `Write`, `Edit`, and most
-`Bash` calls), the TUI pops a modal with the diff or command preview:
+Tools run automatically by default. Set `[policy] mode = "ask"` to have the
+TUI pop a modal with the diff or command preview when a policy rule returns
+`Ask`:
 
 | Key | Effect |
 | --- | --- |
@@ -186,8 +187,10 @@ When the policy returns `Ask` (default for `Write`, `Edit`, and most
 | `[A]` (capital A) | Allow always — also writes to `~/.config/oli/policy-allow.json`. |
 | `d` | Deny the fingerprint for the session. |
 
-In line-mode, the same prompt appears inline. In `-p` mode, `Ask`
-auto-approves unless you pass `--strict`.
+In line-mode, the same prompt appears inline. The granular `auto_allow`, `ask`,
+`bash_allowlist`, and MCP read rules apply in ask mode. In `-p` mode, `Ask`
+auto-approves unless you pass `--strict`; strict forces ask mode and denies
+every approval request.
 
 ---
 
@@ -313,6 +316,7 @@ api_key_env   = "ANTHROPIC_API_KEY"
 default_model = "claude-opus-4-7"
 
 [policy]
+mode            = "ask"
 auto_allow      = ["Read", "Glob", "Grep", "ListNotes", "SearchNotes"]
 ask             = ["Write", "Edit"]
 bash_allowlist  = ["git status", "git diff", "cargo *", "ls *", "rg *"]

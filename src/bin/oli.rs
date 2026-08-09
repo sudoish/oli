@@ -13,7 +13,7 @@ use oli::agent::context::SystemPromptBuilder;
 use oli::bootstrap::{DefaultAgentSpawner, build_default_tools, build_memory, resolve_session_id};
 use oli::config::Config;
 use oli::error::Result;
-use oli::policy::{AlwaysDeny, ConfigPolicy, ReadlineApprover};
+use oli::policy::{AlwaysDeny, ConfigPolicy, PolicyConfig, PolicyMode, ReadlineApprover};
 use oli::providers::Provider as ProviderTrait;
 use oli::tools::task::{SubagentSpawner, Task};
 #[cfg(feature = "tui")]
@@ -45,15 +45,12 @@ struct Args {
 
     /// Override the per-run turn cap. Falls back to `[agent].max_turns`
     /// in config (default 40). Useful when one specific task genuinely
-    /// needs to go further than the conservative default.
+    /// needs to go further than the default.
     #[arg(long)]
     max_turns: Option<usize>,
 
-    /// Strict mode: in `-p` runs, deny every `Ask` policy decision
-    /// instead of auto-approving. Use for unattended scripted tasks
-    /// that should not silently rubber-stamp Edit/Write/unknown-Bash
-    /// calls. Has no effect on the interactive REPL (which already
-    /// prompts).
+    /// Strict mode: in `-p` runs, force ask mode and deny every approval
+    /// request. Has no effect on interactive runs.
     #[arg(long)]
     strict: bool,
 
@@ -517,7 +514,8 @@ async fn run(args: Args) -> Result<()> {
     let plugin_hooks = plugins.hooks;
 
     let system_prompt = SystemPromptBuilder::from_env().build().await;
-    let policy = Box::new(ConfigPolicy::from_config(&cfg.policy));
+    let policy_config = policy_config_for_run(&cfg.policy, args.strict, args.prompt.is_some());
+    let policy = Box::new(ConfigPolicy::from_config(&policy_config));
 
     let interactive = args.prompt.is_none();
     let session_id =
@@ -561,10 +559,8 @@ async fn run(args: Args) -> Result<()> {
 
     match args.prompt {
         Some(p) => {
-            // One-shot: scripted-friendly. Policy still gates which tools
-            // run; `--strict` flips `Ask` decisions from auto-approve
-            // to deny, suitable for unattended runs that must not
-            // rubber-stamp Edit/Write/unknown-Bash without supervision.
+            // One-shot: scripted-friendly. `--strict` forces ask mode and
+            // denies each approval request.
             let mut agent = if args.strict {
                 agent_base.with_approver(Box::new(AlwaysDeny))
             } else {
@@ -644,5 +640,36 @@ async fn run(args: Args) -> Result<()> {
             let _ = use_tui; // referenced in cfg branch above
             repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
         }
+    }
+}
+
+fn policy_config_for_run(config: &PolicyConfig, strict: bool, one_shot: bool) -> PolicyConfig {
+    let mut config = config.clone();
+    if strict && one_shot {
+        config.mode = PolicyMode::Ask;
+    }
+    config
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strict_one_shot_runs_restore_ask_policy_before_denying_approvals() {
+        let config = policy_config_for_run(&PolicyConfig::default(), true, true);
+        assert_eq!(config.mode, PolicyMode::Ask);
+    }
+
+    #[test]
+    fn strict_interactive_runs_preserve_configured_policy_mode() {
+        let config = policy_config_for_run(&PolicyConfig::default(), true, false);
+        assert_eq!(config.mode, PolicyMode::Auto);
+    }
+
+    #[test]
+    fn regular_runs_preserve_configured_policy_mode() {
+        let config = policy_config_for_run(&PolicyConfig::default(), false, true);
+        assert_eq!(config.mode, PolicyMode::Auto);
     }
 }

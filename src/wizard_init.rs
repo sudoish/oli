@@ -115,6 +115,8 @@ pub fn render_toml(provider: WizardProvider, api_key: &str) -> String {
     ));
     out.push_str("\n[agent]\n");
     out.push_str("max_turns = 40\n");
+    out.push_str("\n[policy]\n");
+    out.push_str("mode = \"auto\"\n");
     out
 }
 
@@ -375,6 +377,13 @@ mod tests {
             "missing max_turns default:\n{}",
             body
         );
+    }
+
+    #[test]
+    fn render_toml_makes_automatic_tool_execution_explicit() {
+        let body = render_toml(WizardProvider::Ollama, "");
+        let cfg = crate::config::Config::from_str(&body).expect("must parse as Config");
+        assert_eq!(cfg.policy.mode, crate::policy::PolicyMode::Auto);
     }
 
     #[test]
