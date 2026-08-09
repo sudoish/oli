@@ -41,10 +41,22 @@ pub trait Approver: Send + Sync {
 }
 
 /// Config-shaped policy parameters. `[policy]` section in the user's
-/// TOML; defaults are baked in so a missing section produces a sensible
-/// starting point rather than empty allowlists.
+/// TOML; a missing section defaults to automatic tool execution.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum PolicyMode {
+    #[default]
+    Auto,
+    Ask,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct PolicyConfig {
+    /// Whether config rules may return `Ask`. Auto mode allows every tool
+    /// invocation; ask mode applies the granular lists below.
+    #[serde(default)]
+    pub mode: PolicyMode,
+
     #[serde(default = "PolicyConfig::default_auto_allow")]
     pub auto_allow: Vec<String>,
 
@@ -124,6 +136,7 @@ impl PolicyConfig {
 impl Default for PolicyConfig {
     fn default() -> Self {
         Self {
+            mode: PolicyMode::default(),
             auto_allow: Self::default_auto_allow(),
             ask: Self::default_ask(),
             bash_allowlist: Self::default_bash_allowlist(),
@@ -134,8 +147,9 @@ impl Default for PolicyConfig {
 
 /// Default policy. Tool names against `auto_allow`/`ask` lists plus
 /// glob-style patterns for `Bash` `command` strings. Anything unmatched
-/// falls through to `Ask` so a misconfiguration errs on the safe side.
+/// falls through to `Ask` when approval mode is enabled.
 pub struct ConfigPolicy {
+    mode: PolicyMode,
     auto_allow: HashSet<String>,
     ask: HashSet<String>,
     bash_patterns: Vec<glob::Pattern>,
@@ -170,6 +184,7 @@ impl ConfigPolicy {
             .filter_map(|s| glob::Pattern::new(s).ok())
             .collect();
         Self {
+            mode: cfg.mode,
             auto_allow: cfg.auto_allow.iter().cloned().collect(),
             ask: cfg.ask.iter().cloned().collect(),
             bash_patterns,
@@ -186,6 +201,9 @@ impl ConfigPolicy {
 
 impl Policy for ConfigPolicy {
     fn check(&self, tool: &str, args: &Value) -> Decision {
+        if self.mode == PolicyMode::Auto {
+            return Decision::Allow;
+        }
         if tool == "Bash" {
             let cmd = args
                 .get("command")
@@ -434,26 +452,24 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_asks_for_edit_and_write() {
+    fn default_policy_auto_allows_mutations_unknown_tools_and_bash() {
         let p = ConfigPolicy::defaults();
-        assert!(matches!(p.check("Edit", &json!({})), Decision::Ask(_)));
-        assert!(matches!(p.check("Write", &json!({})), Decision::Ask(_)));
+        assert_eq!(p.check("Edit", &json!({})), Decision::Allow);
+        assert_eq!(p.check("Write", &json!({})), Decision::Allow);
+        assert_eq!(p.check("Frobnicate", &json!({})), Decision::Allow);
+        assert_eq!(
+            p.check("Bash", &json!({"command":"rm -rf target"})),
+            Decision::Allow
+        );
     }
 
     #[test]
-    fn default_policy_asks_for_unknown_tools() {
-        let p = ConfigPolicy::defaults();
-        let dec = p.check("Frobnicate", &json!({}));
-        assert!(matches!(dec, Decision::Ask(_)));
-        match dec {
-            Decision::Ask(msg) => assert!(msg.contains("Frobnicate")),
-            _ => unreachable!(),
-        }
-    }
-
-    #[test]
-    fn default_policy_allows_known_bash_commands() {
-        let p = ConfigPolicy::defaults();
+    fn ask_mode_allows_known_bash_commands() {
+        let cfg = PolicyConfig {
+            mode: PolicyMode::Ask,
+            ..PolicyConfig::default()
+        };
+        let p = ConfigPolicy::from_config(&cfg);
         assert_eq!(
             p.check("Bash", &json!({"command":"git status"})),
             Decision::Allow
@@ -469,8 +485,18 @@ mod tests {
     }
 
     #[test]
-    fn default_policy_asks_for_unknown_bash_commands() {
-        let p = ConfigPolicy::defaults();
+    fn ask_mode_asks_for_mutations_unknown_tools_and_unknown_bash() {
+        let cfg = PolicyConfig {
+            mode: PolicyMode::Ask,
+            ..PolicyConfig::default()
+        };
+        let p = ConfigPolicy::from_config(&cfg);
+        assert!(matches!(p.check("Edit", &json!({})), Decision::Ask(_)));
+        assert!(matches!(p.check("Write", &json!({})), Decision::Ask(_)));
+        assert!(matches!(
+            p.check("Frobnicate", &json!({})),
+            Decision::Ask(_)
+        ));
         let dec = p.check("Bash", &json!({"command":"rm -rf /"}));
         assert!(matches!(dec, Decision::Ask(_)));
         match dec {
@@ -484,7 +510,11 @@ mod tests {
         // `*` matches empty string, but we shouldn't allow a literally
         // empty command — a model that emits Bash with no `command` field
         // is up to no good.
-        let p = ConfigPolicy::defaults();
+        let cfg = PolicyConfig {
+            mode: PolicyMode::Ask,
+            ..PolicyConfig::default()
+        };
+        let p = ConfigPolicy::from_config(&cfg);
         let dec = p.check("Bash", &json!({"command":""}));
         assert!(matches!(dec, Decision::Ask(_)));
     }
@@ -492,6 +522,7 @@ mod tests {
     #[test]
     fn config_overrides_replace_defaults() {
         let cfg = PolicyConfig {
+            mode: PolicyMode::Ask,
             auto_allow: vec!["Edit".into()],
             ask: vec![],
             bash_allowlist: vec![],
@@ -505,8 +536,11 @@ mod tests {
 
     #[test]
     fn pure_read_heuristic_auto_allows_get_list_search_etc() {
-        let p = ConfigPolicy::defaults();
-        // Default has auto_allow_pure_reads = true.
+        let cfg = PolicyConfig {
+            mode: PolicyMode::Ask,
+            ..PolicyConfig::default()
+        };
+        let p = ConfigPolicy::from_config(&cfg);
         for tool in &[
             "linear__get_issue",
             "github__list_pull_requests",
@@ -527,7 +561,11 @@ mod tests {
 
     #[test]
     fn pure_read_heuristic_does_not_auto_allow_writes() {
-        let p = ConfigPolicy::defaults();
+        let cfg = PolicyConfig {
+            mode: PolicyMode::Ask,
+            ..PolicyConfig::default()
+        };
+        let p = ConfigPolicy::from_config(&cfg);
         for tool in &[
             "linear__save_issue",
             "linear__delete_user",
@@ -546,6 +584,7 @@ mod tests {
     #[test]
     fn pure_read_heuristic_off_falls_through_to_ask() {
         let cfg = PolicyConfig {
+            mode: PolicyMode::Ask,
             auto_allow_pure_reads: false,
             ..PolicyConfig::default()
         };
@@ -563,6 +602,7 @@ mod tests {
         // `<server>__<tool>` shape — otherwise a custom plugin tool
         // named `get_thing` would silently bypass the Ask gate.
         let cfg = PolicyConfig {
+            mode: PolicyMode::Ask,
             auto_allow: vec![],
             ask: vec![],
             bash_allowlist: vec![],

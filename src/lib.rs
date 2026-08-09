@@ -15,8 +15,7 @@
 //! - [`Provider`] — chat-completion API (Anthropic, OpenAI-compat).
 //! - [`Tool`] — a callable capability the model can invoke.
 //! - [`Memory`] — conversation state strategy (linear+compact, RAG, etc.).
-//! - [`Policy`] / [`Approver`] — gate before tool execution; ask the user
-//!   when in doubt.
+//! - [`Policy`] / [`Approver`] — control tool execution and optional prompts.
 //! - [`Hook`] — observability hook fired around tool calls.
 //! - [`SlashCommand`] — REPL-side commands (`/help`, `/cost`, …).
 //! - [`SubagentSpawner`] — builds a fresh child agent for the `Task` tool.

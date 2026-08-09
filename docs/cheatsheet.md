@@ -98,7 +98,8 @@ Force the path with `[ui].osc52`:
 
 ### Approval modal
 
-When the policy returns `Ask`, an approval modal pops over the transcript.
+Tools execute automatically by default. Set `[policy] mode = "ask"` to enable
+approval prompts; when a rule returns `Ask`, a modal pops over the transcript.
 
 | Key                | Action                                                                                |
 | ------------------ | ------------------------------------------------------------------------------------- |

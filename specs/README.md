@@ -53,8 +53,8 @@ Build a coding agent that:
    appears.
 4. **Config over code.** New tool, new model, new external integration → edit
    TOML, don't recompile.
-5. **Safe by default, escapable on demand.** Every shell/edit goes through a
-   policy; defaults are conservative.
+5. **Focused autonomy, controls on demand.** Tools execute automatically by
+   default; users can opt into approval prompts with policy config.
 6. **Local-first.** Every decision considers a 7B-parameter model on consumer
    hardware: small context, flaky tool-call format, slow first token.
 
@@ -142,6 +142,7 @@ api_key_env   = "OPENROUTER_API_KEY"
 default_model = "anthropic/claude-haiku-4.5"
 
 [policy]
+mode            = "ask"
 auto_allow      = ["Read", "Glob", "Grep"]
 ask             = ["Write", "Edit"]
 bash_allowlist  = ["git status", "git diff", "cargo *", "ls *"]
