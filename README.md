@@ -298,6 +298,8 @@ Caveats worth knowing before you rely on it:
   failing cryptically.
 
 Before a release, follow [the subscription release gate](docs/subscription-release-gate.md).
+The private remote-workstation reference design begins with its
+[topology and threat model](docs/remote-workstation-threat-model.md).
 
 A more loaded config with multiple providers and a stricter policy:
 
