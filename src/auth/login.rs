@@ -244,8 +244,7 @@ fn release_check_reply(response: &crate::providers::ChatResponse) -> Result<Stri
         .message
         .get("content")
         .and_then(|content| content.as_str())
-        .map(str::trim)
-        .filter(|content| !content.is_empty())
+        .filter(|content| !content.trim().is_empty())
         .ok_or_else(|| {
             crate::error::AgentError::Provider(
                 "the subscription release check received an empty response. Retry after signing in again; if subscription access remains unavailable, use API-key auth (`kind = \"openai-compat\"`, `api_key_env = \"OPENAI_API_KEY\"`).".into(),
@@ -357,6 +356,50 @@ mod tests {
 
         let err = release_check_reply(&response).unwrap_err().to_string();
         assert!(err.contains("unexpected response"), "{err}");
+    }
+
+    #[test]
+    fn release_check_rejects_whitespace_only_reply() {
+        let test_cases = vec![
+            "   ",           // spaces only
+            "\t\t",          // tabs only
+            "\n\n",          // newlines only
+            " \t\n ",        // mixed whitespace
+        ];
+
+        for content in test_cases {
+            let response = crate::providers::ChatResponse {
+                message: serde_json::json!({"role": "assistant", "content": content}),
+                usage: None,
+            };
+
+            let err = release_check_reply(&response).unwrap_err().to_string();
+            assert!(err.contains("empty response"), "Expected 'empty response' error for whitespace-only content: {content:?}, got: {err}");
+        }
+    }
+
+    #[test]
+    fn release_check_rejects_reply_with_surrounding_whitespace() {
+        // The comparison must use the original untrimmed content, so
+        // responses with whitespace around OLI_SUBSCRIPTION_OK should be rejected
+        let test_cases = vec![
+            " OLI_SUBSCRIPTION_OK",      // leading space
+            "OLI_SUBSCRIPTION_OK ",      // trailing space
+            " OLI_SUBSCRIPTION_OK ",     // both
+            "\nOLI_SUBSCRIPTION_OK",     // leading newline
+            "OLI_SUBSCRIPTION_OK\n",     // trailing newline
+            "\tOLI_SUBSCRIPTION_OK\t",   // tabs
+        ];
+
+        for content in test_cases {
+            let response = crate::providers::ChatResponse {
+                message: serde_json::json!({"role": "assistant", "content": content}),
+                usage: None,
+            };
+
+            let err = release_check_reply(&response).unwrap_err().to_string();
+            assert!(err.contains("unexpected response"), "Expected 'unexpected response' error for content with whitespace: {content:?}, got: {err}");
+        }
     }
 
     #[test]
