@@ -105,6 +105,9 @@ cargo build --release --no-default-features
 The binary is self-contained — copy `target/release/oli` to anywhere
 on your `$PATH`.
 
+Release notes are in [CHANGELOG.md](CHANGELOG.md). Maintainers cut the
+private-agent baseline with [the release procedure](docs/baseline-release.md).
+
 ---
 
 ## First run
