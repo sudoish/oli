@@ -122,6 +122,11 @@ enum Cmd {
     /// API-key auth is unaffected and remains the default — this is
     /// an addition, not a replacement.
     Login {
+        /// Validate stored credentials by forcing a token refresh,
+        /// discovering models, and sending one real prompt.
+        #[arg(long, conflicts_with_all = ["no_browser", "device_auth", "paste", "no_config"])]
+        check: bool,
+
         /// Print the sign-in URL instead of launching a browser.
         /// Implied on a Linux session with no display.
         #[arg(long, conflicts_with_all = ["device_auth", "paste"])]
@@ -163,11 +168,12 @@ async fn main() {
             pull,
         }) => init_command(provider, api_key, force, skip_ollama_check, pull).await,
         Some(Cmd::Login {
+            check,
             no_browser,
             device_auth,
             paste,
             no_config,
-        }) => login_command(no_browser, device_auth, paste, no_config).await,
+        }) => login_command(check, no_browser, device_auth, paste, no_config).await,
         Some(Cmd::Logout) => logout_command(),
         None => run(args).await,
     };
@@ -184,6 +190,7 @@ async fn main() {
 /// untouched, so switching back is a one-line edit. `--no-config`
 /// stores credentials and stops there.
 async fn login_command(
+    check: bool,
     no_browser: bool,
     device_auth: bool,
     paste: bool,
@@ -194,6 +201,10 @@ async fn login_command(
     use oli::auth::{ISSUER, client_id};
 
     let store = AuthStore::default_location()?;
+    if check {
+        println!("{}", oli::auth::login::run_release_check(&store).await?);
+        return Ok(());
+    }
     let opts = LoginOptions {
         open_browser: !no_browser,
         ..LoginOptions::default()

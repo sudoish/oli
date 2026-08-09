@@ -203,6 +203,61 @@ pub async fn provision_config(store: &AuthStore) -> Result<()> {
     Ok(())
 }
 
+/// Exercise the live subscription contract used as a release gate.
+pub async fn run_release_check(store: &AuthStore) -> Result<String> {
+    use crate::auth::session::ChatGptAuth;
+    use crate::providers::openai_responses::{ResponsesProvider, preferred_model};
+    use crate::providers::{ChatRequest, Provider};
+
+    let auth = ChatGptAuth::with_store(store.clone());
+    auth.force_refresh().await?;
+
+    let provider = ResponsesProvider::new(crate::auth::CHATGPT_BASE_URL, auth);
+    let models = provider.fetch_models().await?;
+    let model = preferred_model(&models)
+        .ok_or_else(|| {
+            crate::error::AgentError::Provider(
+                "subscription model discovery returned no usable model".into(),
+            )
+        })?
+        .slug
+        .clone();
+    let response = provider
+        .chat(ChatRequest {
+            model: model.clone(),
+            messages: vec![serde_json::json!({
+                "role": "user",
+                "content": "Reply with exactly OLI_SUBSCRIPTION_OK"
+            })],
+            tools: Vec::new(),
+        })
+        .await?;
+    let reply = release_check_reply(&response)?;
+    Ok(format!(
+        "Subscription release check passed: token refresh, {} discovered model(s), and a real prompt with {model}. Reply: {reply}",
+        models.len()
+    ))
+}
+
+fn release_check_reply(response: &crate::providers::ChatResponse) -> Result<String> {
+    let reply = response
+        .message
+        .get("content")
+        .and_then(|content| content.as_str())
+        .filter(|content| !content.trim().is_empty())
+        .ok_or_else(|| {
+            crate::error::AgentError::Provider(
+                "the subscription release check received an empty response. Retry after signing in again; if subscription access remains unavailable, use API-key auth (`kind = \"openai-compat\"`, `api_key_env = \"OPENAI_API_KEY\"`).".into(),
+            )
+        })?;
+    if reply != "OLI_SUBSCRIPTION_OK" {
+        return Err(crate::error::AgentError::Provider(format!(
+            "the subscription release check received an unexpected response: {reply:?}"
+        )));
+    }
+    Ok(reply.to_string())
+}
+
 /// Prompt and read one line from stdin, off the async runtime.
 async fn read_line(prompt: &str) -> Result<String> {
     use std::io::{BufRead, Write};
@@ -268,6 +323,89 @@ mod tests {
 
     fn id_token(claims: serde_json::Value) -> String {
         format!("h.{}.s", URL_SAFE_NO_PAD.encode(claims.to_string()))
+    }
+
+    #[test]
+    fn release_check_accepts_the_expected_assistant_reply() {
+        let response = crate::providers::ChatResponse {
+            message: serde_json::json!({"role": "assistant", "content": "OLI_SUBSCRIPTION_OK"}),
+            usage: None,
+        };
+
+        assert!(release_check_reply(&response).is_ok());
+    }
+
+    #[test]
+    fn release_check_rejects_an_empty_assistant_reply() {
+        let response = crate::providers::ChatResponse {
+            message: serde_json::json!({"role": "assistant", "content": ""}),
+            usage: None,
+        };
+
+        let err = release_check_reply(&response).unwrap_err().to_string();
+        assert!(err.contains("empty response"), "{err}");
+        assert!(err.contains("API-key"), "{err}");
+    }
+
+    #[test]
+    fn release_check_rejects_an_unexpected_assistant_reply() {
+        let response = crate::providers::ChatResponse {
+            message: serde_json::json!({"role": "assistant", "content": "something else"}),
+            usage: None,
+        };
+
+        let err = release_check_reply(&response).unwrap_err().to_string();
+        assert!(err.contains("unexpected response"), "{err}");
+    }
+
+    #[test]
+    fn release_check_rejects_whitespace_only_reply() {
+        let test_cases = vec![
+            "   ",    // spaces only
+            "\t\t",   // tabs only
+            "\n\n",   // newlines only
+            " \t\n ", // mixed whitespace
+        ];
+
+        for content in test_cases {
+            let response = crate::providers::ChatResponse {
+                message: serde_json::json!({"role": "assistant", "content": content}),
+                usage: None,
+            };
+
+            let err = release_check_reply(&response).unwrap_err().to_string();
+            assert!(
+                err.contains("empty response"),
+                "Expected 'empty response' error for whitespace-only content: {content:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn release_check_rejects_reply_with_surrounding_whitespace() {
+        // The comparison must use the original untrimmed content, so
+        // responses with whitespace around OLI_SUBSCRIPTION_OK should be rejected
+        let test_cases = vec![
+            " OLI_SUBSCRIPTION_OK",    // leading space
+            "OLI_SUBSCRIPTION_OK ",    // trailing space
+            " OLI_SUBSCRIPTION_OK ",   // both
+            "\nOLI_SUBSCRIPTION_OK",   // leading newline
+            "OLI_SUBSCRIPTION_OK\n",   // trailing newline
+            "\tOLI_SUBSCRIPTION_OK\t", // tabs
+        ];
+
+        for content in test_cases {
+            let response = crate::providers::ChatResponse {
+                message: serde_json::json!({"role": "assistant", "content": content}),
+                usage: None,
+            };
+
+            let err = release_check_reply(&response).unwrap_err().to_string();
+            assert!(
+                err.contains("unexpected response"),
+                "Expected 'unexpected response' error for content with whitespace: {content:?}, got: {err}"
+            );
+        }
     }
 
     #[test]
