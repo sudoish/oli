@@ -514,10 +514,9 @@ async fn run(args: Args) -> Result<()> {
     let plugin_hooks = plugins.hooks;
 
     let system_prompt = SystemPromptBuilder::from_env().build().await;
-    let policy_config = policy_config_for_run(&cfg.policy, args.strict);
-    let policy = Box::new(ConfigPolicy::from_config(&policy_config));
-
     let interactive = args.prompt.is_none();
+    let policy_config = policy_config_for_run(&cfg.policy, args.strict, interactive);
+    let policy = Box::new(ConfigPolicy::from_config(&policy_config));
     let session_id =
         resolve_session_id(args.resume.as_deref(), args.continue_session, interactive)?;
     let (memory, replayed_reads, read_logger) = build_memory(session_id.as_deref()).await?;
@@ -643,9 +642,11 @@ async fn run(args: Args) -> Result<()> {
     }
 }
 
-fn policy_config_for_run(config: &PolicyConfig, strict: bool) -> PolicyConfig {
+fn policy_config_for_run(config: &PolicyConfig, strict: bool, interactive: bool) -> PolicyConfig {
     let mut config = config.clone();
-    if strict {
+    // Only apply strict mode override for one-shot runs (non-interactive).
+    // Interactive runs preserve their configured mode regardless of --strict.
+    if strict && !interactive {
         config.mode = PolicyMode::Ask;
     }
     config
@@ -656,14 +657,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strict_runs_restore_ask_policy_before_denying_approvals() {
-        let config = policy_config_for_run(&PolicyConfig::default(), true);
+    fn strict_oneshot_runs_force_ask_policy() {
+        // One-shot run (interactive=false) with --strict should force Ask mode
+        let config = policy_config_for_run(&PolicyConfig::default(), true, false);
         assert_eq!(config.mode, PolicyMode::Ask);
     }
 
     #[test]
+    fn strict_interactive_runs_preserve_configured_mode() {
+        // Interactive run (interactive=true) with --strict should preserve configured mode
+        let config = policy_config_for_run(&PolicyConfig::default(), true, true);
+        assert_eq!(config.mode, PolicyMode::Auto);
+    }
+
+    #[test]
     fn regular_runs_preserve_configured_policy_mode() {
-        let config = policy_config_for_run(&PolicyConfig::default(), false);
+        // Non-strict runs should always preserve the configured mode
+        let config = policy_config_for_run(&PolicyConfig::default(), false, false);
+        assert_eq!(config.mode, PolicyMode::Auto);
+
+        let config = policy_config_for_run(&PolicyConfig::default(), false, true);
         assert_eq!(config.mode, PolicyMode::Auto);
     }
 }
