@@ -101,6 +101,7 @@ impl App {
         self.mode = Mode::Thinking {
             since: Instant::now(),
         };
+        self.redraw_invalidated = true;
         self.turn_started_at = Some(Instant::now());
         self.transcript.push(TranscriptItem::Assistant {
             body: String::new(),
@@ -118,6 +119,7 @@ impl App {
             self.mode = Mode::Streaming {
                 since: Instant::now(),
             };
+            self.redraw_invalidated = true;
         }
         if self.active_assistant.is_none() {
             self.transcript.push(TranscriptItem::Assistant {
@@ -151,6 +153,7 @@ impl App {
             tool: tool.clone(),
             since: started_at,
         };
+        self.redraw_invalidated = true;
 
         // Y2: if the model streamed args for this call ahead of
         // dispatch, a Streaming card with matching tool name is
@@ -276,6 +279,7 @@ impl App {
             self.mode = Mode::Thinking {
                 since: Instant::now(),
             };
+            self.redraw_invalidated = true;
         }
     }
 
@@ -296,6 +300,7 @@ impl App {
             self.note_arrival(1);
         }
         self.mode = Mode::Idle;
+        self.redraw_invalidated = true;
         self.cancel_tx = None;
     }
 
@@ -323,6 +328,7 @@ impl App {
             body: format!("error: {}", msg),
         });
         self.mode = Mode::Idle;
+        self.redraw_invalidated = true;
         self.cancel_tx = None;
     }
 
@@ -340,6 +346,7 @@ impl App {
             body: "(cancelled)".into(),
         });
         self.mode = Mode::Idle;
+        self.redraw_invalidated = true;
         self.cancel_tx = None;
     }
 
@@ -372,6 +379,7 @@ impl App {
 
     pub fn on_slash_finished(&mut self) {
         self.mode = Mode::Idle;
+        self.redraw_invalidated = true;
         self.cancel_tx = None;
     }
 

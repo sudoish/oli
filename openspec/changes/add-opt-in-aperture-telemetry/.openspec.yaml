@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-08-07
+goal: Define and implement safe, best-effort observability for oli without
+  exporting user content or secrets.

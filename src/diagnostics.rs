@@ -17,6 +17,7 @@
 //! Kept under 150 LOC of internal code; no `tracing`/`log` dep.
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
@@ -59,6 +60,24 @@ struct Ring {
 }
 
 static RING: OnceLock<Mutex<Ring>> = OnceLock::new();
+static STDERR_SUSPENSIONS: AtomicUsize = AtomicUsize::new(0);
+
+pub struct StderrSuspension;
+
+pub fn suspend_stderr() -> StderrSuspension {
+    STDERR_SUSPENSIONS.fetch_add(1, Ordering::AcqRel);
+    StderrSuspension
+}
+
+fn stderr_is_suspended() -> bool {
+    STDERR_SUSPENSIONS.load(Ordering::Acquire) > 0
+}
+
+impl Drop for StderrSuspension {
+    fn drop(&mut self) {
+        STDERR_SUSPENSIONS.fetch_sub(1, Ordering::AcqRel);
+    }
+}
 
 fn ring() -> &'static Mutex<Ring> {
     RING.get_or_init(|| {
@@ -73,7 +92,7 @@ fn ring() -> &'static Mutex<Ring> {
 /// `RUST_LOG`-derived threshold; stashes it in the ring buffer
 /// either way.
 pub fn push(level: Level, body: String) {
-    if level >= threshold_from_env() {
+    if !stderr_is_suspended() && level >= threshold_from_env() {
         eprintln!("{}", body);
     }
     let bytes = body.len();
@@ -229,5 +248,20 @@ mod tests {
         assert!(Level::Warn > Level::Info);
         assert!(Level::Info > Level::Debug);
         assert!(Level::Debug > Level::Trace);
+    }
+
+    #[test]
+    fn stderr_suspension_is_scoped_and_nestable() {
+        assert!(!stderr_is_suspended());
+        {
+            let _outer = suspend_stderr();
+            assert!(stderr_is_suspended());
+            {
+                let _inner = suspend_stderr();
+                assert!(stderr_is_suspended());
+            }
+            assert!(stderr_is_suspended());
+        }
+        assert!(!stderr_is_suspended());
     }
 }

@@ -17,6 +17,7 @@ will land alongside it as `specs/<topic>.md`.
 | [`specs/tui.md`](tui.md)            | TUI architecture roadmap (phases F–O). Layout, render loop, completion, history, wizard, undo, recoverability. All DONE.   |
 | [`specs/review-2.md`](review-2.md)  | Deep review #2 (rated 9/10). Strengths + persistent weaknesses that drove the polish plan.                                  |
 | [`specs/polish.md`](polish.md)      | The 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, packaging.                              |
+| [`specs/private-agent-roadmap.md`](private-agent-roadmap.md) | Product and content roadmap for private remote workstations, model and MCP service planes, and privacy-preserving operations. |
 | [`specs/memory.md`](memory.md)      | `Memory` trait design — pluggable strategies (linear+compact default, RAG, graph, hierarchical).                            |
 | [`specs/mcp.md`](mcp.md)            | MCP client design (phase 5). stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.          |
 | [`specs/formatting.md`](formatting.md) | Pretty output plan: ANSI strip, tables, HTML, wrapped code, inline code, `--plain` markdown rendering. |

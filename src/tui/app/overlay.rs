@@ -526,6 +526,7 @@ impl App {
     pub fn close_approval(&mut self) {
         if matches!(self.overlay, Some(Overlay::Approval(_))) {
             self.overlay = None;
+            self.redraw_invalidated = true;
         }
     }
 

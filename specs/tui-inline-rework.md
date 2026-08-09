@@ -22,6 +22,12 @@ line and the *idle* activity hint `[/]: turns · …` (which can only
 render in `Mode::Idle`, proving it's a stale frame) — are exactly
 this.
 
+The same rendering boundary also hides the final lines of an agent
+response beneath the fixed status and composer bands. Treat the clipped
+response tail and floating fragments as one inline-viewport correctness
+issue: the live transcript must remain inside its layout rectangle while
+scrollback and viewport coordinates stay synchronized as content commits.
+
 ratatui's per-frame blank-buffer + diff cleans stale cells in
 fullscreen; it cannot reach rows that fall outside the viewport it
 tracks. `specs/tui.md:63-65` already flagged inline as lower-fidelity
@@ -111,10 +117,15 @@ every feature.
   re-entrancy (calling twice doesn't double-count), undo clamp.
 - **Unit:** `build_transcript_lines_range` renders only the requested
   range; `committed=0` equals the legacy full render.
+- **Layout/render regression:** render a live assistant response that fills
+  the transcript area plus several lines with status and input bands present;
+  assert response cells do not paint into either reserved band and the final
+  visible lines are not hidden beneath the composer.
 - **Manual (the only place the bug reproduces):** run oli in Neovim
   `:terminal` / Emacs term, submit a prompt that triggers tool calls,
   confirm no floating leftover above the input across the turn and at
-  idle; confirm finished turns land in native scrollback.
+  idle; confirm the full final assistant response remains visible above the
+  status/input area; confirm finished turns land in native scrollback.
 
 ## Status
 

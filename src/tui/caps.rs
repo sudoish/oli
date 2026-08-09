@@ -200,14 +200,12 @@ impl Capabilities {
         }
     }
 
-    /// The viewport the auto-mode resolver should pick when the
-    /// user hasn't set a flag or a config value.
+    /// Auto mode prefers fullscreen even in buffer terminals. Inline
+    /// viewports cannot reliably clear rows after a streaming response
+    /// grows beyond their fixed reservation; users can still opt in
+    /// explicitly with `--inline` or `viewport = "inline"`.
     pub fn auto_viewport(&self) -> super::terminal::ViewportMode {
-        if self.is_buffer_terminal {
-            super::terminal::ViewportMode::Inline
-        } else {
-            super::terminal::ViewportMode::Fullscreen
-        }
+        super::terminal::ViewportMode::Fullscreen
     }
 }
 
@@ -359,12 +357,12 @@ mod tests {
     }
 
     #[test]
-    fn auto_viewport_picks_inline_for_buffer_terminal() {
+    fn auto_viewport_uses_fullscreen_for_buffer_terminal() {
         let env = snap(&[("NVIM", "/tmp/nvim.sock")]);
         let caps = Capabilities::detect_with_env(&env);
         assert_eq!(
             caps.auto_viewport(),
-            crate::tui::terminal::ViewportMode::Inline,
+            crate::tui::terminal::ViewportMode::Fullscreen,
         );
     }
 

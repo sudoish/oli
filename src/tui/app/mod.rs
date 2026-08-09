@@ -46,6 +46,7 @@ pub struct App {
     pub transcript: Vec<TranscriptItem>,
     pub input: TextArea<'static>,
     pub should_quit: bool,
+    redraw_invalidated: bool,
     pub mode: Mode,
     pub active_assistant: Option<usize>,
     pub cancel_tx: Option<oneshot::Sender<()>>,
@@ -197,6 +198,7 @@ impl Default for App {
             transcript: Vec::new(),
             input: build_textarea(),
             should_quit: false,
+            redraw_invalidated: false,
             mode: Mode::Idle,
             active_assistant: None,
             cancel_tx: None,
@@ -242,6 +244,10 @@ impl App {
         app.markdown_theme = MarkdownTheme::detect();
         app.transcript.push(TranscriptItem::Welcome);
         app
+    }
+
+    pub fn take_redraw_invalidation(&mut self) -> bool {
+        std::mem::take(&mut self.redraw_invalidated)
     }
 
     /// Replace the (name, description) lookup. Updates

@@ -1,12 +1,12 @@
 //! Per-frame render. Lays out the four-band shell:
 //! - **transcript** (flex top): welcome splash, `›`-banded user
 //!   prompts, `•`-bulleted assistant messages, tool cards, and
-//!   system notices. In-flight state lives in the status row, not
+//!   system notices. In-flight state lives in the progress row, not
 //!   an inline cursor.
-//! - **status row** (2 rows): spinner + elapsed while busy, a
-//!   tool-detail line while a tool runs; blank when idle.
-//! - **composer** (flex bottom, capped): borderless multi-line
-//!   tui-textarea on a tinted band, inset from all four band edges.
+//! - **progress row** (1 row): compact spinner + elapsed while busy;
+//!   blank when idle.
+//! - **composer** (5 rows): bordered multi-line tui-textarea on a
+//!   tinted band.
 //! - **footer** (1 row): identity left, context gauge right.
 //!
 //! Approval takes over the bottom pane (transcript + inline
@@ -24,18 +24,25 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph, Wr
 
 use transcript::TRANSCRIPT_H_PAD;
 
-use crate::tui::app::{App, Mode, ToolCardState, TranscriptItem};
+use crate::tui::app::{App, Mode};
 
 mod overlays;
 mod transcript;
 
-/// Blank band rows above and below the composer text, so the input
-/// doesn't sit flush against the status row or the footer.
+const COMPOSER_HEIGHT: u16 = 5;
 const COMPOSER_V_PAD: u16 = 1;
-/// Cols reserved left of the composer text: `TRANSCRIPT_H_PAD`, the
-/// `›` glyph, and a space. Matches the transcript's user-turn indent
-/// so typed text lines up with the prompt it becomes.
-const COMPOSER_GUTTER: u16 = TRANSCRIPT_H_PAD + 2;
+const COMPOSER_GUTTER: u16 = 3;
+
+fn ordinary_shell_areas(area: Rect) -> [Rect; 4] {
+    let chunks = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(1),
+        Constraint::Length(COMPOSER_HEIGHT),
+        Constraint::Length(1),
+    ])
+    .split(area);
+    [chunks[0], chunks[1], chunks[2], chunks[3]]
+}
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let area = f.area();
@@ -54,27 +61,18 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         return;
     }
 
-    let input_lines = app.input.lines().len().max(1).min(8) as u16;
-    let input_height = input_lines + COMPOSER_V_PAD * 2;
-    let chunks = Layout::vertical([
-        Constraint::Min(3),               // transcript
-        Constraint::Length(2),            // status row (+ tool detail)
-        Constraint::Length(input_height), // composer (borderless, padded)
-        Constraint::Length(1),            // footer
-    ])
-    .split(area);
-
-    transcript::draw_transcript(f, chunks[0], app);
+    let [transcript, progress, composer, footer] = ordinary_shell_areas(area);
+    transcript::draw_transcript(f, transcript, app);
     if app.search().is_some() {
-        draw_search_bar(f, chunks[1], app);
+        draw_search_bar(f, progress, app);
     } else {
-        draw_status_row(f, chunks[1], app);
+        draw_status_row(f, progress, app);
     }
-    draw_input(f, chunks[2], app);
-    draw_footer(f, chunks[3], app);
+    draw_input(f, composer, app);
+    draw_footer(f, footer, app);
 
     if app.completion.is_some() {
-        draw_completion_popup(f, chunks[0], chunks[2], app);
+        draw_completion_popup(f, transcript, composer, app);
     }
     use crate::tui::app::Overlay;
     match &app.overlay {
@@ -146,18 +144,22 @@ fn spans_width(spans: &[Span<'_>]) -> usize {
     spans.iter().map(|s| s.content.chars().count()).sum()
 }
 
+/// Compact progress line. It always occupies one row: tool details remain in
+/// transcript cards, so changing turn state cannot move the composer.
 fn draw_status_row(f: &mut Frame, area: Rect, app: &App) {
     let lines = render_status_row(app);
-    let row = Paragraph::new(lines)
-        .block(Block::default().padding(Padding::horizontal(TRANSCRIPT_H_PAD)));
+    let row = Paragraph::new(lines).block(
+        Block::default()
+            .style(Style::default().bg(app.theme.user_band_bg))
+            .padding(Padding::horizontal(TRANSCRIPT_H_PAD)),
+    );
     f.render_widget(row, area);
 }
 
-/// Codex-style status: `⠋ Working (12s • esc to interrupt)` plus a
-/// dim `  └ <tool> <args>` detail while a tool runs. Reserved blank
-/// rows when idle or when an approval owns the bottom pane.
+/// Compact progress: `⠋ Working (12s • esc to interrupt)`. It produces
+/// exactly one row, including while tools run.
 pub(super) fn render_status_row(app: &App) -> Vec<Line<'static>> {
-    let blank = || vec![Line::raw(""), Line::raw("")];
+    let blank = || vec![Line::raw("")];
     if app.approval().is_some() {
         return blank();
     }
@@ -186,29 +188,7 @@ pub(super) fn render_status_row(app: &App) -> Vec<Line<'static>> {
             Style::default().fg(theme.dim),
         ),
     ]);
-    let detail = match &app.mode {
-        Mode::ToolRunning { tool, .. } => {
-            let args = latest_running_args(app).unwrap_or_default();
-            Line::from(vec![
-                Span::styled("  └ ".to_string(), Style::default().fg(theme.dim)),
-                Span::styled(format!("{} {}", tool, args), Style::default().fg(theme.dim)),
-            ])
-        }
-        _ => Line::raw(""),
-    };
-    vec![status, detail]
-}
-
-/// Args preview of the most recent still-Running tool card.
-fn latest_running_args(app: &App) -> Option<String> {
-    app.transcript.iter().rev().find_map(|item| match item {
-        TranscriptItem::ToolCard {
-            args_preview,
-            state: ToolCardState::Running { .. },
-            ..
-        } => Some(args_preview.clone()),
-        _ => None,
-    })
+    vec![status]
 }
 
 /// `0s`, `59s`, `1m 05s`, `1h 02m 03s`.
@@ -340,6 +320,160 @@ mod tests {
     use ratatui::style::Color;
 
     #[test]
+    fn ordinary_shell_uses_fixed_bottom_regions() {
+        let [transcript, progress, composer, footer] =
+            ordinary_shell_areas(Rect::new(0, 0, 80, 24));
+        assert_eq!(transcript, Rect::new(0, 0, 80, 17));
+        assert_eq!(progress, Rect::new(0, 17, 80, 1));
+        assert_eq!(composer, Rect::new(0, 18, 80, 5));
+        assert_eq!(footer, Rect::new(0, 23, 80, 1));
+    }
+
+    #[test]
+    fn composer_uses_borderless_prompt_band() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        app.input = {
+            let mut input = tui_textarea::TextArea::new(vec!["hello".into()]);
+            input.set_placeholder_text("");
+            input
+        };
+        let mut term = Terminal::new(TestBackend::new(20, 5)).unwrap();
+        term.draw(|f| draw_input(f, f.area(), &app)).unwrap();
+        let buf = term.backend().buffer();
+
+        for (x, y) in [(0, 0), (19, 0), (0, 4), (19, 4)] {
+            assert_eq!(buf[(x, y)].symbol(), " ");
+        }
+        let row: String = (0..20).map(|x| buf[(x, 1)].symbol()).collect();
+        assert!(row.starts_with(" › hello"), "row: {row:?}");
+    }
+
+    #[test]
+    fn progress_row_paints_its_full_width_background() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        app.on_turn_started();
+        let mut term = Terminal::new(TestBackend::new(40, 1)).unwrap();
+        term.draw(|f| draw_status_row(f, f.area(), &app)).unwrap();
+        let buf = term.backend().buffer();
+
+        for x in 0..40 {
+            assert_eq!(
+                buf[(x, 0)].style().bg,
+                Some(app.theme.user_band_bg),
+                "progress background stopped at column {x}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_redraw_keeps_transcript_out_of_bottom_shell() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        app.transcript.clear();
+        app.on_turn_started();
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+
+        let body = (0..24)
+            .map(|n| format!("stream-marker-{n:02}"))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+        app.on_content_chunk(&body);
+        term.draw(|f| draw(f, &mut app)).unwrap();
+
+        let buf = term.backend().buffer();
+        let rows = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        for row in &rows[17..] {
+            assert!(
+                !row.contains("stream-marker-"),
+                "transcript leaked into the fixed bottom shell: {row:?}"
+            );
+        }
+        assert!(rows[17].contains("Working"), "rows: {rows:?}");
+        assert!(rows[18].trim().is_empty(), "rows: {rows:?}");
+        assert!(rows[19].starts_with(" › "), "rows: {rows:?}");
+        assert!(rows[22].trim().is_empty(), "rows: {rows:?}");
+    }
+
+    #[test]
+    fn short_streamed_response_starts_at_top_of_transcript() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        app.transcript.clear();
+        app.on_turn_started();
+        app.on_content_chunk("top-marker");
+        let mut term = Terminal::new(TestBackend::new(80, 24)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let first_row = (0..buf.area.width)
+            .map(|x| buf[(x, 0)].symbol())
+            .collect::<String>();
+
+        assert!(first_row.contains("top-marker"), "first row: {first_row:?}");
+    }
+
+    #[test]
+    fn live_transcript_stays_above_status_and_composer_bands() {
+        use crate::tui::app::TranscriptItem;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let mut app = App::new();
+        app.transcript.clear();
+        app.transcript.push(TranscriptItem::Assistant {
+            body: (0..10)
+                .map(|n| format!("response-{n:02}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            done: false,
+        });
+        let mut term = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        term.draw(|f| draw(f, &mut app)).unwrap();
+        let buf = term.backend().buffer();
+        let rows = (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+
+        // At this size the transcript gets six rows, including its two-row
+        // bottom padding. Its four visible tail lines must remain above the
+        // fixed status, composer, and footer bands.
+        for n in 6..10 {
+            assert!(
+                rows[..4]
+                    .iter()
+                    .any(|row| row.contains(&format!("response-{n:02}"))),
+                "response-{n:02} was not visible in the transcript: {rows:?}"
+            );
+        }
+        for row in &rows[6..] {
+            assert!(
+                !row.contains("response-"),
+                "transcript painted into a reserved bottom band: {row:?}"
+            );
+        }
+    }
+
+    #[test]
     fn completion_line_with_no_positions_is_single_span() {
         let base = Style::default().fg(Color::White);
         let highlight = Style::default().fg(Color::Yellow);
@@ -382,11 +516,11 @@ mod tests {
         app
     }
 
-    /// Render `draw_input` into a 20x3 buffer and return its rows.
+    /// Render `draw_input` into its fixed 20x5 region and return its rows.
     fn render_composer(app: &App) -> Vec<String> {
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
-        let mut term = Terminal::new(TestBackend::new(20, 3)).unwrap();
+        let mut term = Terminal::new(TestBackend::new(20, COMPOSER_HEIGHT)).unwrap();
         term.draw(|f| draw_input(f, f.area(), app)).unwrap();
         let buf = term.backend().buffer().clone();
         (0..buf.area.height)
@@ -399,7 +533,7 @@ mod tests {
     }
 
     #[test]
-    fn composer_pads_text_on_all_four_sides() {
+    fn composer_contains_text_inside_its_fixed_band() {
         let mut app = App::new();
         app.input = {
             let mut t = tui_textarea::TextArea::new(vec!["hello".to_string()]);
@@ -407,14 +541,29 @@ mod tests {
             t
         };
         let rows = render_composer(&app);
-        assert_eq!(rows[0].trim(), "", "top row must be blank padding");
-        assert_eq!(rows[2].trim(), "", "bottom row must be blank padding");
-        // `›` sits one col in; text starts after the gutter, matching
-        // the transcript's user-turn indent.
-        let gutter: String = rows[1].chars().take(COMPOSER_GUTTER as usize).collect();
-        assert_eq!(gutter, " › ");
+        assert!(rows[0].trim().is_empty(), "got: {:?}", rows[0]);
         assert!(rows[1].starts_with(" › hello"), "got: {:?}", rows[1]);
-        assert!(rows[1].ends_with(' '), "right edge must stay padded");
+        assert!(rows[4].trim().is_empty(), "got: {:?}", rows[4]);
+    }
+
+    #[test]
+    fn composer_padding_keeps_the_user_band_background() {
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let app = App::new();
+        let mut term = Terminal::new(TestBackend::new(20, COMPOSER_HEIGHT)).unwrap();
+        term.draw(|f| draw_input(f, f.area(), &app)).unwrap();
+        let buf = term.backend().buffer();
+        let band = Some(app.theme.user_band_bg);
+
+        for (x, y) in [(0, 0), (19, 0), (0, 4), (19, 4), (0, 1), (10, 1), (19, 1)] {
+            assert_eq!(
+                buf[(x, y)].style().bg,
+                band,
+                "padding lost its band background at ({x}, {y})"
+            );
+        }
     }
 
     #[test]
@@ -589,12 +738,13 @@ mod tests {
     }
 
     #[test]
-    fn status_row_shows_tool_detail_while_running() {
+    fn status_row_stays_one_line_while_a_tool_runs() {
         let mut app = app_with_status(StatusModel::default());
         app.on_turn_started();
         app.on_tool_start(1, "Grep".into(), "pattern src/".into());
         let lines = render_status_row(&app);
-        assert!(line_text(&lines[1]).contains("└ Grep pattern src/"));
+        assert_eq!(lines.len(), 1);
+        assert!(line_text(&lines[0]).contains("Working"));
     }
 
     #[test]
@@ -652,11 +802,6 @@ mod tests {
 
 fn draw_input(f: &mut Frame, area: Rect, app: &App) {
     let theme = &app.theme;
-    // Borderless composer on a tinted band. The band is padded on all
-    // four sides: `COMPOSER_V_PAD` blank rows above/below the text and
-    // `COMPOSER_GUTTER` / `TRANSCRIPT_H_PAD` cols left/right. The `›`
-    // sits in the left gutter at the same column as the transcript's
-    // user-turn prefix, so the composer reads as the next user turn.
     f.render_widget(
         Block::default().style(Style::default().bg(theme.user_band_bg)),
         area,

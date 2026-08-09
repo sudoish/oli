@@ -74,6 +74,7 @@ pub async fn run(
     host_hint: String,
     theme: theme::Theme,
 ) -> Result<()> {
+    let _diagnostic_stderr = crate::diagnostics::suspend_stderr();
     // Snapshot identity fields for the footer and welcome box
     // before the agent moves into the driver task. Branch is queried once
     // (it doesn't change mid-session in any healthy workflow);
@@ -195,6 +196,9 @@ pub async fn run(
         }
         if app.should_quit {
             break;
+        }
+        if app.take_redraw_invalidation() {
+            guard.terminal_mut().clear().map_err(io_err)?;
         }
         if inline {
             flush_committed(&mut guard, &mut app)?;

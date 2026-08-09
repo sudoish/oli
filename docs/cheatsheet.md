@@ -18,7 +18,7 @@ Every keyboard affordance and slash command in one place. Linked from
 | `oli --max-turns N`                                | Cap turns for this run (overrides `[agent].max_turns` config).               |
 | `oli --plain`                                      | Force the line-mode REPL even on a TTY.                                      |
 | `oli --inline`                                     | Render TUI inline in the host buffer (no alt-screen). Buffer-terminals.      |
-| `oli --fullscreen`                                 | Force alt-screen even when auto-detection would pick inline mode.            |
+| `oli --fullscreen`                                 | Force alt-screen (also the automatic viewport mode).                         |
 | `oli init`                                         | Interactive `~/.config/oli/config.toml` setup on stdin.                      |
 | `oli init --provider ollama`                       | Headless config bootstrap; defaults for everything.                          |
 | `oli init --provider openrouter --api-key sk-...`  | Full non-interactive bootstrap.                                              |

@@ -9,7 +9,7 @@ use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Clear, Padding, Paragraph, Wrap};
+use ratatui::widgets::{Block, Clear, Padding, Paragraph};
 
 use crate::tui::app::{App, ToolCardState, TranscriptItem};
 use crate::tui::image::{ImageMarker, can_render_images, parse_image_marker};
@@ -28,7 +28,13 @@ pub(super) const TRANSCRIPT_BOTTOM_PAD: u16 = 2;
 
 pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
     let inner_width = area.width.saturating_sub(TRANSCRIPT_H_PAD * 2);
-    let lines = build_transcript_lines(app, inner_width);
+    let mut lines = wrap_lines_to_width(build_transcript_lines(app, inner_width), inner_width);
+    while lines
+        .last()
+        .is_some_and(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
+    {
+        lines.pop();
+    }
 
     // Cache user-turn line indices so the input handler can jump
     // between them with `[` / `]` (X3). The renderer is the only
@@ -73,22 +79,13 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
         (None, Some(o)) => o.min(max),
     };
 
-    // Chat-app anchoring: when the transcript is shorter than the
-    // pane, push messages to the bottom by prepending blank lines.
-    // When content overflows the pane, the existing offset = max
-    // logic already pins the latest line to the bottom.
-    let lines = anchor_to_bottom(lines, inner_width, height);
-
     let block = Block::default().padding(Padding::new(
         TRANSCRIPT_H_PAD,
         TRANSCRIPT_H_PAD,
         0,
         TRANSCRIPT_BOTTOM_PAD,
     ));
-    let para = Paragraph::new(lines)
-        .block(block)
-        .wrap(Wrap { trim: false })
-        .scroll((offset, 0));
+    let para = Paragraph::new(lines).block(block).scroll((offset, 0));
     f.render_widget(para, area);
 
     // Floating "↓ N new" indicator on the bottom-right of the
@@ -115,6 +112,54 @@ pub(super) fn draw_transcript(f: &mut Frame, area: Rect, app: &mut App) {
             f.render_widget(badge, badge_area);
         }
     }
+}
+
+fn wrap_lines_to_width(lines: Vec<Line<'static>>, width: u16) -> Vec<Line<'static>> {
+    let width = width.max(1) as usize;
+    let mut wrapped = Vec::new();
+    for line in lines {
+        let styled_chars: Vec<(char, Style)> = line
+            .spans
+            .into_iter()
+            .flat_map(|span| {
+                let style = span.style;
+                span.content
+                    .chars()
+                    .map(move |ch| (ch, style))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        if styled_chars.is_empty() {
+            wrapped.push(Line::raw(""));
+            continue;
+        }
+        let mut start = 0;
+        while start < styled_chars.len() {
+            let remaining = styled_chars.len() - start;
+            let mut end = start + remaining.min(width);
+            if remaining > width {
+                if let Some(space) = styled_chars[start..end]
+                    .iter()
+                    .rposition(|(ch, _)| ch.is_whitespace())
+                {
+                    if space > 0 {
+                        end = start + space + 1;
+                    }
+                }
+            }
+            let mut spans: Vec<Span<'static>> = Vec::new();
+            for (ch, style) in &styled_chars[start..end] {
+                if let Some(last) = spans.last_mut().filter(|span| span.style == *style) {
+                    last.content.to_mut().push(*ch);
+                } else {
+                    spans.push(Span::styled(ch.to_string(), *style));
+                }
+            }
+            wrapped.push(Line::from(spans));
+            start = end;
+        }
+    }
+    wrapped
 }
 
 /// Render every transcript item to a flat `Vec<Line>` ready for
@@ -393,50 +438,6 @@ fn wrap_to_width(text: &str, width: usize) -> Vec<String> {
         out.push(text.to_string());
     }
     out
-}
-
-/// Conservative visual-row count estimate that accounts for
-/// `Wrap { trim: false }`. Each line takes at least 1 row; longer
-/// lines take ceil(chars/inner_width) rows. Word-wrap may break
-/// earlier than this, so the estimate is an *upper bound*: safe
-/// for "does content fit?" decisions.
-fn visual_line_count(lines: &[Line<'_>], inner_width: u16) -> u16 {
-    let w = inner_width.max(1);
-    lines
-        .iter()
-        .map(|l| {
-            let chars: u16 = l
-                .spans
-                .iter()
-                .map(|s| s.content.chars().count() as u16)
-                .sum();
-            ((chars + w - 1) / w).max(1)
-        })
-        .sum()
-}
-
-/// Bottom-anchor the rendered lines: when the rendered content is
-/// shorter than the visible inner height, prepend blank lines so
-/// the latest message sits flush against the bottom (chat-app
-/// convention). When content overflows, return as-is — the
-/// existing `Paragraph::scroll((offset, 0))` math already pins the
-/// last line to the bottom.
-pub(super) fn anchor_to_bottom(
-    mut lines: Vec<Line<'static>>,
-    inner_width: u16,
-    inner_height: u16,
-) -> Vec<Line<'static>> {
-    let visual = visual_line_count(&lines, inner_width);
-    if visual < inner_height {
-        let pad = (inner_height - visual) as usize;
-        let mut padded = Vec::with_capacity(lines.len() + pad);
-        for _ in 0..pad {
-            padded.push(Line::raw(""));
-        }
-        padded.append(&mut lines);
-        return padded;
-    }
-    lines
 }
 
 /// Line indices (post-layout) of the start of each user turn.
@@ -1108,52 +1109,6 @@ mod tests {
             assert!(chunk.chars().count() <= 9, "{:?} too long", chunk);
         }
         assert_eq!(out.join(" "), "one two three four five");
-    }
-
-    #[test]
-    fn anchor_to_bottom_prepends_blanks_when_content_fits() {
-        let content: Vec<Line<'static>> = vec![
-            Line::raw("hello".to_string()),
-            Line::raw("world".to_string()),
-        ];
-        let result = anchor_to_bottom(content, 40, 10);
-        assert_eq!(result.len(), 10);
-        // First 8 rows are blank padding…
-        for i in 0..8 {
-            assert_eq!(line_text(&result[i]), "", "row {} should be blank", i);
-        }
-        // …then real content sits at the bottom.
-        assert_eq!(line_text(&result[8]), "hello");
-        assert_eq!(line_text(&result[9]), "world");
-    }
-
-    #[test]
-    fn anchor_to_bottom_passes_through_when_content_overflows() {
-        let content: Vec<Line<'static>> =
-            (0..20).map(|i| Line::raw(format!("line-{}", i))).collect();
-        let result = anchor_to_bottom(content.clone(), 40, 10);
-        assert_eq!(result.len(), content.len());
-        assert_eq!(line_text(&result[0]), "line-0");
-    }
-
-    #[test]
-    fn anchor_to_bottom_accounts_for_wrapping_in_long_lines() {
-        // A 100-char line at width 40 wraps to 3 rows; combined
-        // with one short line, visual height = 4. Pane height 10
-        // should leave 6 blank rows at the top.
-        let long: String = "x".repeat(100);
-        let content: Vec<Line<'static>> =
-            vec![Line::raw(long.clone()), Line::raw("short".to_string())];
-        let result = anchor_to_bottom(content, 40, 10);
-        // 6 blank rows + 1 long line + 1 short line = 8 entries
-        // (the long line stays as one Line; wrap happens at render
-        // time but our estimate accounts for the 3-row footprint).
-        assert_eq!(result.len(), 8);
-        for i in 0..6 {
-            assert_eq!(line_text(&result[i]), "");
-        }
-        assert_eq!(line_text(&result[6]), long);
-        assert_eq!(line_text(&result[7]), "short");
     }
 
     #[test]

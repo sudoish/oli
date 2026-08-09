@@ -1304,6 +1304,47 @@ fn decision_cell_lands_in_transcript_with_glyph() {
 }
 
 #[test]
+fn closing_approval_requests_one_full_terminal_clear() {
+    let mut app = App::new();
+    app.on_approval_requested(
+        "Bash".into(),
+        serde_json::json!({"command":"ls"}),
+        "run".into(),
+    );
+
+    app.close_approval();
+
+    assert!(app.take_redraw_invalidation());
+    assert!(!app.take_redraw_invalidation());
+}
+
+#[test]
+fn progress_mode_transitions_request_redraw_invalidation() {
+    let mut app = App::new();
+    app.on_turn_started();
+    assert!(app.take_redraw_invalidation());
+
+    app.on_content_chunk("first");
+    assert!(app.take_redraw_invalidation());
+    app.on_content_chunk(" second");
+    assert!(!app.take_redraw_invalidation());
+
+    app.on_tool_start(1, "Read".into(), "file=x".into());
+    assert!(app.take_redraw_invalidation());
+    app.on_tool_done(
+        1,
+        std::time::Duration::from_millis(1),
+        "done".into(),
+        true,
+        "done".into(),
+    );
+    assert!(app.take_redraw_invalidation());
+
+    app.on_turn_finished("");
+    assert!(app.take_redraw_invalidation());
+}
+
+#[test]
 fn welcome_and_turn_rule_are_immediately_committable() {
     let items = vec![
         TranscriptItem::Welcome,
