@@ -1,0 +1,11 @@
+default_provider = "chatgpt"
+
+[providers.chatgpt]
+kind = "openai-chatgpt"
+base_url = "https://chatgpt.com/backend-api/codex"
+
+[policy]
+mode = "ask"
+
+[ui]
+osc52 = "on"

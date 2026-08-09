@@ -1,0 +1,28 @@
+{
+  "groups": {
+    "group:oli-developers": ["developer@example.com"],
+  },
+
+  "tagOwners": {
+    "tag:oli-workstation": ["group:oli-developers"],
+  },
+
+  "acls": [
+    {
+      "action": "accept",
+      "src": ["group:oli-developers"],
+      "dst": ["tag:oli-workstation:22"],
+    },
+  ],
+
+  "tests": [
+    {
+      "src": "developer@example.com",
+      "accept": ["tag:oli-workstation:22"],
+    },
+    {
+      "src": "unlisted@example.com",
+      "deny": ["tag:oli-workstation:22"],
+    },
+  ],
+}
