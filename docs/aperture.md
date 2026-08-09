@@ -21,14 +21,19 @@ ChatGPT backend requires the OAuth token created by `oli login`.
 
 - An Aperture instance reachable from the machine running Oli.
 - Tailscale connected to the same tailnet as that instance.
-- Admin access to configure Aperture providers and grants.
+- An Aperture provider and grant for the intended model, or admin access to
+  create them.
 - A ChatGPT subscription supported by `oli login`.
 
 ## Configure Aperture
 
-In the Aperture dashboard, open **Administration → Configuration** and add a
-passthrough provider. Model names must exactly match models served by the
-subscription; wildcards do not work.
+This is a one-time, instance-wide admin step. If the intended model already
+appears on Aperture's **Models** page and is granted to your Tailscale identity,
+skip to [Sign Oli in](#sign-oli-in).
+
+Otherwise, in the Aperture dashboard, open **Administration → Configuration**
+and add a passthrough provider. Model names must exactly match models served by
+the subscription; wildcards do not work.
 
 ```json
 {
