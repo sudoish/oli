@@ -231,6 +231,7 @@ this is an extra provider kind, not a replacement.
 $ oli login                 # opens a browser on this machine
 $ oli login --paste         # browser on another machine; paste the redirect URL back
 $ oli login --device-auth   # headless: shows a code to enter elsewhere
+$ oli login --check         # refresh token, discover models, send a real prompt
 $ oli logout                # discards the stored credentials
 ```
 
@@ -292,6 +293,8 @@ Caveats worth knowing before you rely on it:
 - OpenAI's tolerance for this is informal and could end. If it does,
   every failure path names the API-key fallback explicitly rather than
   failing cryptically.
+
+Before a release, follow [the subscription release gate](docs/subscription-release-gate.md).
 
 A more loaded config with multiple providers and a stricter policy:
 
