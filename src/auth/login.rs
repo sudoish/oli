@@ -361,10 +361,10 @@ mod tests {
     #[test]
     fn release_check_rejects_whitespace_only_reply() {
         let test_cases = vec![
-            "   ",           // spaces only
-            "\t\t",          // tabs only
-            "\n\n",          // newlines only
-            " \t\n ",        // mixed whitespace
+            "   ",    // spaces only
+            "\t\t",   // tabs only
+            "\n\n",   // newlines only
+            " \t\n ", // mixed whitespace
         ];
 
         for content in test_cases {
@@ -374,7 +374,10 @@ mod tests {
             };
 
             let err = release_check_reply(&response).unwrap_err().to_string();
-            assert!(err.contains("empty response"), "Expected 'empty response' error for whitespace-only content: {content:?}, got: {err}");
+            assert!(
+                err.contains("empty response"),
+                "Expected 'empty response' error for whitespace-only content: {content:?}, got: {err}"
+            );
         }
     }
 
@@ -383,12 +386,12 @@ mod tests {
         // The comparison must use the original untrimmed content, so
         // responses with whitespace around OLI_SUBSCRIPTION_OK should be rejected
         let test_cases = vec![
-            " OLI_SUBSCRIPTION_OK",      // leading space
-            "OLI_SUBSCRIPTION_OK ",      // trailing space
-            " OLI_SUBSCRIPTION_OK ",     // both
-            "\nOLI_SUBSCRIPTION_OK",     // leading newline
-            "OLI_SUBSCRIPTION_OK\n",     // trailing newline
-            "\tOLI_SUBSCRIPTION_OK\t",   // tabs
+            " OLI_SUBSCRIPTION_OK",    // leading space
+            "OLI_SUBSCRIPTION_OK ",    // trailing space
+            " OLI_SUBSCRIPTION_OK ",   // both
+            "\nOLI_SUBSCRIPTION_OK",   // leading newline
+            "OLI_SUBSCRIPTION_OK\n",   // trailing newline
+            "\tOLI_SUBSCRIPTION_OK\t", // tabs
         ];
 
         for content in test_cases {
@@ -398,7 +401,10 @@ mod tests {
             };
 
             let err = release_check_reply(&response).unwrap_err().to_string();
-            assert!(err.contains("unexpected response"), "Expected 'unexpected response' error for content with whitespace: {content:?}, got: {err}");
+            assert!(
+                err.contains("unexpected response"),
+                "Expected 'unexpected response' error for content with whitespace: {content:?}, got: {err}"
+            );
         }
     }
 
