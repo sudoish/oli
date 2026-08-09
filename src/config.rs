@@ -758,4 +758,15 @@ base_url = "u"
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.agent.max_turns, 40);
     }
+
+    #[test]
+    fn remote_workstation_provider_examples_are_valid_configs() {
+        for example in [
+            include_str!("../examples/remote-workstation/chatgpt.toml"),
+            include_str!("../examples/remote-workstation/openrouter.toml"),
+            include_str!("../examples/remote-workstation/ollama.toml"),
+        ] {
+            Config::from_str(example).unwrap();
+        }
+    }
 }

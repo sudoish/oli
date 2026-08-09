@@ -1,0 +1,13 @@
+default_provider = "ollama"
+
+[providers.ollama]
+kind = "openai-compat"
+base_url = "http://127.0.0.1:11434/v1"
+api_key = "ollama"
+default_model = "qwen3-coder:30b"
+
+[policy]
+mode = "ask"
+
+[ui]
+osc52 = "on"

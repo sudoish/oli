@@ -1,0 +1,13 @@
+default_provider = "openrouter"
+
+[providers.openrouter]
+kind = "openai-compat"
+base_url = "https://openrouter.ai/api/v1"
+api_key_env = "OPENROUTER_API_KEY"
+default_model = "anthropic/claude-haiku-4.5"
+
+[policy]
+mode = "ask"
+
+[ui]
+osc52 = "on"
