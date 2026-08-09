@@ -106,9 +106,15 @@ oli -p "Respond with exactly: connected"
 ```
 
 Then open Aperture's **Logs** page and confirm the request appears with the
-expected Tailscale identity and model. Aperture observes model requests,
-tokens, model-side tool calls, and estimated cost. Oli's local file, shell,
-policy, and tool execution remains outside the gateway.
+expected Tailscale identity and model. Viewing logs requires admin access; if
+you do not have admin permissions, ask an Aperture administrator to verify the
+request.
+
+Aperture observes model requests, tokens, model-side tool calls, and estimated
+cost. Although Oli executes file reads, shell commands, and other tools locally
+on the Oli machine, tool arguments, file contents, and command output included
+in model traffic may be observed by Aperture and retained according to its
+configured retention policy.
 
 ## Troubleshooting
 
@@ -119,8 +125,15 @@ the Responses API. Set `kind = "openai-chatgpt"` and use the `/codex` URL.
 
 ### Cloudflare HTML or `403 Forbidden`
 
-The ChatGPT backend received a placeholder or otherwise invalid credential.
-Confirm all of the following:
+A `403 Forbidden` response may originate from Aperture itself (missing tailnet
+policy or model grant) or from the upstream ChatGPT backend (invalid
+credential). First verify that Aperture's tailnet policy allows your Tailscale
+identity to reach the instance and that the model is granted to you on
+Aperture's Models page.
+
+If Aperture access is correctly configured but the response includes Cloudflare
+HTML, the ChatGPT backend received a placeholder or otherwise invalid
+credential. Confirm all of the following:
 
 - Oli has completed `oli login`.
 - The Oli provider kind is `openai-chatgpt`.
@@ -139,6 +152,18 @@ Check that Tailscale is running and connected to the correct tailnet:
 
 ```bash
 tailscale status
+```
+
+Verify that MagicDNS is enabled:
+
+```bash
+tailscale dns status
+```
+
+Then confirm the Aperture hostname resolves:
+
+```bash
+nslookup <hostname>.ts.net
 ```
 
 The standard Aperture hostname is private and does not resolve through public
