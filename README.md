@@ -298,6 +298,8 @@ Caveats worth knowing before you rely on it:
   failing cryptically.
 
 Before a release, follow [the subscription release gate](docs/subscription-release-gate.md).
+To route a ChatGPT subscription through Tailscale's AI gateway, follow the
+[Aperture setup guide](docs/aperture.md).
 The private remote-workstation reference design begins with its
 [topology and threat model](docs/remote-workstation-threat-model.md).
 The runnable clean-host setup is under
