@@ -136,6 +136,14 @@ run `oli` without a subcommand for the line-mode REPL.
 | `oli run --strict -p "..."` | Deny every operation requiring approval. |
 | `oli run --max-turns N -p "..."` | Override the turn cap for one run. |
 
+Headless runs distinguish completion from turn-cap exhaustion. Successful JSON
+results include `"status":"completed"`. If `max_turns` is exhausted, Oli exits
+non-zero and emits one JSON object with `"status":"incomplete"`,
+`"reason":"max_turns_exhausted"`, `max_turns`, and the resumable
+`conversation_id`; it does not emit a `response`. Text mode exits non-zero with
+the reason and conversation ID on stderr. The line REPL keeps the session open
+and prints a human-readable exhaustion message.
+
 ### Slash commands (highlights)
 
 Type `/` at the prompt. Append `?` to see a command's description

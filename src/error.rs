@@ -39,6 +39,11 @@ pub enum AgentError {
     /// without that phrasing leaking into ordinary config errors.
     #[error("auth error: {0}")]
     Auth(String),
+
+    /// The headless client already rendered a structured incomplete result.
+    /// The binary maps this to a non-zero exit without printing a second error.
+    #[error("max turns exhausted: {0}")]
+    MaxTurnsExhausted(usize),
 }
 
 impl From<mlua::Error> for AgentError {

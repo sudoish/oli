@@ -16,7 +16,7 @@ use rustyline::error::ReadlineError;
 use serde_json::Value;
 use std::io::Write;
 
-use crate::agent::Agent;
+use crate::agent::{Agent, RunOutcome};
 use crate::error::{AgentError, Result};
 use crate::hooks::{Hook, HookOutcome, HookPayload};
 
@@ -127,7 +127,7 @@ async fn run_turn(agent: &mut Agent, prompt: &str) {
 
     let cancelled;
     {
-        let fut = agent.run_streaming(prompt, &mut sink);
+        let fut = agent.run_streaming_outcome(prompt, &mut sink);
         tokio::pin!(fut);
 
         tokio::select! {
@@ -138,7 +138,10 @@ async fn run_turn(agent: &mut Agent, prompt: &str) {
             r = &mut fut => {
                 cancelled = false;
                 match r {
-                    Ok(_) => println!(),
+                    Ok(RunOutcome::Completed(_)) => println!(),
+                    Ok(RunOutcome::MaxTurnsExhausted { message, .. }) => {
+                        println!("\n{message}")
+                    }
                     Err(e) => crate::log_error!("\nerror: {e}"),
                 }
             }

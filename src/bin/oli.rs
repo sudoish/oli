@@ -10,8 +10,8 @@ use std::io::{IsTerminal, Read};
 use std::process;
 use std::sync::Arc;
 
-use oli::agent::Agent;
 use oli::agent::context::SystemPromptBuilder;
+use oli::agent::{Agent, RunOutcome};
 use oli::bootstrap::{DefaultAgentSpawner, build_default_tools, build_memory, resolve_session_id};
 use oli::config::Config;
 use oli::error::Result;
@@ -192,7 +192,9 @@ async fn main() {
         None => run_interactive().await,
     };
     if let Err(e) = result {
-        eprintln!("{}", e);
+        if !matches!(e, oli::error::AgentError::MaxTurnsExhausted(_)) {
+            eprintln!("{}", e);
+        }
         process::exit(1);
     }
 }
@@ -508,8 +510,20 @@ struct UsageOutput {
 
 #[derive(Serialize)]
 struct CompletedRun<'a> {
+    status: &'static str,
     conversation_id: &'a str,
     response: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    usage: Option<UsageOutput>,
+}
+
+#[derive(Serialize)]
+struct IncompleteRun<'a> {
+    status: &'static str,
+    conversation_id: &'a str,
+    reason: &'static str,
+    max_turns: usize,
     provider: &'a str,
     model: &'a str,
     usage: Option<UsageOutput>,
@@ -653,7 +667,39 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                 .with_approver(Box::new(AlwaysDeny))
                 .pin_system_prompt(system_prompt)
                 .await?;
-            let response = agent.run(&prompt).await?;
+            let outcome = agent.run_outcome(&prompt).await?;
+            let usage = agent.last_usage.map(|_| {
+                let usage = agent.session_usage;
+                UsageOutput {
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens,
+                    total_tokens: usage.total_tokens,
+                }
+            });
+            let response = match outcome {
+                RunOutcome::Completed(response) => response,
+                RunOutcome::MaxTurnsExhausted { limit, message } => {
+                    match options.output {
+                        OutputMode::Text => {
+                            eprintln!("{message}");
+                            eprintln!("conversation: {session_id}");
+                        }
+                        OutputMode::Json => {
+                            let result = IncompleteRun {
+                                status: "incomplete",
+                                conversation_id: &session_id,
+                                reason: "max_turns_exhausted",
+                                max_turns: limit,
+                                provider: &output_provider,
+                                model: &output_model,
+                                usage,
+                            };
+                            println!("{}", serde_json::to_string(&result)?);
+                        }
+                    }
+                    return Err(oli::error::AgentError::MaxTurnsExhausted(limit));
+                }
+            };
             match options.output {
                 OutputMode::Text => {
                     if !response.is_empty() {
@@ -662,15 +708,8 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                     eprintln!("conversation: {session_id}");
                 }
                 OutputMode::Json => {
-                    let usage = agent.last_usage.map(|_| {
-                        let usage = agent.session_usage;
-                        UsageOutput {
-                            prompt_tokens: usage.prompt_tokens,
-                            completion_tokens: usage.completion_tokens,
-                            total_tokens: usage.total_tokens,
-                        }
-                    });
                     let result = CompletedRun {
+                        status: "completed",
                         conversation_id: &session_id,
                         response: &response,
                         provider: &output_provider,
@@ -758,6 +797,7 @@ mod tests {
     #[test]
     fn completed_run_serializes_stable_machine_fields() {
         let run = CompletedRun {
+            status: "completed",
             conversation_id: "c1",
             response: "done",
             provider: "openrouter",
@@ -769,6 +809,7 @@ mod tests {
             }),
         };
         let value = serde_json::to_value(run).unwrap();
+        assert_eq!(value["status"], "completed");
         assert_eq!(value["conversation_id"], "c1");
         assert_eq!(value["response"], "done");
         assert_eq!(value["usage"]["total_tokens"], 5);
@@ -777,6 +818,7 @@ mod tests {
     #[test]
     fn completed_run_uses_null_when_provider_omits_usage() {
         let run = CompletedRun {
+            status: "completed",
             conversation_id: "c1",
             response: "done",
             provider: "local",
