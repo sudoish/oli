@@ -529,6 +529,16 @@ struct IncompleteRun<'a> {
     usage: Option<UsageOutput>,
 }
 
+fn text_exhaustion_diagnostic(limit: usize, message: &str, conversation_id: &str) -> String {
+    let default_message = format!("(max_turns reached: {limit})");
+    let mut diagnostic = format!("max turns exhausted: {limit}\n");
+    if !message.trim().is_empty() && message != default_message {
+        diagnostic.push_str(&format!("detail: {message}\n"));
+    }
+    diagnostic.push_str(&format!("conversation: {conversation_id}\n"));
+    diagnostic
+}
+
 async fn run_headless(options: RunOptions) -> Result<()> {
     let prompt = resolve_prompt(options.prompt.clone())?;
     run_agent(Some((options, prompt))).await
@@ -681,8 +691,10 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                 RunOutcome::MaxTurnsExhausted { limit, message } => {
                     match options.output {
                         OutputMode::Text => {
-                            eprintln!("{message}");
-                            eprintln!("conversation: {session_id}");
+                            eprint!(
+                                "{}",
+                                text_exhaustion_diagnostic(limit, &message, &session_id)
+                            );
                         }
                         OutputMode::Json => {
                             let result = IncompleteRun {
@@ -827,6 +839,24 @@ mod tests {
         };
         let value = serde_json::to_value(run).unwrap();
         assert!(value["usage"].is_null());
+    }
+
+    #[test]
+    fn text_exhaustion_always_names_reason_even_when_hook_message_is_empty() {
+        let output = text_exhaustion_diagnostic(3, "", "conversation-1");
+        assert_eq!(
+            output,
+            "max turns exhausted: 3\nconversation: conversation-1\n"
+        );
+    }
+
+    #[test]
+    fn text_exhaustion_keeps_custom_hook_message_as_optional_detail() {
+        let output = text_exhaustion_diagnostic(3, "resume when ready", "conversation-1");
+        assert_eq!(
+            output,
+            "max turns exhausted: 3\ndetail: resume when ready\nconversation: conversation-1\n"
+        );
     }
 
     #[test]

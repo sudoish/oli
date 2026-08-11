@@ -493,7 +493,7 @@ fn text_max_turn_exhaustion_uses_stderr_and_nonzero_exit() {
     assert!(!out.status.success());
     assert_eq!(out.stdout, "");
     assert!(
-        out.stderr.contains("max_turns reached: 1"),
+        out.stderr.contains("max turns exhausted: 1"),
         "{}",
         out.stderr
     );
