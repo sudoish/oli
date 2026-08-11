@@ -9,7 +9,7 @@
 - [x] 2.1 Introduce the `run` subcommand and prompt-source resolver, including non-terminal stdin and non-interactive rejection of missing, empty, or conflicting input.
 - [x] 2.2 Route fresh and resumed headless commands through `PersistedMemory`, preserving replayed reads and write logging under one conversation ID.
 - [x] 2.3 Execute headless turns through the existing provider/tool/policy/hook/plugin/MCP startup path with a non-interactive approver and no progress output on stdout.
-- [ ] 2.4 Emit final text or one completed JSON object plus deterministic exit behavior, and add integration tests covering new, resumed, strict, provider-failure, and invalid-session runs.
+- [x] 2.4 Emit final text or one completed JSON object plus deterministic exit behavior, and add integration tests covering new, resumed, strict, provider-failure, and invalid-session runs.
 
 ## 3. Remove the TUI product surface
 
