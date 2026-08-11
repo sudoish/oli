@@ -213,7 +213,8 @@ impl Agent {
         }
         // Ignore pin errors in the builder pattern; they surface later
         // when agent.run is called if persistence fails.
-        let _ = self.memory
+        let _ = self
+            .memory
             .pin(json!({ "role": "system", "content": s }))
             .await;
         self

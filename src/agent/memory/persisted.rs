@@ -66,7 +66,12 @@ impl PersistedMemory {
 
     /// Same as `open`, but accepts an explicit sessions directory.
     /// Tests use this to avoid touching the user's real config dir.
-    pub async fn open_at(dir: &Path, id: &str, mut inner: Box<dyn Memory>, allow_create: bool) -> Result<Self> {
+    pub async fn open_at(
+        dir: &Path,
+        id: &str,
+        mut inner: Box<dyn Memory>,
+        allow_create: bool,
+    ) -> Result<Self> {
         tokio::fs::create_dir_all(dir).await?;
         let path = dir.join(format!("{}.jsonl", id));
 
@@ -162,7 +167,8 @@ impl ReadLogger for PersistedReadLogger {
 #[async_trait]
 impl Memory for PersistedMemory {
     async fn record(&mut self, message: Value) -> Result<()> {
-        self.append(json!({"op": "record", "msg": &message})).await?;
+        self.append(json!({"op": "record", "msg": &message}))
+            .await?;
         self.inner.record(message).await
     }
 
@@ -331,7 +337,9 @@ mod tests {
         let mut m = PersistedMemory::open_at(dir.path(), "test1", fresh_inner(), true)
             .await
             .unwrap();
-        m.record(json!({"role":"user","content":"hi"})).await.unwrap();
+        m.record(json!({"role":"user","content":"hi"}))
+            .await
+            .unwrap();
 
         let body = tokio::fs::read_to_string(dir.path().join("test1.jsonl"))
             .await
@@ -347,9 +355,15 @@ mod tests {
             let mut m = PersistedMemory::open_at(dir.path(), "rep", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
-            m.record(json!({"role":"user","content":"a"})).await.unwrap();
-            m.record(json!({"role":"assistant","content":"b"})).await.unwrap();
+            m.pin(json!({"role":"system","content":"sys"}))
+                .await
+                .unwrap();
+            m.record(json!({"role":"user","content":"a"}))
+                .await
+                .unwrap();
+            m.record(json!({"role":"assistant","content":"b"}))
+                .await
+                .unwrap();
         }
         let m = PersistedMemory::open_at(dir.path(), "rep", fresh_inner(), false)
             .await
@@ -370,11 +384,19 @@ mod tests {
             let mut m = PersistedMemory::open_at(dir.path(), "tc", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.record(json!({"role":"user","content":"a"})).await.unwrap();
-            m.record(json!({"role":"user","content":"b"})).await.unwrap();
-            m.record(json!({"role":"user","content":"c"})).await.unwrap();
+            m.record(json!({"role":"user","content":"a"}))
+                .await
+                .unwrap();
+            m.record(json!({"role":"user","content":"b"}))
+                .await
+                .unwrap();
+            m.record(json!({"role":"user","content":"c"}))
+                .await
+                .unwrap();
             m.truncate(1).await.unwrap();
-            m.record(json!({"role":"user","content":"d"})).await.unwrap();
+            m.record(json!({"role":"user","content":"d"}))
+                .await
+                .unwrap();
         }
         let m = PersistedMemory::open_at(dir.path(), "tc", fresh_inner(), false)
             .await
@@ -395,10 +417,16 @@ mod tests {
             let mut m = PersistedMemory::open_at(dir.path(), "cl", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
-            m.record(json!({"role":"user","content":"x"})).await.unwrap();
+            m.pin(json!({"role":"system","content":"sys"}))
+                .await
+                .unwrap();
+            m.record(json!({"role":"user","content":"x"}))
+                .await
+                .unwrap();
             m.clear().await.unwrap();
-            m.record(json!({"role":"user","content":"y"})).await.unwrap();
+            m.record(json!({"role":"user","content":"y"}))
+                .await
+                .unwrap();
         }
         let m = PersistedMemory::open_at(dir.path(), "cl", fresh_inner(), false)
             .await
@@ -431,13 +459,17 @@ mod tests {
             let mut m = PersistedMemory::open_at(dir.path(), "alpha", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.record(json!({"role":"user","content":"a"})).await.unwrap();
+            m.record(json!({"role":"user","content":"a"}))
+                .await
+                .unwrap();
         }
         {
             let mut m = PersistedMemory::open_at(dir.path(), "beta", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.record(json!({"role":"user","content":"b"})).await.unwrap();
+            m.record(json!({"role":"user","content":"b"}))
+                .await
+                .unwrap();
         }
         let entries = list_sessions_in(dir.path());
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();

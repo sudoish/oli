@@ -99,7 +99,8 @@ mod session_tests {
 
     #[test]
     fn fresh_runs_allocate_a_new_id() {
-        let (id, is_fresh) = resolve_session_id_from(None, false, &[], || "fresh-id".into()).unwrap();
+        let (id, is_fresh) =
+            resolve_session_id_from(None, false, &[], || "fresh-id".into()).unwrap();
         assert_eq!(id, "fresh-id");
         assert!(is_fresh);
     }
@@ -116,7 +117,8 @@ mod session_tests {
     #[test]
     fn continue_selects_latest_deterministically() {
         let sessions = [entry("newest", 20), entry("older", 10)];
-        let (id, is_fresh) = resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
+        let (id, is_fresh) =
+            resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
         assert_eq!(id, "newest");
         assert!(!is_fresh);
     }
@@ -124,7 +126,8 @@ mod session_tests {
     #[test]
     fn continue_breaks_equal_mtime_ties_by_id() {
         let sessions = [entry("alpha", 20), entry("beta", 20)];
-        let (id, is_fresh) = resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
+        let (id, is_fresh) =
+            resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
         assert_eq!(id, "beta");
         assert!(!is_fresh);
     }

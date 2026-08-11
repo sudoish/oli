@@ -219,8 +219,12 @@ mod tests {
     #[tokio::test]
     async fn record_and_snapshot_round_trip_in_order() {
         let mut m = LinearWithCompact::new();
-        m.record(json!({"role":"user","content":"a"})).await.unwrap();
-        m.record(json!({"role":"assistant","content":"b"})).await.unwrap();
+        m.record(json!({"role":"user","content":"a"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"assistant","content":"b"}))
+            .await
+            .unwrap();
         let snap = m.snapshot().await;
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0]["content"], "a");
@@ -230,8 +234,12 @@ mod tests {
     #[tokio::test]
     async fn pinned_appears_before_messages_in_snapshot() {
         let mut m = LinearWithCompact::new();
-        m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
-        m.record(json!({"role":"user","content":"u"})).await.unwrap();
+        m.pin(json!({"role":"system","content":"sys"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"u"}))
+            .await
+            .unwrap();
         let snap = m.snapshot().await;
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0]["role"], "system");
@@ -241,8 +249,12 @@ mod tests {
     #[tokio::test]
     async fn clear_drops_messages_summary_and_counter_but_not_pinned() {
         let mut m = LinearWithCompact::new();
-        m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
-        m.record(json!({"role":"user","content":"u"})).await.unwrap();
+        m.pin(json!({"role":"system","content":"sys"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"u"}))
+            .await
+            .unwrap();
         m.clear().await.unwrap();
         assert_eq!(m.len(), 0);
         let snap = m.snapshot().await;
@@ -253,10 +265,18 @@ mod tests {
     #[tokio::test]
     async fn truncate_rolls_back_recorded_messages_only() {
         let mut m = LinearWithCompact::new();
-        m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
-        m.record(json!({"role":"user","content":"a"})).await.unwrap();
-        m.record(json!({"role":"user","content":"b"})).await.unwrap();
-        m.record(json!({"role":"user","content":"c"})).await.unwrap();
+        m.pin(json!({"role":"system","content":"sys"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"a"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"b"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"c"}))
+            .await
+            .unwrap();
         assert_eq!(m.len(), 3);
 
         m.truncate(1).await.unwrap();
@@ -270,9 +290,15 @@ mod tests {
     #[tokio::test]
     async fn len_excludes_pinned_messages() {
         let mut m = LinearWithCompact::new();
-        m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
-        m.pin(json!({"role":"system","content":"sys2"})).await.unwrap();
-        m.record(json!({"role":"user","content":"u"})).await.unwrap();
+        m.pin(json!({"role":"system","content":"sys"}))
+            .await
+            .unwrap();
+        m.pin(json!({"role":"system","content":"sys2"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"u"}))
+            .await
+            .unwrap();
         assert_eq!(m.len(), 1);
     }
 
@@ -290,7 +316,8 @@ mod tests {
         for i in 0..6 {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
             m.record(json!({"role": role, "content": format!("msg{}", i)}))
-                .await.unwrap();
+                .await
+                .unwrap();
         }
         let provider = ShouldNotCall;
         m.maybe_compact(CompactContext {
@@ -323,7 +350,8 @@ mod tests {
         for i in 0..6 {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
             m.record(json!({"role": role, "content": format!("msg{}", i)}))
-                .await.unwrap();
+                .await
+                .unwrap();
         }
         let provider = StubSummary;
         m.maybe_compact(CompactContext {
@@ -416,7 +444,8 @@ mod tests {
         for i in 0..6 {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
             m.record(json!({"role": role, "content": format!("msg{}", i)}))
-                .await.unwrap();
+                .await
+                .unwrap();
         }
         let provider = StubSummary;
         m.maybe_compact(CompactContext {
@@ -457,7 +486,9 @@ mod tests {
             }
         }
         let mut m = LinearWithCompact::new();
-        m.record(json!({"role":"user","content":"u"})).await.unwrap();
+        m.record(json!({"role":"user","content":"u"}))
+            .await
+            .unwrap();
 
         let provider = ShouldNotCall;
         m.maybe_compact(CompactContext {
