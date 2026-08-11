@@ -221,6 +221,6 @@ impl SubagentSpawner for DefaultAgentSpawner {
             }
         }
 
-        agent.run(prompt).await
+        agent.run(prompt).await?.into_completed()
     }
 }

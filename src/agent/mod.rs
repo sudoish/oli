@@ -3,8 +3,8 @@
 //! think → call → observe loop the model drives.
 //!
 //! Two entry points:
-//! - [`Agent::run`] — one-shot prompt; returns the final assistant
-//!   text. Used by the `-p` CLI mode.
+//! - [`Agent::run`] — one-shot prompt; returns a typed terminal outcome.
+//!   Used by the headless CLI and nested agents.
 //! - [`Agent::run_streaming`] — same loop but emits incremental
 //!   events (content chunks, tool starts/ends, usage updates) to a
 //!   user-supplied callback. Drives headless runs and the line REPL.
@@ -41,10 +41,13 @@ pub enum RunOutcome {
 }
 
 impl RunOutcome {
-    fn into_display_text(self) -> String {
+    /// Require a completed response at a non-interactive composition boundary.
+    pub fn into_completed(self) -> Result<String> {
         match self {
-            Self::Completed(text) => text,
-            Self::MaxTurnsExhausted { message, .. } => message,
+            Self::Completed(text) => Ok(text),
+            Self::MaxTurnsExhausted { limit, .. } => {
+                Err(crate::error::AgentError::MaxTurnsExhausted(limit))
+            }
         }
     }
 }
@@ -352,14 +355,9 @@ impl Agent {
     /// Append `prompt` as a user turn, run the loop until the assistant
     /// produces a response without tool calls, and return that final
     /// content. Non-streaming path; uses a no-op sink under the hood.
-    pub async fn run(&mut self, prompt: &str) -> Result<String> {
-        Ok(self.run_outcome(prompt).await?.into_display_text())
-    }
-
-    /// Non-streaming run with a typed terminal state.
-    pub async fn run_outcome(&mut self, prompt: &str) -> Result<RunOutcome> {
+    pub async fn run(&mut self, prompt: &str) -> Result<RunOutcome> {
         let mut nop = |_: StreamEvent<'_>| {};
-        self.run_streaming_outcome(prompt, &mut nop).await
+        self.run_streaming(prompt, &mut nop).await
     }
 
     /// Same as `run`, but emits provider stream events through `sink` as
@@ -367,24 +365,10 @@ impl Agent {
     /// tool-call arguments via `StreamEvent::ToolArgsChunk`). Tool-call
     /// rounds are silent on the content side; only model text reaches
     /// `Content`.
-    pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<String>
-    where
-        F: FnMut(StreamEvent<'_>) + Send,
-    {
-        Ok(self
-            .run_streaming_outcome(prompt, sink)
-            .await?
-            .into_display_text())
-    }
-
-    /// Streaming run with a typed terminal state. Stop hooks may customize the
+    /// Stop hooks may customize the
     /// human-facing exhaustion message, but cannot turn exhaustion into a
     /// completed outcome.
-    pub async fn run_streaming_outcome<F>(
-        &mut self,
-        prompt: &str,
-        sink: &mut F,
-    ) -> Result<RunOutcome>
+    pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<RunOutcome>
     where
         F: FnMut(StreamEvent<'_>) + Send,
     {
@@ -595,7 +579,7 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("done")]);
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "done");
+        assert_eq!(out, RunOutcome::Completed("done".into()));
     }
 
     #[tokio::test]
@@ -612,7 +596,7 @@ mod tests {
 
         let mut agent = Agent::new(Box::new(provider), tools, "m".into());
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "after-tool");
+        assert_eq!(out, RunOutcome::Completed("after-tool".into()));
     }
 
     #[tokio::test]
@@ -662,7 +646,7 @@ mod tests {
             "m".into(),
         );
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "recovered");
+        assert_eq!(out, RunOutcome::Completed("recovered".into()));
 
         let seen = provider_ref.requests();
         let tool_msg = &seen[1].messages[2];
@@ -726,7 +710,7 @@ mod tests {
             }
         };
         let out = agent.run_streaming("hi", &mut sink).await.unwrap();
-        assert_eq!(out, "hello world");
+        assert_eq!(out, RunOutcome::Completed("hello world".into()));
         // FakeProvider splits at the midpoint char boundary into two chunks.
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks.concat(), "hello world");
@@ -850,7 +834,7 @@ mod tests {
 
         let mut agent = Agent::new(Box::new(provider), tools, "m".into()).with_hooks(hooks);
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "done");
+        assert_eq!(out, RunOutcome::Completed("done".into()));
 
         let log = trace.lock().unwrap().clone();
         assert_eq!(log.len(), 3);
@@ -938,7 +922,7 @@ mod tests {
         // the capability registry, which is what gates the parser.
         let mut agent = Agent::new(Box::new(provider), tools, "qwen2.5-coder:7b".into());
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "done");
+        assert_eq!(out, RunOutcome::Completed("done".into()));
 
         // The recorded assistant message should now have synthesized
         // `tool_calls` even though the provider didn't emit them.
@@ -973,7 +957,10 @@ mod tests {
             "anthropic/claude-haiku-4.5".into(),
         );
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, r#"{"name":"Echo","arguments":{}}"#);
+        assert_eq!(
+            out,
+            RunOutcome::Completed(r#"{"name":"Echo","arguments":{}}"#.into())
+        );
     }
 
     #[tokio::test]
@@ -1006,7 +993,7 @@ mod tests {
         .with_policy(Box::new(DenyAll));
 
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "recovered");
+        assert_eq!(out, RunOutcome::Completed("recovered".into()));
 
         let seen = provider_ref.requests();
         let tool_msg = &seen[1].messages[2];
@@ -1330,7 +1317,7 @@ mod tests {
         )
         .with_hooks(hooks);
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "recovered");
+        assert_eq!(out, RunOutcome::Completed("recovered".into()));
 
         // Tool message the model saw on its second turn carries the
         // synthetic result, not a real dispatch.
@@ -1475,7 +1462,7 @@ mod tests {
         let mut agent =
             Agent::new(Box::new(provider), Registry::new(), "m".into()).with_hooks(hooks);
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "[audited] done");
+        assert_eq!(out, RunOutcome::Completed("[audited] done".into()));
     }
 
     #[tokio::test]
@@ -1504,7 +1491,7 @@ mod tests {
             .with_hooks(hooks)
             .with_max_turns(0);
 
-        let outcome = agent.run_outcome("hi").await.unwrap();
+        let outcome = agent.run("hi").await.unwrap();
 
         assert_eq!(
             outcome,

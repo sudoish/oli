@@ -667,7 +667,7 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                 .with_approver(Box::new(AlwaysDeny))
                 .pin_system_prompt(system_prompt)
                 .await?;
-            let outcome = agent.run_outcome(&prompt).await?;
+            let outcome = agent.run(&prompt).await?;
             let usage = agent.last_usage.map(|_| {
                 let usage = agent.session_usage;
                 UsageOutput {

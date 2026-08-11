@@ -40,8 +40,9 @@ pub enum AgentError {
     #[error("auth error: {0}")]
     Auth(String),
 
-    /// The headless client already rendered a structured incomplete result.
-    /// The binary maps this to a non-zero exit without printing a second error.
+    /// A caller required completed work but the agent exhausted its turn cap.
+    /// The headless client renders the structured result before the binary maps
+    /// this variant to a non-zero exit without a duplicate error.
     #[error("max turns exhausted: {0}")]
     MaxTurnsExhausted(usize),
 }

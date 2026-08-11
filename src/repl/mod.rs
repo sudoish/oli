@@ -127,7 +127,7 @@ async fn run_turn(agent: &mut Agent, prompt: &str) {
 
     let cancelled;
     {
-        let fut = agent.run_streaming_outcome(prompt, &mut sink);
+        let fut = agent.run_streaming(prompt, &mut sink);
         tokio::pin!(fut);
 
         tokio::select! {
