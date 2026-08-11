@@ -420,3 +420,82 @@ fn invalid_conversation_exits_nonzero_without_calling_provider_or_creating_sessi
     assert!(server.requests().is_empty());
     assert!(!sandbox.sessions_dir().exists());
 }
+
+#[test]
+fn max_turn_exhaustion_is_structured_non_success_and_remains_resumable() {
+    let server = TestServer::start();
+    server.push_tool_call("Read", json!({"file_path": "Cargo.toml"}));
+    server.push_assistant("completed after resume");
+    let sandbox = Sandbox::new(&server);
+
+    let mut first = sandbox.command();
+    first.args([
+        "run",
+        "--prompt",
+        "inspect first",
+        "--max-turns",
+        "1",
+        "--output",
+        "json",
+    ]);
+    let first = run_oli(first);
+    assert!(!first.status.success());
+    assert_eq!(first.stderr, "");
+    let incomplete: Value = serde_json::from_str(&first.stdout).unwrap();
+    assert_eq!(incomplete["status"], "incomplete");
+    assert_eq!(incomplete["reason"], "max_turns_exhausted");
+    assert_eq!(incomplete["max_turns"], 1);
+    assert!(incomplete.get("response").is_none());
+    let id = incomplete["conversation_id"].as_str().unwrap().to_string();
+
+    let mut resumed = sandbox.command();
+    resumed.args([
+        "run",
+        "--conversation",
+        &id,
+        "--prompt",
+        "finish now",
+        "--output",
+        "json",
+    ]);
+    let resumed = run_oli(resumed);
+    assert!(resumed.status.success(), "stderr: {}", resumed.stderr);
+    let completed: Value = serde_json::from_str(&resumed.stdout).unwrap();
+    assert_eq!(completed["status"], "completed");
+    assert_eq!(completed["conversation_id"], id);
+    assert_eq!(completed["response"], "completed after resume");
+
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    let resumed_messages = requests[1]["messages"].as_array().unwrap();
+    assert!(
+        resumed_messages
+            .iter()
+            .any(|m| m["content"] == "inspect first")
+    );
+    assert!(
+        resumed_messages
+            .iter()
+            .any(|m| m["content"] == "finish now")
+    );
+}
+
+#[test]
+fn text_max_turn_exhaustion_uses_stderr_and_nonzero_exit() {
+    let server = TestServer::start();
+    server.push_tool_call("Read", json!({"file_path": "Cargo.toml"}));
+    let sandbox = Sandbox::new(&server);
+
+    let mut cmd = sandbox.command();
+    cmd.args(["run", "--prompt", "inspect", "--max-turns", "1"]);
+    let out = run_oli(cmd);
+
+    assert!(!out.status.success());
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr.contains("max turns exhausted: 1"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("conversation: "), "{}", out.stderr);
+}

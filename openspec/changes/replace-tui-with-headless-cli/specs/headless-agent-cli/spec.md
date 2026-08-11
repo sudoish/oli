@@ -51,7 +51,13 @@ The system SHALL support text and JSON output modes. Successful text output SHAL
 
 #### Scenario: JSON result
 - **WHEN** a JSON-mode run completes successfully
-- **THEN** stdout SHALL parse as one JSON object containing `conversation_id` and `response` without surrounding progress text
+- **THEN** stdout SHALL parse as one JSON object containing `status: "completed"`, `conversation_id`, and `response` without surrounding progress text
+
+#### Scenario: Turn cap exhausted
+- **WHEN** a headless run exhausts its configured `max_turns`
+- **THEN** it SHALL exit non-zero and SHALL NOT represent the run as a completed assistant response
+- **AND** JSON mode SHALL emit one object containing `status: "incomplete"`, `reason: "max_turns_exhausted"`, `max_turns`, and the resumable `conversation_id`
+- **AND** text mode SHALL emit the reason and resumable conversation identifier on stderr without success output on stdout
 
 #### Scenario: Failed run
 - **WHEN** configuration, provider, agent, or persistence failure prevents completion

@@ -3,8 +3,8 @@
 //! think → call → observe loop the model drives.
 //!
 //! Two entry points:
-//! - [`Agent::run`] — one-shot prompt; returns the final assistant
-//!   text. Used by the `-p` CLI mode.
+//! - [`Agent::run`] — one-shot prompt; returns a typed terminal outcome.
+//!   Used by the headless CLI and nested agents.
 //! - [`Agent::run_streaming`] — same loop but emits incremental
 //!   events (content chunks, tool starts/ends, usage updates) to a
 //!   user-supplied callback. Drives headless runs and the line REPL.
@@ -30,6 +30,27 @@ use crate::hooks::{HookRegistry, PreToolDecision};
 use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
 use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage};
 use crate::tools::{Registry, ToolContext};
+
+/// Typed terminal state for one agent invocation. Callers that need to
+/// distinguish a model completion from a safety-boundary stop can inspect
+/// this enum returned by [`Agent::run`] and [`Agent::run_streaming`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunOutcome {
+    Completed(String),
+    MaxTurnsExhausted { limit: usize, message: String },
+}
+
+impl RunOutcome {
+    /// Require a completed response at a non-interactive composition boundary.
+    pub fn into_completed(self) -> Result<String> {
+        match self {
+            Self::Completed(text) => Ok(text),
+            Self::MaxTurnsExhausted { limit, .. } => {
+                Err(crate::error::AgentError::MaxTurnsExhausted(limit))
+            }
+        }
+    }
+}
 
 pub mod caps;
 pub mod context;
@@ -334,7 +355,7 @@ impl Agent {
     /// Append `prompt` as a user turn, run the loop until the assistant
     /// produces a response without tool calls, and return that final
     /// content. Non-streaming path; uses a no-op sink under the hood.
-    pub async fn run(&mut self, prompt: &str) -> Result<String> {
+    pub async fn run(&mut self, prompt: &str) -> Result<RunOutcome> {
         let mut nop = |_: StreamEvent<'_>| {};
         self.run_streaming(prompt, &mut nop).await
     }
@@ -344,7 +365,10 @@ impl Agent {
     /// tool-call arguments via `StreamEvent::ToolArgsChunk`). Tool-call
     /// rounds are silent on the content side; only model text reaches
     /// `Content`.
-    pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<String>
+    /// Stop hooks may customize the
+    /// human-facing exhaustion message, but cannot turn exhaustion into a
+    /// completed outcome.
+    pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<RunOutcome>
     where
         F: FnMut(StreamEvent<'_>) + Send,
     {
@@ -358,7 +382,10 @@ impl Agent {
                 if turn >= cap {
                     let msg = format!("(max_turns reached: {})", cap);
                     let msg = self.hooks.dispatch_stop(msg).await;
-                    return Ok(msg);
+                    return Ok(RunOutcome::MaxTurnsExhausted {
+                        limit: cap,
+                        message: msg,
+                    });
                 }
             }
             turn += 1;
@@ -447,7 +474,7 @@ impl Agent {
                     .unwrap_or("")
                     .to_string();
                 let content = self.hooks.dispatch_stop(content).await;
-                return Ok(content);
+                return Ok(RunOutcome::Completed(content));
             }
 
             for call in &tool_calls {
@@ -552,7 +579,7 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("done")]);
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "done");
+        assert_eq!(out, RunOutcome::Completed("done".into()));
     }
 
     #[tokio::test]
@@ -569,7 +596,7 @@ mod tests {
 
         let mut agent = Agent::new(Box::new(provider), tools, "m".into());
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "after-tool");
+        assert_eq!(out, RunOutcome::Completed("after-tool".into()));
     }
 
     #[tokio::test]
@@ -619,7 +646,7 @@ mod tests {
             "m".into(),
         );
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "recovered");
+        assert_eq!(out, RunOutcome::Completed("recovered".into()));
 
         let seen = provider_ref.requests();
         let tool_msg = &seen[1].messages[2];
@@ -683,7 +710,7 @@ mod tests {
             }
         };
         let out = agent.run_streaming("hi", &mut sink).await.unwrap();
-        assert_eq!(out, "hello world");
+        assert_eq!(out, RunOutcome::Completed("hello world".into()));
         // FakeProvider splits at the midpoint char boundary into two chunks.
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks.concat(), "hello world");
@@ -807,7 +834,7 @@ mod tests {
 
         let mut agent = Agent::new(Box::new(provider), tools, "m".into()).with_hooks(hooks);
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "done");
+        assert_eq!(out, RunOutcome::Completed("done".into()));
 
         let log = trace.lock().unwrap().clone();
         assert_eq!(log.len(), 3);
@@ -895,7 +922,7 @@ mod tests {
         // the capability registry, which is what gates the parser.
         let mut agent = Agent::new(Box::new(provider), tools, "qwen2.5-coder:7b".into());
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "done");
+        assert_eq!(out, RunOutcome::Completed("done".into()));
 
         // The recorded assistant message should now have synthesized
         // `tool_calls` even though the provider didn't emit them.
@@ -930,7 +957,10 @@ mod tests {
             "anthropic/claude-haiku-4.5".into(),
         );
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, r#"{"name":"Echo","arguments":{}}"#);
+        assert_eq!(
+            out,
+            RunOutcome::Completed(r#"{"name":"Echo","arguments":{}}"#.into())
+        );
     }
 
     #[tokio::test]
@@ -963,7 +993,7 @@ mod tests {
         .with_policy(Box::new(DenyAll));
 
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "recovered");
+        assert_eq!(out, RunOutcome::Completed("recovered".into()));
 
         let seen = provider_ref.requests();
         let tool_msg = &seen[1].messages[2];
@@ -1287,7 +1317,7 @@ mod tests {
         )
         .with_hooks(hooks);
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "recovered");
+        assert_eq!(out, RunOutcome::Completed("recovered".into()));
 
         // Tool message the model saw on its second turn carries the
         // synthetic result, not a real dispatch.
@@ -1432,7 +1462,44 @@ mod tests {
         let mut agent =
             Agent::new(Box::new(provider), Registry::new(), "m".into()).with_hooks(hooks);
         let out = agent.run("hi").await.unwrap();
-        assert_eq!(out, "[audited] done");
+        assert_eq!(out, RunOutcome::Completed("[audited] done".into()));
+    }
+
+    #[tokio::test]
+    async fn stop_hook_can_reword_exhaustion_without_hiding_typed_outcome() {
+        use crate::hooks::{Hook, HookOutcome, HookPayload, HookRegistry};
+
+        struct FriendlyStop;
+        #[async_trait]
+        impl Hook for FriendlyStop {
+            fn name(&self) -> &str {
+                "friendly-stop"
+            }
+            async fn handle(&self, p: &HookPayload<'_>) -> HookOutcome {
+                if matches!(p, HookPayload::Stop { .. }) {
+                    HookOutcome::Replace(Value::String("turn budget used; resume anytime".into()))
+                } else {
+                    HookOutcome::Continue
+                }
+            }
+        }
+
+        let provider = FakeProvider::new(vec![]);
+        let mut hooks = HookRegistry::new();
+        hooks.register(FriendlyStop);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
+            .with_hooks(hooks)
+            .with_max_turns(0);
+
+        let outcome = agent.run("hi").await.unwrap();
+
+        assert_eq!(
+            outcome,
+            RunOutcome::MaxTurnsExhausted {
+                limit: 0,
+                message: "turn budget used; resume anytime".into(),
+            }
+        );
     }
 
     /// Newtype around `Arc<FakeProvider>` so we can both feed the agent and
