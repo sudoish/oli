@@ -397,17 +397,27 @@ mod tests {
         }
 
         let mut m = LinearWithCompact::new();
-        m.record(json!({"role":"user","content":"u1"})).await;
+        m.record(json!({"role":"user","content":"u1"}))
+            .await
+            .unwrap();
         m.record(json!({
             "role":"assistant","content":null,
             "tool_calls":[{"id":"c1","type":"function","function":{"name":"X","arguments":"{}"}}]
         }))
-        .await;
+        .await
+        .unwrap();
         m.record(json!({"role":"tool","tool_call_id":"c1","content":"r1"}))
-            .await;
-        m.record(json!({"role":"assistant","content":"a1"})).await;
-        m.record(json!({"role":"user","content":"u2"})).await;
-        m.record(json!({"role":"assistant","content":"a2"})).await;
+            .await
+            .unwrap();
+        m.record(json!({"role":"assistant","content":"a1"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"u2"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"assistant","content":"a2"}))
+            .await
+            .unwrap();
 
         let provider = StubSummary;
         m.maybe_compact(CompactContext {

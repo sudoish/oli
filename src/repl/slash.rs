@@ -1162,7 +1162,8 @@ default_model = "alt-model"
         agent
             .memory
             .record(json!({"role":"user","content":"keep me"}))
-            .await;
+            .await
+            .unwrap();
         let mem_len_before = agent.memory.len();
 
         let out = reload_config_at(&mut agent, dir.path()).await;
@@ -1244,11 +1245,12 @@ default_model = "alt-model"
     #[tokio::test]
     async fn clear_resets_agent_history_but_keeps_pinned_system_prompt() {
         let reg = SlashRegistry::default_set();
-        let mut agent = fresh_agent().pin_system_prompt("sys").await;
+        let mut agent = fresh_agent().pin_system_prompt("sys").await.unwrap();
         agent
             .memory
             .record(json!({"role":"user","content":"prior"}))
-            .await;
+            .await
+            .unwrap();
 
         let out = reg.dispatch("clear", &mut agent).await.unwrap();
         assert!(matches!(out, SlashOutcome::Continue(Some(_))));
@@ -1416,7 +1418,10 @@ default_model = "alt-model"
     #[tokio::test]
     async fn system_shows_pinned_content() {
         let reg = SlashRegistry::default_set();
-        let mut agent = fresh_agent().pin_system_prompt("you are helpful").await;
+        let mut agent = fresh_agent()
+            .pin_system_prompt("you are helpful")
+            .await
+            .unwrap();
         let out = reg.dispatch("system", &mut agent).await.unwrap();
         match out {
             SlashOutcome::Continue(Some(msg)) => {
@@ -1443,11 +1448,12 @@ default_model = "alt-model"
     #[tokio::test]
     async fn memory_stats_reports_record_and_pinned_counts() {
         let reg = SlashRegistry::default_set();
-        let mut agent = fresh_agent().pin_system_prompt("sys").await;
+        let mut agent = fresh_agent().pin_system_prompt("sys").await.unwrap();
         agent
             .memory
             .record(json!({"role":"user","content":"hi"}))
-            .await;
+            .await
+            .unwrap();
         let out = reg.dispatch("memory", &mut agent).await.unwrap();
         match out {
             SlashOutcome::Continue(Some(msg)) => {
@@ -1465,11 +1471,13 @@ default_model = "alt-model"
         agent
             .memory
             .record(json!({"role":"user","content":"first"}))
-            .await;
+            .await
+            .unwrap();
         agent
             .memory
             .record(json!({"role":"assistant","content":"second"}))
-            .await;
+            .await
+            .unwrap();
         let out = reg.dispatch("memory dump", &mut agent).await.unwrap();
         match out {
             SlashOutcome::Continue(Some(msg)) => {

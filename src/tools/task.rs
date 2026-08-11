@@ -277,8 +277,8 @@ mod tests {
         let f1 = tempfile::NamedTempFile::new().unwrap();
         let f2 = tempfile::NamedTempFile::new().unwrap();
         let ctx = ToolContext::new();
-        ctx.mark_read(f1.path()).await;
-        ctx.mark_read(f2.path()).await;
+        ctx.mark_read(f1.path()).await.unwrap();
+        ctx.mark_read(f2.path()).await.unwrap();
 
         task.run(json!({"prompt": "delegate"}), &ctx).await.unwrap();
 
@@ -307,7 +307,7 @@ mod tests {
         // Seed child from parent (empty), then have child read
         // a file. Parent's snapshot must remain empty.
         let f = tempfile::NamedTempFile::new().unwrap();
-        child.mark_read(f.path()).await;
+        child.mark_read(f.path()).await.unwrap();
         let parent_snap = parent.snapshot_reads().await;
         assert!(parent_snap.is_empty());
     }

@@ -159,7 +159,7 @@ impl Tool for Read {
             .await
             .ok()
             .flatten();
-            ctx.mark_read(file_path).await;
+            ctx.mark_read(file_path).await?;
             return Ok(format_image_marker(&abs, &format, dims));
         }
 
@@ -168,7 +168,7 @@ impl Tool for Read {
             Err(e) => return Ok(format!("Error reading {}: {}", file_path, e)),
         };
 
-        ctx.mark_read(file_path).await;
+        ctx.mark_read(file_path).await?;
 
         let output = match (offset, limit) {
             (None, None) => body,

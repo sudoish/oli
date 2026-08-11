@@ -470,11 +470,9 @@ fn prompt_api_key(provider: oli::wizard_init::WizardProvider) -> Result<String> 
 fn select_prompt(argument: Option<String>, piped: &str) -> Result<String> {
     let piped_is_empty = piped.trim().is_empty();
 
-    // Validate --prompt argument was supplied before filtering
     let arg_was_supplied = argument.is_some();
     let arg_is_empty_or_whitespace = argument.as_ref().map_or(true, |p| p.trim().is_empty());
 
-    // Reject whitespace-only argument even when stdin has content
     if arg_was_supplied && arg_is_empty_or_whitespace {
         return Err(oli::error::AgentError::Config(
             "prompt argument is empty or whitespace-only".into(),
@@ -654,7 +652,7 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
             let mut agent = agent_base
                 .with_approver(Box::new(AlwaysDeny))
                 .pin_system_prompt(system_prompt)
-                .await;
+                .await?;
             let response = agent.run(&prompt).await?;
             match options.output {
                 OutputMode::Text => {
@@ -689,7 +687,7 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
             let agent = agent_base
                 .with_approver(Box::new(ReadlineApprover))
                 .pin_system_prompt(system_prompt)
-                .await;
+                .await?;
             repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
         }
     }

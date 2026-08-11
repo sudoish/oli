@@ -203,21 +203,18 @@ impl Agent {
     /// strings are ignored. Skipped when the memory already has pinned
     /// content — on conversation resume the persisted pin is authoritative; we
     /// don't want to stack a fresh system prompt on top of the loaded one.
-    pub async fn pin_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+    pub async fn pin_system_prompt(mut self, prompt: impl Into<String>) -> Result<Self> {
         let s: String = prompt.into();
         if s.is_empty() {
-            return self;
+            return Ok(self);
         }
         if !self.memory.pinned().await.is_empty() {
-            return self;
+            return Ok(self);
         }
-        // Ignore pin errors in the builder pattern; they surface later
-        // when agent.run is called if persistence fails.
-        let _ = self
-            .memory
+        self.memory
             .pin(json!({ "role": "system", "content": s }))
-            .await;
-        self
+            .await?;
+        Ok(self)
     }
 
     /// Reset session state — drops conversation history and the per-tool
@@ -645,7 +642,8 @@ mod tests {
             "m".into(),
         )
         .pin_system_prompt("you are a coding agent")
-        .await;
+        .await
+        .unwrap();
 
         agent.run("hi").await.unwrap();
         let seen = raw.requests();
@@ -665,7 +663,8 @@ mod tests {
             "m".into(),
         )
         .pin_system_prompt("")
-        .await;
+        .await
+        .unwrap();
 
         agent.run("hi").await.unwrap();
         let seen = raw.requests();
@@ -701,7 +700,8 @@ mod tests {
             "m".into(),
         )
         .pin_system_prompt("sys")
-        .await;
+        .await
+        .unwrap();
 
         agent.run("a").await.unwrap();
         agent.run("b").await.unwrap();
@@ -728,7 +728,8 @@ mod tests {
             "m".into(),
         )
         .pin_system_prompt("sys")
-        .await;
+        .await
+        .unwrap();
 
         agent.run("a").await.unwrap();
         agent.clear().await.unwrap();
@@ -1158,7 +1159,8 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("done")]);
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
             .pin_system_prompt("sys")
-            .await;
+            .await
+            .unwrap();
         agent.run("hello").await.unwrap();
         // Snapshot before undo: [system, user, assistant].
         let pre = agent.memory.snapshot().await;
@@ -1177,7 +1179,8 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("done")]);
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
             .pin_system_prompt("sys")
-            .await;
+            .await
+            .unwrap();
         // No `run` yet — pinned-only memory.
         assert!(agent.undo_last_user_turn().await.is_none());
     }
@@ -1189,7 +1192,8 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("a1"), assistant_text("a2")]);
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
             .pin_system_prompt("sys")
-            .await;
+            .await
+            .unwrap();
         agent.run("first").await.unwrap();
         agent.run("second").await.unwrap();
         let pre = agent.memory.snapshot().await;

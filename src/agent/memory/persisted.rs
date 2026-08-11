@@ -151,7 +151,7 @@ struct PersistedReadLogger {
 
 #[async_trait]
 impl ReadLogger for PersistedReadLogger {
-    async fn log_read(&self, path: &Path) {
+    async fn log_read(&self, path: &Path) -> Result<()> {
         let line = json!({
             "op": "read",
             "path": path.to_string_lossy().to_string(),
@@ -159,8 +159,9 @@ impl ReadLogger for PersistedReadLogger {
         .to_string()
             + "\n";
         let mut f = self.file.lock().await;
-        let _ = f.write_all(line.as_bytes()).await;
-        let _ = f.flush().await;
+        f.write_all(line.as_bytes()).await?;
+        f.flush().await?;
+        Ok(())
     }
 }
 
@@ -510,7 +511,7 @@ mod tests {
                 .unwrap();
             let ctx = ToolContext::new();
             ctx.set_read_logger(m.read_logger()).await;
-            ctx.mark_read(target_file.path()).await;
+            ctx.mark_read(target_file.path()).await.unwrap();
         }
 
         // The transcript should now contain a `read` op for our file.
@@ -559,9 +560,9 @@ mod tests {
                 .unwrap();
             let ctx = ToolContext::new();
             ctx.set_read_logger(m.read_logger()).await;
-            ctx.mark_read(pre.path()).await;
+            ctx.mark_read(pre.path()).await.unwrap();
             m.clear().await.unwrap();
-            ctx.mark_read(post.path()).await;
+            ctx.mark_read(post.path()).await.unwrap();
         }
 
         let mut m2 = PersistedMemory::open_at(dir.path(), "cls", fresh_inner(), false)
