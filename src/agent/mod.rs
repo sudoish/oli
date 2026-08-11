@@ -32,8 +32,8 @@ use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage};
 use crate::tools::{Registry, ToolContext};
 
 /// Typed terminal state for one agent invocation. Callers that need to
-/// distinguish a model completion from a safety-boundary stop should use the
-/// `*_outcome` entry points instead of interpreting presentation text.
+/// distinguish a model completion from a safety-boundary stop can inspect
+/// this enum returned by [`Agent::run`] and [`Agent::run_streaming`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RunOutcome {
     Completed(String),
