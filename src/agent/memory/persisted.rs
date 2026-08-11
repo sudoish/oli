@@ -252,15 +252,20 @@ pub fn sessions_dir() -> Option<PathBuf> {
     Some(base.join("oli").join("sessions"))
 }
 
-/// Mint a fresh session id. UNIX-millis-based so it's sortable and
-/// unique enough for the local-only single-user case. Tests can pass
-/// their own id to avoid collisions.
+/// Mint a fresh, lexically sortable session id. The timestamp keeps ids
+/// readable while the process id and random suffix prevent concurrent
+/// headless processes from sharing one transcript.
 pub fn new_session_id() -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    format!("{:013}", millis)
+    format!(
+        "{:013}-{:08x}-{:016x}",
+        millis,
+        std::process::id(),
+        rand::random::<u64>()
+    )
 }
 
 /// List existing session ids (file stems), newest first by mtime.
@@ -445,6 +450,12 @@ mod tests {
         let b = new_session_id();
         assert!(!a.is_empty());
         assert!(b >= a);
+    }
+
+    #[test]
+    fn new_session_ids_are_unique_within_the_same_millisecond_window() {
+        let ids: std::collections::HashSet<_> = (0..1_000).map(|_| new_session_id()).collect();
+        assert_eq!(ids.len(), 1_000);
     }
 
     #[tokio::test]

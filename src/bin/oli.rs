@@ -468,8 +468,8 @@ fn prompt_api_key(provider: oli::wizard_init::WizardProvider) -> Result<String> 
 }
 
 fn select_prompt(argument: Option<String>, piped: &str) -> Result<String> {
-    let piped = piped.trim();
-    match (argument.filter(|p| !p.trim().is_empty()), piped.is_empty()) {
+    let piped_is_empty = piped.trim().is_empty();
+    match (argument.filter(|p| !p.trim().is_empty()), piped_is_empty) {
         (Some(_), false) => Err(oli::error::AgentError::Config(
             "prompt provided both by --prompt and stdin".into(),
         )),
@@ -502,7 +502,7 @@ struct CompletedRun<'a> {
     response: &'a str,
     provider: &'a str,
     model: &'a str,
-    usage: UsageOutput,
+    usage: Option<UsageOutput>,
 }
 
 async fn run_headless(options: RunOptions) -> Result<()> {
@@ -652,17 +652,20 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                     eprintln!("conversation: {session_id}");
                 }
                 OutputMode::Json => {
-                    let usage = agent.session_usage;
+                    let usage = agent.last_usage.map(|_| {
+                        let usage = agent.session_usage;
+                        UsageOutput {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                            total_tokens: usage.total_tokens,
+                        }
+                    });
                     let result = CompletedRun {
                         conversation_id: &session_id,
                         response: &response,
                         provider: &output_provider,
                         model: &output_model,
-                        usage: UsageOutput {
-                            prompt_tokens: usage.prompt_tokens,
-                            completion_tokens: usage.completion_tokens,
-                            total_tokens: usage.total_tokens,
-                        },
+                        usage,
                     };
                     println!("{}", serde_json::to_string(&result)?);
                 }
@@ -737,7 +740,7 @@ mod tests {
     #[test]
     fn prompt_selection_accepts_exactly_one_source() {
         assert_eq!(select_prompt(Some("arg".into()), "").unwrap(), "arg");
-        assert_eq!(select_prompt(None, "pipe\n").unwrap(), "pipe");
+        assert_eq!(select_prompt(None, "pipe\n").unwrap(), "pipe\n");
         assert!(select_prompt(Some("arg".into()), "pipe").is_err());
         assert!(select_prompt(None, "  ").is_err());
     }
@@ -749,16 +752,29 @@ mod tests {
             response: "done",
             provider: "openrouter",
             model: "model",
-            usage: UsageOutput {
+            usage: Some(UsageOutput {
                 prompt_tokens: 2,
                 completion_tokens: 3,
                 total_tokens: 5,
-            },
+            }),
         };
         let value = serde_json::to_value(run).unwrap();
         assert_eq!(value["conversation_id"], "c1");
         assert_eq!(value["response"], "done");
         assert_eq!(value["usage"]["total_tokens"], 5);
+    }
+
+    #[test]
+    fn completed_run_uses_null_when_provider_omits_usage() {
+        let run = CompletedRun {
+            conversation_id: "c1",
+            response: "done",
+            provider: "local",
+            model: "model",
+            usage: None,
+        };
+        let value = serde_json::to_value(run).unwrap();
+        assert!(value["usage"].is_null());
     }
 
     #[test]

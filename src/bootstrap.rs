@@ -77,7 +77,7 @@ fn resolve_session_id_from(
     if continue_latest {
         let latest = sessions
             .iter()
-            .max_by_key(|entry| entry.mtime)
+            .max_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.id.cmp(&b.id)))
             .ok_or_else(|| AgentError::Config("no prior sessions to continue".into()))?;
         return Ok(latest.id.clone());
     }
@@ -116,6 +116,13 @@ mod session_tests {
         let sessions = [entry("newest", 20), entry("older", 10)];
         let id = resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
         assert_eq!(id, "newest");
+    }
+
+    #[test]
+    fn continue_breaks_equal_mtime_ties_by_id() {
+        let sessions = [entry("alpha", 20), entry("beta", 20)];
+        let id = resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
+        assert_eq!(id, "beta");
     }
 
     #[test]
