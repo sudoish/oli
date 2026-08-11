@@ -178,8 +178,10 @@ impl SlashCommand for Clear {
         "drop conversation history (system prompt is preserved)"
     }
     async fn run(&self, _args: &str, agent: &mut Agent) -> SlashOutcome {
-        agent.clear().await;
-        SlashOutcome::Continue(Some("(history cleared)".into()))
+        match agent.clear().await {
+            Ok(()) => SlashOutcome::Continue(Some("(history cleared)".into())),
+            Err(e) => SlashOutcome::Continue(Some(format!("clear failed: {e}"))),
+        }
     }
 }
 
@@ -538,7 +540,7 @@ impl SlashCommand for Sessions {
         if entries.len() > 20 {
             out.push_str(&format!("  ... and {} more\n", entries.len() - 20));
         }
-        out.push_str("Resume with: oli --resume <id>");
+        out.push_str("Resume with: oli run --conversation <id> -p <prompt>");
         SlashOutcome::Continue(Some(out))
     }
 }
@@ -865,7 +867,12 @@ impl SlashCommand for ConfigCmd {
 }
 
 async fn reload_config(agent: &mut Agent) -> SlashOutcome {
-    let new_cfg = match crate::config::Config::load_or_default() {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    reload_config_at(agent, &cwd).await
+}
+
+async fn reload_config_at(agent: &mut Agent, cwd: &std::path::Path) -> SlashOutcome {
+    let new_cfg = match crate::config::Config::load_layered(cwd) {
         Ok(c) => std::sync::Arc::new(c),
         Err(e) => {
             return SlashOutcome::Continue(Some(format!("config reload failed: {}", e)));
@@ -1049,12 +1056,6 @@ fn render_paths(agent: &Agent) -> String {
         "Notes",
         crate::notes::filesystem::FilesystemNotesStore::default_dir().as_deref(),
     );
-    #[cfg(feature = "tui")]
-    push_path(
-        &mut out,
-        "TUI history",
-        crate::tui::history::history_path().as_deref(),
-    );
     push_path(
         &mut out,
         "Policy allow-list",
@@ -1139,7 +1140,8 @@ mod tests {
         // openai-compat block with a different model. /config reload
         // should pick that up without losing memory.
         let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("config.toml");
+        let cfg_path = dir.path().join(".oli").join("config.toml");
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
         std::fs::write(
             &cfg_path,
             r#"
@@ -1153,16 +1155,6 @@ default_model = "alt-model"
 "#,
         )
         .unwrap();
-        // Layered loader probes XDG_CONFIG_HOME first; point it at our temp.
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path());
-        }
-        // load_or_default uses XDG_CONFIG_HOME/oli/config.toml — relocate
-        // our seed file to that path.
-        let real_path = dir.path().join("oli").join("config.toml");
-        std::fs::create_dir_all(real_path.parent().unwrap()).unwrap();
-        std::fs::rename(&cfg_path, &real_path).unwrap();
-
         let mut agent = fresh_agent();
         agent.provider_name = "ollama".into();
         agent.model = "llama".into();
@@ -1170,11 +1162,11 @@ default_model = "alt-model"
         agent
             .memory
             .record(json!({"role":"user","content":"keep me"}))
-            .await;
+            .await
+            .unwrap();
         let mem_len_before = agent.memory.len();
 
-        let reg = SlashRegistry::default_set();
-        let out = reg.dispatch("config reload", &mut agent).await.unwrap();
+        let out = reload_config_at(&mut agent, dir.path()).await;
         match out {
             SlashOutcome::Continue(Some(body)) => {
                 assert!(body.contains("provider:"));
@@ -1253,11 +1245,12 @@ default_model = "alt-model"
     #[tokio::test]
     async fn clear_resets_agent_history_but_keeps_pinned_system_prompt() {
         let reg = SlashRegistry::default_set();
-        let mut agent = fresh_agent().pin_system_prompt("sys").await;
+        let mut agent = fresh_agent().pin_system_prompt("sys").await.unwrap();
         agent
             .memory
             .record(json!({"role":"user","content":"prior"}))
-            .await;
+            .await
+            .unwrap();
 
         let out = reg.dispatch("clear", &mut agent).await.unwrap();
         assert!(matches!(out, SlashOutcome::Continue(Some(_))));
@@ -1425,7 +1418,10 @@ default_model = "alt-model"
     #[tokio::test]
     async fn system_shows_pinned_content() {
         let reg = SlashRegistry::default_set();
-        let mut agent = fresh_agent().pin_system_prompt("you are helpful").await;
+        let mut agent = fresh_agent()
+            .pin_system_prompt("you are helpful")
+            .await
+            .unwrap();
         let out = reg.dispatch("system", &mut agent).await.unwrap();
         match out {
             SlashOutcome::Continue(Some(msg)) => {
@@ -1452,11 +1448,12 @@ default_model = "alt-model"
     #[tokio::test]
     async fn memory_stats_reports_record_and_pinned_counts() {
         let reg = SlashRegistry::default_set();
-        let mut agent = fresh_agent().pin_system_prompt("sys").await;
+        let mut agent = fresh_agent().pin_system_prompt("sys").await.unwrap();
         agent
             .memory
             .record(json!({"role":"user","content":"hi"}))
-            .await;
+            .await
+            .unwrap();
         let out = reg.dispatch("memory", &mut agent).await.unwrap();
         match out {
             SlashOutcome::Continue(Some(msg)) => {
@@ -1474,11 +1471,13 @@ default_model = "alt-model"
         agent
             .memory
             .record(json!({"role":"user","content":"first"}))
-            .await;
+            .await
+            .unwrap();
         agent
             .memory
             .record(json!({"role":"assistant","content":"second"}))
-            .await;
+            .await
+            .unwrap();
         let out = reg.dispatch("memory dump", &mut agent).await.unwrap();
         match out {
             SlashOutcome::Continue(Some(msg)) => {
@@ -1848,11 +1847,8 @@ return p
 
     #[tokio::test]
     async fn paths_marks_definitely_missing_files_as_not_present() {
-        // The TUI history file is `~/.config/oli/tui-history.jsonl`. We
-        // can't pre-create it without polluting the user's real config,
-        // and we can't sandbox std::env::current_dir() either, but we
-        // *can* assert that any line whose path doesn't exist on disk
-        // gets the marker. Walk every line and check the invariant.
+        // We cannot sandbox every user-level path, but can assert that
+        // any listed path absent on disk gets the marker.
         let reg = SlashRegistry::default_set();
         let mut agent = fresh_agent();
         let out = reg.dispatch("paths", &mut agent).await.unwrap();

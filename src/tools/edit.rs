@@ -151,7 +151,7 @@ mod tests {
         let f = write_file("hello world");
         let path = f.path().to_str().unwrap().to_string();
         let ctx = ToolContext::new();
-        ctx.mark_read(&path).await;
+        ctx.mark_read(&path).await.unwrap();
 
         let out = Edit
             .run(
@@ -176,7 +176,7 @@ mod tests {
         let f = write_file("hello world");
         let path = f.path().to_str().unwrap().to_string();
         let ctx = ToolContext::new();
-        ctx.mark_read(&path).await;
+        ctx.mark_read(&path).await.unwrap();
 
         let out = Edit
             .run(
@@ -197,7 +197,7 @@ mod tests {
         let f = write_file("aa\nbb\naa\n");
         let path = f.path().to_str().unwrap().to_string();
         let ctx = ToolContext::new();
-        ctx.mark_read(&path).await;
+        ctx.mark_read(&path).await.unwrap();
 
         let out = Edit
             .run(
@@ -223,7 +223,7 @@ mod tests {
         let f = write_file("hello world");
         let path = f.path().to_str().unwrap().to_string();
         let ctx = ToolContext::new();
-        ctx.mark_read(&path).await;
+        ctx.mark_read(&path).await.unwrap();
 
         // Bump the mtime by writing fresh contents *after* the read.
         // Sleep one second on macOS HFS-derived filesystems where
@@ -262,13 +262,13 @@ mod tests {
         let f = write_file("hello world");
         let path = f.path().to_str().unwrap().to_string();
         let ctx = ToolContext::new();
-        ctx.mark_read(&path).await;
+        ctx.mark_read(&path).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
         tokio::fs::write(f.path(), "fresh body\n").await.unwrap();
 
         // Re-read picks up the new mtime; Edit should now succeed.
-        ctx.mark_read(&path).await;
+        ctx.mark_read(&path).await.unwrap();
         let out = Edit
             .run(
                 json!({
@@ -292,7 +292,7 @@ mod tests {
         let f = write_file("aa\nbb\naa\n");
         let path = f.path().to_str().unwrap().to_string();
         let ctx = ToolContext::new();
-        ctx.mark_read(&path).await;
+        ctx.mark_read(&path).await.unwrap();
 
         let out = Edit
             .run(

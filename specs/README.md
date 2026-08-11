@@ -14,15 +14,12 @@ will land alongside it as `specs/<topic>.md`.
 | **[`specs/README.md`](README.md)** (you are here) | High-level mission, principles, in/out of scope, architecture sketch, configuration shape, plugin contract, roadmap, success criteria. |
 | [`specs/progress.md`](progress.md)  | Live status: what's shipped, what's mid-flight, what's blocked. Phase commit SHAs land here at each phase boundary.        |
 | [`specs/roadmap.md`](roadmap.md)    | Post-MCP follow-ups (phases A–E): daily-driver safety, hooks, plugin reload, caching/parity, plugin caps, RAG, MCP refresh. All DONE. |
-| [`specs/tui.md`](tui.md)            | TUI architecture roadmap (phases F–O). Layout, render loop, completion, history, wizard, undo, recoverability. All DONE.   |
 | [`specs/review-2.md`](review-2.md)  | Deep review #2 (rated 9/10). Strengths + persistent weaknesses that drove the polish plan.                                  |
 | [`specs/polish.md`](polish.md)      | The 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, packaging.                              |
 | [`specs/private-agent-roadmap.md`](private-agent-roadmap.md) | Product and content roadmap for private remote workstations, model and MCP service planes, and privacy-preserving operations. |
 | [`specs/memory.md`](memory.md)      | `Memory` trait design — pluggable strategies (linear+compact default, RAG, graph, hierarchical).                            |
 | [`specs/mcp.md`](mcp.md)            | MCP client design (phase 5). stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.          |
-| [`specs/formatting.md`](formatting.md) | Pretty output plan: ANSI strip, tables, HTML, wrapped code, inline code, `--plain` markdown rendering. |
-| [`specs/tui-readability.md`](tui-readability.md) | TUI readability plan: activity strip above the input (with tool-running sub-state), horizontal padding, turn separators. |
-| [`specs/ui.md`](ui.md)                | Historical line-mode UX plan (predecessor to `tui.md`). Kept for reference.                                |
+| [`specs/formatting.md`](formatting.md) | Historical output-formatting plan from the removed TUI era. |
 | [`docs/cheatsheet.md`](../docs/cheatsheet.md) | Every keybind, slash command, file path, and feature flag in one page.                                              |
 
 If you want to **use** oli, start with [`docs/cheatsheet.md`](../docs/cheatsheet.md) and `oli init`.
@@ -78,7 +75,7 @@ Build a coding agent that:
 
 ## Out of scope (for now)
 
-- TUI / `ratatui` rendering.
+- Full-screen terminal rendering.
 - Real MCP protocol — subprocess-lite covers the same need with less surface.
 - IDE integration.
 - Multi-user or hosted modes.
@@ -376,8 +373,8 @@ babysitting.
 add three config lines.
 
 ### Phase 3 — Power features (open scope)
-- Session persistence: JSONL transcript per session, `--resume <id>`,
-  `--continue` (latest).
+- Session persistence: JSONL transcript per conversation,
+  `oli run --conversation <id>`, `oli run --continue` (latest).
 - Subagent (`Task` tool): spawn a child loop with isolated context, return
   only the summary. Same machinery powers plugin `ctx:prompt(...)`.
 - Hooks: `PreToolUse`, `PostToolUse`, `Stop`. Shared dispatcher with plugin

@@ -79,9 +79,8 @@ FormatJson — i.e. the description and parameter schema are clear
 enough — drive a single-shot prompt:
 
 ```sh
-./target/debug/oli -p \
-  'Call the FormatJson tool with json="{\"banana\":2,\"apple\":1}" and indent=2. Output the tool result verbatim.' \
-  --plain
+./target/debug/oli run -p \
+  'Call the FormatJson tool with json="{\"banana\":2,\"apple\":1}" and indent=2. Output the tool result verbatim.'
 ```
 
 The reply should be the keys sorted alphabetically with the requested
@@ -95,7 +94,7 @@ Verification trick: pass an input whose sort order is obviously not
 the input order (e.g. `{"zeta":1,"alpha":2}`). If the reply doesn't
 flip the keys, the model didn't actually call the tool.
 
-`-p` mode auto-approves `Ask` policy decisions; the REPL prompts
+Headless mode denies unresolved `Ask` policy decisions; the REPL prompts
 `[approve] FormatJson [y/N]` on first use of an unfamiliar tool. To
 silence that in the REPL, approve once with session-allow, or add an
 `auto_allow` entry for `FormatJson` in your config.

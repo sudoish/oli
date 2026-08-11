@@ -1,6 +1,6 @@
 # AGENTS.md
 
-oli — a minimal, hackable, single-binary terminal coding agent. Rust 2024,
+oli — a minimal, hackable, scriptable coding-agent runtime. Rust 2024,
 MSRV 1.95. This file is auto-loaded as project context by oli (and other
 agent harnesses that read AGENTS.md), so it doubles as the project's
 self-description: when oli is asked about itself in this repo, this is
@@ -11,9 +11,8 @@ live under `specs/`. This file is for agents *modifying the codebase*.
 
 ## Build & test
 
-- `cargo build` — full default (TUI + syntax highlighting).
-- `cargo build --no-default-features` — line-mode-only binary, ~2-3 MB
-  smaller, useful when iterating on non-TUI code.
+- `cargo build` — the single text-first binary.
+- `cargo test --bin oli` — CLI parsing and headless result-contract tests.
 - `cargo test --lib` — full test suite (~500 tests, ~2s wall clock).
 - `cargo test --lib <module::path>` — single test or module.
 - No CI lint beyond compiler warnings; match the surrounding style.
@@ -39,7 +38,7 @@ live under `specs/`. This file is for agents *modifying the codebase*.
 |---|---|
 | `agent/` | think→call→observe loop, `Memory` trait, system-prompt builder (`agent/context.rs`), capability table (`agent/caps.rs`) |
 | `bin/oli.rs` | CLI entry point; wires startup, registers tools and hooks |
-| `bootstrap.rs` | shared startup logic between REPL and TUI |
+| `bootstrap.rs` | shared startup and persisted-session wiring |
 | `config.rs` | layered TOML loader (global `~/.config/oli/config.toml` + project `.oli/config.toml` walked up from cwd) |
 | `diagnostics.rs` | operational warning ring buffer (surfaced via `/diagnostics`) |
 | `hooks/` | `PreToolUse` / `PostToolUse` / `Stop` event dispatch |
@@ -50,7 +49,6 @@ live under `specs/`. This file is for agents *modifying the codebase*.
 | `providers/` | `Provider` trait + `anthropic`, `openai_compat` (covers Ollama / OpenRouter / OpenAI / LM Studio / vLLM / llama.cpp), `fake` (tests) |
 | `repl/` | line-mode REPL + `SlashRegistry` + built-in slash commands |
 | `tools/` | built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `task` (subagent), `notes`, `subprocess` (config-defined external binaries) |
-| `tui/` | ratatui driver, render loop, app state |
 | `wizard_init.rs` | first-run config wizard |
 
 ## Where to add what
@@ -59,7 +57,7 @@ live under `specs/`. This file is for agents *modifying the codebase*.
 |---|---|
 | New tool | `src/tools/<name>.rs` impl `tools::Tool` (trait at `src/tools/mod.rs:47`); register in `src/bin/oli.rs` startup. |
 | New provider | `src/providers/<name>.rs` impl `Provider` (trait at `src/providers/mod.rs:125`); wire into `providers::build()` (`src/providers/mod.rs:36`). |
-| New slash command | `src/repl/slash.rs`: struct + `impl SlashCommand`; register in `SlashRegistry::default_set_with_reloader`. The default set is shared by REPL and TUI. |
+| New slash command | `src/repl/slash.rs`: struct + `impl SlashCommand`; register in `SlashRegistry::default_set_with_reloader`. |
 | New hook event | `src/hooks/`. Existing dispatcher fires `PreToolUse` / `PostToolUse` / `Stop`. |
 | Capability override for a model | `[[caps]]` block keyed by model-id `prefix` in user config, layered over built-in defaults in `src/agent/caps.rs`. |
 | Plugin (no rebuild) | drop `.lua` into `~/.config/oli/plugins/` (global) or `<project>/.oli/plugins/`. Plugins can register tools, slashes, and hooks. Sandbox strips `os` / `io` / `package.loadlib`; filesystem and shell go through the policy gate. |
@@ -91,7 +89,7 @@ live under `specs/`. This file is for agents *modifying the codebase*.
   changes in place without losing memory.
 - `/system` — show the pinned system prompt (env, git, dir listing,
   AGENTS.md/CLAUDE.md content).
-- `/sessions` — list saved sessions; resume with `oli --resume <id>`.
+- `/sessions` — list saved sessions; resume with `oli run --conversation <id> -p "..."`.
 - `/diagnostics` — operational warnings (plugin load failures, MCP
   errors, provider quirks).
 
@@ -105,8 +103,7 @@ live under `specs/`. This file is for agents *modifying the codebase*.
   after startup (used by `/plugins reload`).
 - Policy fingerprints are `tool-name + canonical-JSON args`. Reordering
   map keys in args is fine; renaming a tool invalidates the entry.
-- TUI and line REPL both build the registry via
-  `default_set_with_reloader` — adding a slash there surfaces in both.
+- The line REPL builds its registry via `default_set_with_reloader`.
 - Don't bypass the policy gate for "trusted" callers. If something
   should be auto-approved, that's an `auto_allow` config entry, not a
   code-path special case.

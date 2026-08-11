@@ -1,12 +1,5 @@
-//! First-run config bootstrap — shared between the TUI's
-//! interactive wizard and the headless `oli init` CLI subcommand.
-//!
-//! The TUI side adds a step machine + key handler on top
-//! ([`crate::tui::wizard`]); this module is the data layer:
-//! provider definitions, TOML rendering, and the file-system
-//! save path. Both surfaces produce the same config, so a user
-//! who runs `oli init --provider ollama` and a user who picks
-//! Ollama in the TUI end up with byte-identical files.
+//! First-run config bootstrap for `oli init`: provider definitions,
+//! TOML rendering, provider probes, and the file-system save path.
 
 use std::path::{Path, PathBuf};
 

@@ -96,7 +96,7 @@ mkdir -p ~/.config/oli
 cp examples/remote-workstation/openrouter.toml ~/.config/oli/config.toml
 read -rsp 'OpenRouter API key: ' OPENROUTER_API_KEY; echo
 export OPENROUTER_API_KEY
-oli -p 'Reply with exactly OLI_REMOTE_OK'
+oli run -p 'Reply with exactly OLI_REMOTE_OK'
 unset OPENROUTER_API_KEY
 ```
 
@@ -112,39 +112,33 @@ Install Ollama through its reviewed package for the workstation, then:
 ollama pull qwen3-coder:30b
 mkdir -p ~/.config/oli
 cp examples/remote-workstation/ollama.toml ~/.config/oli/config.toml
-oli -p 'Reply with exactly OLI_REMOTE_OK'
+oli run -p 'Reply with exactly OLI_REMOTE_OK'
 ```
 
 The example binds oli to loopback Ollama. A model on another private GPU node is
 the separate private-model-plane workflow and needs its own network policy.
 
-## 4. Disconnect, resume, and copy
+## 4. Disconnect and resume
 
-Start an interactive TUI through SSH:
+Create a persisted conversation through SSH:
 
 ```console
 cd ~/oli
-oli --fullscreen
+oli run -p 'Reply with exactly OLI_REMOTE_SESSION_OK'
 ```
 
-Send a harmless prompt, then use `/sessions` and record the session id outside
-the repository. Close the SSH terminal without clearing the session. Reconnect
-and resume it:
+Record the conversation id printed on stderr outside the repository. Close the
+SSH terminal, reconnect, and append a turn to the same conversation:
 
 ```console
 ssh -i ~/.ssh/oli-workstation developer@oli-workstation
 cd ~/oli
-oli --resume <session-id> --fullscreen
+oli run --conversation <conversation-id> -p 'Summarize our previous turn in one sentence'
 ```
 
-Confirm the prior transcript appears and send one new prompt. The example
-configs force `ui.osc52 = "on"` so the remote check does not depend on terminal
-environment variables that OpenSSH may not forward. Run `/copy 1` and verify
-the latest response reaches the laptop clipboard. OSC52 is terminal output
-crossing the SSH connection: do not copy secrets. After the check, use `"auto"`
-for capability detection or `"off"` to disable OSC52. With `"off"`, `/copy 1`
-opens the selectable fallback described in the
-[cheatsheet](../../docs/cheatsheet.md).
+Confirm the command returns context from the first turn and prints the same
+conversation id. Use `--output json` when a remote automation needs to capture
+the id and response without parsing terminal prose.
 
 ## 5. Exercise and record the run
 
@@ -153,8 +147,8 @@ for the selected provider, and retain it with the release evidence. Mark rows
 for unselected providers `N/A (provider not selected)`; do not use N/A for a
 required check. The example is not verified merely because configuration parses
 or an authorized login succeeds: the denied identity, public-path denial,
-remote login, selected provider, interrupted session, resume, OSC52, and
-fallback must all be exercised.
+remote login, selected provider, conversation persistence, interrupted session,
+and resume must all be exercised.
 
 ## Troubleshooting
 
@@ -167,7 +161,6 @@ fallback must all be exercised.
 | Workstation MagicDNS name does not resolve | Laptop is disconnected, MagicDNS is disabled, or split DNS conflicts | Check `tailscale status`, tailnet DNS settings, and the workstation tailnet IP |
 | SSH times out | Tailnet ACL, cloud firewall, host firewall, or `sshd` is blocking the path | Test each boundary in that order; do not open public TCP 22 as a shortcut |
 | SSH says permission denied | Network path works but host SSH authentication failed | Check the intended Unix user, public key, file permissions, and `sshd` logs |
-| Session id is missing | A one-shot `-p` invocation was used | Start interactive oli; persistent session ids are created for interactive runs |
+| Conversation id is missing | Output was redirected without stderr | Capture stderr in text mode, or use `oli run --output json` |
 | Resume cannot find a session | Wrong remote Unix user or config directory | Run `/paths` and `/sessions` as the same workstation account that created it |
-| `/copy 1` changes no clipboard | Terminal or tmux blocks OSC52 | Enable terminal OSC52 support and tmux `set-clipboard on`, or set `ui.osc52 = "off"` for fallback |
 | Credential file has loose permissions | File was copied or restored incorrectly | Remove it and sign in again; confirm `~/.config/oli/auth.json` is mode `0600` |

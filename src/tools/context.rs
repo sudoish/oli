@@ -1,3 +1,4 @@
+use crate::error::Result;
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -51,7 +52,7 @@ pub struct SessionState {
     /// `None` falls back to the agent process's cwd.
     pub cwd: Option<PathBuf>,
     /// Optional sink for read events. Set at startup when the session is
-    /// backed by `PersistedMemory` so the read-set survives `--resume`.
+    /// backed by `PersistedMemory` so the read-set survives conversation resume.
     pub read_logger: Option<Arc<dyn ReadLogger>>,
 }
 
@@ -60,7 +61,7 @@ pub struct SessionState {
 /// `Edit`'s read-first invariant without forcing a re-read.
 #[async_trait]
 pub trait ReadLogger: Send + Sync {
-    async fn log_read(&self, path: &Path);
+    async fn log_read(&self, path: &Path) -> Result<()>;
 }
 
 impl ToolContext {
@@ -73,21 +74,19 @@ impl ToolContext {
     /// captures the file's mtime so `Edit` can detect external
     /// mutations between read and edit. If a `ReadLogger` is wired
     /// up, the canonical path is also forwarded to it.
-    pub async fn mark_read(&self, path: impl AsRef<Path>) {
+    pub async fn mark_read(&self, path: impl AsRef<Path>) -> Result<()> {
         if let Ok(canon) = tokio::fs::canonicalize(path.as_ref()).await {
             let mtime = tokio::fs::metadata(&canon)
                 .await
                 .ok()
                 .and_then(|m| m.modified().ok());
-            let logger = {
-                let mut state = self.inner.lock().await;
-                state.read_files.insert(canon.clone(), mtime);
-                state.read_logger.clone()
-            };
+            let logger = self.inner.lock().await.read_logger.clone();
             if let Some(l) = logger {
-                l.log_read(&canon).await;
+                l.log_read(&canon).await?;
             }
+            self.inner.lock().await.read_files.insert(canon, mtime);
         }
+        Ok(())
     }
 
     /// Boolean read-check. Kept as a small public surface for plugin
@@ -263,14 +262,16 @@ mod tests {
     async fn mark_and_check_read_via_canonical_path() {
         let f = NamedTempFile::new().unwrap();
         let ctx = ToolContext::new();
-        ctx.mark_read(f.path()).await;
+        ctx.mark_read(f.path()).await.unwrap();
         assert!(ctx.was_read(f.path()).await);
     }
 
     #[tokio::test]
     async fn missing_path_is_not_marked() {
         let ctx = ToolContext::new();
-        ctx.mark_read("/tmp/__no_such_file_for_ctx_test__").await;
+        ctx.mark_read("/tmp/__no_such_file_for_ctx_test__")
+            .await
+            .unwrap();
         assert!(!ctx.was_read("/tmp/__no_such_file_for_ctx_test__").await);
     }
 
@@ -279,7 +280,7 @@ mod tests {
         let f = NamedTempFile::new().unwrap();
         let abs = f.path().to_path_buf();
         let ctx = ToolContext::new();
-        ctx.mark_read(&abs).await;
+        ctx.mark_read(&abs).await.unwrap();
         // Different syntactic spelling of the same file resolves to the same canonical path.
         let mut spelt = std::path::PathBuf::new();
         spelt.push(abs.parent().unwrap());
@@ -303,8 +304,9 @@ mod tests {
         struct CountingLogger(Arc<StdMutex<usize>>);
         #[async_trait]
         impl ReadLogger for CountingLogger {
-            async fn log_read(&self, _: &Path) {
+            async fn log_read(&self, _: &Path) -> Result<()> {
                 *self.0.lock().unwrap() += 1;
+                Ok(())
             }
         }
 
@@ -366,8 +368,9 @@ mod tests {
         struct RecordingLogger(Arc<StdMutex<Vec<PathBuf>>>);
         #[async_trait]
         impl ReadLogger for RecordingLogger {
-            async fn log_read(&self, p: &Path) {
+            async fn log_read(&self, p: &Path) -> Result<()> {
                 self.0.lock().unwrap().push(p.to_path_buf());
+                Ok(())
             }
         }
 
@@ -377,9 +380,30 @@ mod tests {
             .await;
 
         let f = NamedTempFile::new().unwrap();
-        ctx.mark_read(f.path()).await;
+        ctx.mark_read(f.path()).await.unwrap();
         let entries = log.lock().unwrap().clone();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0], tokio::fs::canonicalize(f.path()).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn mark_read_propagates_logger_failure_without_marking_file() {
+        struct FailingLogger;
+
+        #[async_trait]
+        impl ReadLogger for FailingLogger {
+            async fn log_read(&self, _: &Path) -> Result<()> {
+                Err(crate::error::AgentError::Config("read log failed".into()))
+            }
+        }
+
+        let ctx = ToolContext::new();
+        ctx.set_read_logger(Arc::new(FailingLogger)).await;
+        let f = NamedTempFile::new().unwrap();
+
+        let err = ctx.mark_read(f.path()).await.unwrap_err();
+
+        assert!(err.to_string().contains("read log failed"));
+        assert!(!ctx.was_read(f.path()).await);
     }
 }

@@ -297,7 +297,7 @@ mod tests {
         );
     }
 
-    /// Dropping the in-flight Bash future (what the TUI's
+    /// Dropping the in-flight Bash future (what an interactive client's
     /// Ctrl+C path does when the cancel oneshot fires) returns
     /// promptly *and* takes the whole shell-spawned tree with
     /// it via the process-group SIGKILL. We verify by having

@@ -7,7 +7,7 @@
 //!   text. Used by the `-p` CLI mode.
 //! - [`Agent::run_streaming`] — same loop but emits incremental
 //!   events (content chunks, tool starts/ends, usage updates) to a
-//!   user-supplied callback. Drives the TUI and the line-mode REPL.
+//!   user-supplied callback. Drives headless runs and the line REPL.
 //!
 //! `Agent::with_*` builder methods layer on optional pieces
 //! (memory strategy, hook registry, MCP handles, plugin manifest,
@@ -201,36 +201,37 @@ impl Agent {
 
     /// Pin a system prompt onto memory so it survives compaction. Empty
     /// strings are ignored. Skipped when the memory already has pinned
-    /// content — on `--resume` the persisted pin is authoritative; we
+    /// content — on conversation resume the persisted pin is authoritative; we
     /// don't want to stack a fresh system prompt on top of the loaded one.
-    pub async fn pin_system_prompt(mut self, prompt: impl Into<String>) -> Self {
+    pub async fn pin_system_prompt(mut self, prompt: impl Into<String>) -> Result<Self> {
         let s: String = prompt.into();
         if s.is_empty() {
-            return self;
+            return Ok(self);
         }
         if !self.memory.pinned().await.is_empty() {
-            return self;
+            return Ok(self);
         }
         self.memory
             .pin(json!({ "role": "system", "content": s }))
-            .await;
-        self
+            .await?;
+        Ok(self)
     }
 
     /// Reset session state — drops conversation history and the per-tool
     /// context (so `Edit`'s read-first invariant resets too). Pinned
     /// content (system prompt) is preserved and re-injected on the next
     /// turn. Usage counters reset so `/cost` reflects the new turn.
-    pub async fn clear(&mut self) {
-        self.memory.clear().await;
+    pub async fn clear(&mut self) -> Result<()> {
+        self.memory.clear().await?;
         self.ctx = ToolContext::new();
         self.last_usage = None;
         self.session_usage = Usage::default();
+        Ok(())
     }
 
     /// Borrow the per-session tool context. The binary uses this at
     /// startup to wire up a `ReadLogger` (so `Read` calls round-trip
-    /// across `--resume`) and to seed replayed read paths.
+    /// across resumed conversations) and to seed replayed read paths.
     pub fn tool_context(&self) -> &ToolContext {
         &self.ctx
     }
@@ -286,7 +287,7 @@ impl Agent {
         }
         // Truncate before the user message — i.e. drop the user
         // message itself and everything after it.
-        self.memory.truncate(record_idx).await;
+        self.memory.truncate(record_idx).await.ok()?;
         Some(body)
     }
 
@@ -342,15 +343,14 @@ impl Agent {
     /// they arrive (assistant text via `StreamEvent::Content`, in-flight
     /// tool-call arguments via `StreamEvent::ToolArgsChunk`). Tool-call
     /// rounds are silent on the content side; only model text reaches
-    /// `Content`. Y2 widened this from the older `FnMut(&str)` signature
-    /// so the TUI can preview streaming Edit/Write args.
+    /// `Content`.
     pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<String>
     where
         F: FnMut(StreamEvent<'_>) + Send,
     {
         self.memory
             .record(json!({ "role": "user", "content": prompt }))
-            .await;
+            .await?;
 
         let mut turn = 0usize;
         loop {
@@ -437,7 +437,7 @@ impl Agent {
                 }
             }
 
-            self.memory.record(message).await;
+            self.memory.record(message).await?;
 
             if tool_calls.is_empty() {
                 let content = resp
@@ -488,7 +488,7 @@ impl Agent {
                         "tool_call_id": id,
                         "content": result,
                     }))
-                    .await;
+                    .await?;
             }
         }
     }
@@ -642,7 +642,8 @@ mod tests {
             "m".into(),
         )
         .pin_system_prompt("you are a coding agent")
-        .await;
+        .await
+        .unwrap();
 
         agent.run("hi").await.unwrap();
         let seen = raw.requests();
@@ -662,7 +663,8 @@ mod tests {
             "m".into(),
         )
         .pin_system_prompt("")
-        .await;
+        .await
+        .unwrap();
 
         agent.run("hi").await.unwrap();
         let seen = raw.requests();
@@ -698,7 +700,8 @@ mod tests {
             "m".into(),
         )
         .pin_system_prompt("sys")
-        .await;
+        .await
+        .unwrap();
 
         agent.run("a").await.unwrap();
         agent.run("b").await.unwrap();
@@ -725,10 +728,11 @@ mod tests {
             "m".into(),
         )
         .pin_system_prompt("sys")
-        .await;
+        .await
+        .unwrap();
 
         agent.run("a").await.unwrap();
-        agent.clear().await;
+        agent.clear().await.unwrap();
         agent.run("b").await.unwrap();
 
         let seen = raw.requests();
@@ -1065,24 +1069,24 @@ mod tests {
         }
         #[async_trait]
         impl Memory for CountingMemory {
-            async fn record(&mut self, m: Value) {
+            async fn record(&mut self, m: Value) -> Result<()> {
                 self.recorded += 1;
-                self.inner.record(m).await;
+                self.inner.record(m).await
             }
             async fn snapshot(&self) -> Vec<Value> {
                 self.inner.snapshot().await
             }
-            async fn pin(&mut self, m: Value) {
-                self.inner.pin(m).await;
+            async fn pin(&mut self, m: Value) -> Result<()> {
+                self.inner.pin(m).await
             }
             fn len(&self) -> usize {
                 self.inner.len()
             }
-            async fn truncate(&mut self, n: usize) {
-                self.inner.truncate(n).await;
+            async fn truncate(&mut self, n: usize) -> Result<()> {
+                self.inner.truncate(n).await
             }
-            async fn clear(&mut self) {
-                self.inner.clear().await;
+            async fn clear(&mut self) -> Result<()> {
+                self.inner.clear().await
             }
         }
 
@@ -1145,7 +1149,7 @@ mod tests {
         let mut agent = Agent::new(Box::new(FixedUsageProvider), Registry::new(), "m".into());
         agent.run("hi").await.unwrap();
         assert_eq!(agent.session_usage.total_tokens, 7);
-        agent.clear().await;
+        agent.clear().await.unwrap();
         assert_eq!(agent.session_usage.total_tokens, 0);
         assert_eq!(agent.last_usage, None);
     }
@@ -1155,7 +1159,8 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("done")]);
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
             .pin_system_prompt("sys")
-            .await;
+            .await
+            .unwrap();
         agent.run("hello").await.unwrap();
         // Snapshot before undo: [system, user, assistant].
         let pre = agent.memory.snapshot().await;
@@ -1174,7 +1179,8 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("done")]);
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
             .pin_system_prompt("sys")
-            .await;
+            .await
+            .unwrap();
         // No `run` yet — pinned-only memory.
         assert!(agent.undo_last_user_turn().await.is_none());
     }
@@ -1186,7 +1192,8 @@ mod tests {
         let provider = FakeProvider::new(vec![assistant_text("a1"), assistant_text("a2")]);
         let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
             .pin_system_prompt("sys")
-            .await;
+            .await
+            .unwrap();
         agent.run("first").await.unwrap();
         agent.run("second").await.unwrap();
         let pre = agent.memory.snapshot().await;

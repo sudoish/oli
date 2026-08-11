@@ -11,11 +11,12 @@ The first baseline release for oli's private-agent reference workflows.
 - ChatGPT subscription, OpenAI-compatible, Anthropic, Ollama, OpenRouter, and
   private OpenAI-compatible provider paths.
 - Streamable HTTP and stdio MCP clients, including live tool-list refresh.
-- Resumable JSONL sessions through `--resume`, `--continue`, and `/sessions`.
+- Resumable JSONL conversations through `oli run --conversation`,
+  `oli run --continue`, and `/sessions`.
 - Runtime diagnostics through `/diagnostics` and resolved paths through `/paths`.
 - Automatic tool execution by default, with opt-in granular approval policy,
   Bash allowlists, and a persisted approval list.
-- Full TUI and smaller line-mode-only release builds.
+- Persisted headless execution through `oli run`, plus an optional line REPL.
 
 ### Known limitations
 
@@ -28,6 +29,6 @@ The first baseline release for oli's private-agent reference workflows.
   oli tool policy must be configured independently.
 - Session transcripts are local plaintext JSONL files. oli does not encrypt or
   synchronize them.
-- The no-default-features build is line-mode only and omits the TUI and syntax
-  highlighting.
-
+- Breaking CLI migration: global `-p`, `--resume`, `--plain`, `--inline`, and
+  `--fullscreen` are removed. Use `oli run -p`, `oli run --conversation`, or
+  invoke `oli` with no subcommand for the line REPL.

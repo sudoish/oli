@@ -29,11 +29,10 @@ jobs:
       fail-fast: false
       matrix:
         features:
-          # Line-mode-only binary, as advertised in Cargo.toml.
+          # Oli intentionally has one text-first feature surface. Keep both
+          # Cargo boundary forms green so downstream minimal-build scripts do
+          # not regress if features are introduced later.
           - --no-default-features
-          # TUI without syntect.
-          - --no-default-features --features tui
-          # Everything, including the optional inline-image stack.
           - --all-features
     steps:
     - uses: actions/checkout@v4

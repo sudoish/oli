@@ -10,9 +10,9 @@
 
 </div>
 
-A minimal, hackable, single-binary terminal coding agent.
+A minimal, hackable, scriptable coding-agent runtime.
 
-`oli` is a Rust REPL/TUI that drives an LLM through a small set of code-aware
+`oli` drives an LLM through a small set of code-aware
 tools (`Read`, `Write`, `Edit`, `Bash`, `Grep`, `Glob`, `Task`) with automatic
 tool execution by default and an opt-in approval flow. It runs locally against [Ollama] by default,
 flips to any OpenAI-compatible endpoint (OpenRouter, OpenAI, LM Studio,
@@ -64,9 +64,9 @@ of TOML.
   `~/.config/oli/plugins/` to register tools, slash commands, and
   hooks. Drop three lines of TOML to wire up an external binary as a
   tool. Connect MCP servers over stdio or SSE.
-- **Resumable.** Every session is a JSONL transcript at
-  `~/.config/oli/sessions/<id>.jsonl`. `--resume <id>` and
-  `--continue` replay it; `/sessions` browses the lot.
+- **Resumable and scriptable.** Every run is a JSONL transcript at
+  `~/.config/oli/sessions/<id>.jsonl`. `oli run --conversation <id>` and
+  `oli run --continue` replay it; `/sessions` browses the lot.
 - **Small surface.** Five extension traits, no plugin framework, no
   package manager. The whole agent loop fits in your head.
 
@@ -92,14 +92,7 @@ of TOML.
 git clone <this repo>
 cd oli
 cargo build --release
-./target/release/oli                 # full TUI build
-```
-
-Optional thin build (no TUI, no syntax highlighting — useful for piped
-CI / scripting; ~2-3 MB smaller):
-
-```sh
-cargo build --release --no-default-features
+./target/release/oli --help
 ```
 
 The binary is self-contained — copy `target/release/oli` to anywhere
@@ -124,8 +117,8 @@ oli init --provider openrouter --api-key sk-...     # full non-interactive
 oli init --provider ollama --force                  # overwrite existing config
 ```
 
-Once configured, run `oli` to drop into the TUI, or `oli --plain` for
-the line-mode REPL.
+Once configured, use `oli run` for one-command/one-result automation or
+run `oli` without a subcommand for the line-mode REPL.
 
 ---
 
@@ -135,14 +128,13 @@ the line-mode REPL.
 
 | Command | What it does |
 | --- | --- |
-| `oli` | Interactive TUI (default on a TTY). |
-| `oli --plain` | Force the line-mode REPL even on a TTY. |
-| `oli -p "find callers of foo"` | One-shot mode — streams the answer to stdout, exits. |
-| `oli --resume <id>` | Resume a specific session by id. |
-| `oli --continue` | Resume the most recent session. |
-| `oli --strict -p "..."` | One-shot, auto-deny every `Ask` policy decision (unattended-safe). |
-| `oli --max-turns N` | Cap turns for this run. |
-| `oli --provider <name> --model <id>` | Override provider/model for a single run. |
+| `oli` | Interactive line-mode REPL. |
+| `oli run -p "find callers of foo"` | Persist one run, print the final response, and exit. |
+| `oli run --conversation <id> -p "continue"` | Append to a specific conversation. |
+| `oli run --continue -p "continue"` | Append to the most recent conversation. |
+| `oli run --output json -p "..."` | Emit one machine-readable result object. |
+| `oli run --strict -p "..."` | Deny every operation requiring approval. |
+| `oli run --max-turns N -p "..."` | Override the turn cap for one run. |
 
 ### Slash commands (highlights)
 
@@ -151,13 +143,13 @@ without running it (e.g. `/cost ?`).
 
 | Command | What it does |
 | --- | --- |
-| `/help` | Browse all commands (TUI overlay; inline list in line-mode). |
+| `/help` | List all commands. |
 | `/tools` | List every tool registered — built-ins, plugins, MCP. |
 | `/plugins` / `/plugins reload` | List loaded plugins; reload re-scans dirs without restarting. |
 | `/mcp` | MCP server health, tool counts, restart failed servers. |
 | `/config reload` | Re-parse global + project config and apply live. |
 | `/provider` / `/model` | Show or swap the active provider / model. |
-| `/sessions` | Open the session picker (TUI) or list ids (line-mode). |
+| `/sessions` | List saved conversation ids. |
 | `/cost` | Last-call + session-total token usage. |
 | `/memory` / `/compact` | Memory stats; force a compaction pass. |
 | `/clear` | Drop conversation history (system prompt is preserved). |
@@ -179,7 +171,7 @@ overlays. A repo-root `AGENTS.md` is found from any subdirectory.
 ### Approval flow
 
 Tools run automatically by default. Set `[policy] mode = "ask"` to have the
-TUI pop a modal with the diff or command preview when a policy rule returns
+line REPL prompt with the diff or command preview when a policy rule returns
 `Ask`:
 
 | Key | Effect |
@@ -190,10 +182,9 @@ TUI pop a modal with the diff or command preview when a policy rule returns
 | `[A]` (capital A) | Allow always — also writes to `~/.config/oli/policy-allow.json`. |
 | `d` | Deny the fingerprint for the session. |
 
-In line-mode, the same prompt appears inline. The granular `auto_allow`, `ask`,
-`bash_allowlist`, and MCP read rules apply in ask mode. In `-p` mode, `Ask`
-auto-approves unless you pass `--strict`; strict forces ask mode and denies
-every approval request.
+The granular `auto_allow`, `ask`, `bash_allowlist`, and MCP read rules apply in
+ask mode. Headless `oli run` never waits for input: unresolved approval requests
+are denied. `--strict` forces ask mode and therefore denies every gated mutation.
 
 ---
 
@@ -506,7 +497,7 @@ add what" table is the map:
 | --- | --- |
 | New tool | `src/tools/<name>.rs` impl `tools::Tool`; register in `src/bin/oli.rs`. |
 | New provider | `src/providers/<name>.rs` impl `Provider`; wire into `providers::build()`. |
-| New slash command | `src/repl/slash.rs`; register in `SlashRegistry::default_set_with_reloader` (shared by REPL + TUI). |
+| New slash command | `src/repl/slash.rs`; register in `SlashRegistry::default_set_with_reloader`. |
 | Model capability override | `[[caps]]` block in config, layered over defaults in `src/agent/caps.rs`. |
 
 The test loop is fast (`cargo test --lib` is ~2s for the full
@@ -520,7 +511,7 @@ that keeps the codebase small.
 ```
 src/
 ├── bin/oli.rs       # CLI entry; wires startup, registers tools and hooks
-├── bootstrap.rs     # shared startup between REPL and TUI
+├── bootstrap.rs     # shared startup and persisted-session wiring
 ├── agent/           # think → call → observe loop
 │   ├── mod.rs       #   Agent + Memory trait
 │   ├── context.rs   #   System prompt + AGENTS.md/CLAUDE.md ingestion
@@ -533,7 +524,6 @@ src/
 ├── mcp/             # MCP clients (stdio + SSE)
 ├── hooks/           # PreToolUse / PostToolUse / Stop dispatch
 ├── repl/            # line-mode REPL + SlashRegistry + built-in slash commands
-├── tui/             # ratatui driver, render loop, app state
 ├── notes/           # cross-session note store (filesystem, TOML frontmatter)
 ├── config.rs        # layered TOML loader (global + project)
 └── wizard_init.rs   # first-run config wizard
