@@ -56,8 +56,8 @@ pub fn build_default_tools(cfg: &Config, notes_store: Arc<dyn notes::NotesStore>
 /// Decide which session id to use for this run. Precedence:
 /// explicit `resume`, then `continue_latest` (latest by mtime),
 /// then a fresh id. Every top-level run is persisted so a later
-/// invocation can continue it.
-pub fn resolve_session_id(resume: Option<&str>, continue_latest: bool) -> Result<String> {
+/// invocation can continue it. Returns (id, is_fresh).
+pub fn resolve_session_id(resume: Option<&str>, continue_latest: bool) -> Result<(String, bool)> {
     resolve_session_id_from(resume, continue_latest, &list_sessions(), new_session_id)
 }
 
@@ -66,22 +66,22 @@ fn resolve_session_id_from(
     continue_latest: bool,
     sessions: &[SessionEntry],
     fresh_id: impl FnOnce() -> String,
-) -> Result<String> {
+) -> Result<(String, bool)> {
     if let Some(id) = resume {
         let exists = sessions.iter().any(|entry| entry.id == id);
         if !exists {
             return Err(AgentError::Config(format!("unknown conversation: {id}")));
         }
-        return Ok(id.to_string());
+        return Ok((id.to_string(), false));
     }
     if continue_latest {
         let latest = sessions
             .iter()
             .max_by(|a, b| a.mtime.cmp(&b.mtime).then_with(|| a.id.cmp(&b.id)))
             .ok_or_else(|| AgentError::Config("no prior sessions to continue".into()))?;
-        return Ok(latest.id.clone());
+        return Ok((latest.id.clone(), false));
     }
-    Ok(fresh_id())
+    Ok((fresh_id(), true))
 }
 
 #[cfg(test)]
@@ -99,30 +99,34 @@ mod session_tests {
 
     #[test]
     fn fresh_runs_allocate_a_new_id() {
-        let id = resolve_session_id_from(None, false, &[], || "fresh-id".into()).unwrap();
+        let (id, is_fresh) = resolve_session_id_from(None, false, &[], || "fresh-id".into()).unwrap();
         assert_eq!(id, "fresh-id");
+        assert!(is_fresh);
     }
 
     #[test]
     fn explicit_known_conversation_wins() {
         let sessions = [entry("older", 1), entry("wanted", 2)];
-        let id =
+        let (id, is_fresh) =
             resolve_session_id_from(Some("wanted"), true, &sessions, || unreachable!()).unwrap();
         assert_eq!(id, "wanted");
+        assert!(!is_fresh);
     }
 
     #[test]
     fn continue_selects_latest_deterministically() {
         let sessions = [entry("newest", 20), entry("older", 10)];
-        let id = resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
+        let (id, is_fresh) = resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
         assert_eq!(id, "newest");
+        assert!(!is_fresh);
     }
 
     #[test]
     fn continue_breaks_equal_mtime_ties_by_id() {
         let sessions = [entry("alpha", 20), entry("beta", 20)];
-        let id = resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
+        let (id, is_fresh) = resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
         assert_eq!(id, "beta");
+        assert!(!is_fresh);
     }
 
     #[test]
@@ -139,17 +143,20 @@ mod session_tests {
 /// Build the agent's memory. With a session id we wrap the
 /// linear default in `PersistedMemory`, replaying any existing
 /// transcript. Without one, the linear memory stands alone.
+/// `is_fresh` controls whether to allow creation of new session files;
+/// when false, an error is returned if the session does not already exist.
 ///
 /// Returns the memory plus the read paths replayed from the
 /// session transcript and (when persisted) a `ReadLogger` that
 /// mirrors future reads into the same file.
 pub async fn build_memory(
     session_id: Option<&str>,
+    is_fresh: bool,
 ) -> Result<(Box<dyn Memory>, Vec<PathBuf>, Option<Arc<dyn ReadLogger>>)> {
     let inner: Box<dyn Memory> = Box::new(LinearWithCompact::new());
     match session_id {
         Some(id) => {
-            let mut persisted = PersistedMemory::open(id, inner).await?;
+            let mut persisted = PersistedMemory::open(id, inner, is_fresh).await?;
             let reads = persisted.drain_replayed_reads();
             let logger = persisted.read_logger();
             Ok((Box::new(persisted), reads, Some(logger)))

@@ -122,7 +122,7 @@ async fn run_turn(agent: &mut Agent, prompt: &str) {
             let _ = std::io::stdout().flush();
         }
         // ToolArgsChunk events are ignored in line-mode REPL — the
-        // The line REPL deliberately omits streaming-diff previews.
+        // line REPL deliberately omits streaming-diff previews.
     };
 
     let cancelled;
@@ -146,7 +146,9 @@ async fn run_turn(agent: &mut Agent, prompt: &str) {
     }
 
     if cancelled {
-        agent.memory.truncate(saved_len).await;
+        if let Err(e) = agent.memory.truncate(saved_len).await {
+            crate::log_error!("failed to truncate memory on cancel: {e}");
+        }
         println!("\n(cancelled)");
     }
 }

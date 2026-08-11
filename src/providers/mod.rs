@@ -1,5 +1,5 @@
 //! Chat-completion providers. The `Provider` trait abstracts the
-//! one-shot `chat()` and the streaming `chat_stream()` used by the REPL over whatever wire
+//! one-shot `chat()` and the streaming `chat_stream()` used by headless runs and the line REPL over whatever wire
 //! protocol the underlying API speaks.
 //!
 //! Bundled implementations:

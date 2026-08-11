@@ -103,7 +103,7 @@ impl EmbeddingRagMemory {
 
 #[async_trait]
 impl Memory for EmbeddingRagMemory {
-    async fn record(&mut self, message: Value) {
+    async fn record(&mut self, message: Value) -> Result<()> {
         let embedding = match extract_embedding_text(&message) {
             Some(text) => self.embedder.embed(&text).await.ok(),
             None => None,
@@ -112,6 +112,7 @@ impl Memory for EmbeddingRagMemory {
             msg: message,
             embedding,
         });
+        Ok(())
     }
 
     async fn snapshot(&self) -> Vec<Value> {
@@ -159,8 +160,9 @@ impl Memory for EmbeddingRagMemory {
         out
     }
 
-    async fn pin(&mut self, message: Value) {
+    async fn pin(&mut self, message: Value) -> Result<()> {
         self.pinned.push(message);
+        Ok(())
     }
 
     async fn pinned(&self) -> Vec<Value> {
@@ -171,12 +173,14 @@ impl Memory for EmbeddingRagMemory {
         self.messages.len()
     }
 
-    async fn truncate(&mut self, n: usize) {
+    async fn truncate(&mut self, n: usize) -> Result<()> {
         self.messages.truncate(n);
+        Ok(())
     }
 
-    async fn clear(&mut self) {
+    async fn clear(&mut self) -> Result<()> {
         self.messages.clear();
+        Ok(())
     }
 
     /// RAG keeps the full transcript indexed; growth is bounded at
@@ -374,9 +378,9 @@ mod tests {
     #[tokio::test]
     async fn snapshot_includes_pinned_then_recent_when_no_retrieval_candidates() {
         let mut m = EmbeddingRagMemory::new(Arc::new(KeywordEmbedder)).with_recent_window(2);
-        m.pin(json!({"role":"system","content":"sys"})).await;
-        m.record(json!({"role":"user","content":"a"})).await;
-        m.record(json!({"role":"user","content":"b"})).await;
+        m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
+        m.record(json!({"role":"user","content":"a"})).await.unwrap();
+        m.record(json!({"role":"user","content":"b"})).await.unwrap();
 
         let snap = m.snapshot().await;
         // pinned (1) + retrieved-from-prefix (none, recent_start=0) + recent (2) = 3.
@@ -405,11 +409,11 @@ mod tests {
             } else {
                 format!("turn {}: filler text", i)
             };
-            m.record(json!({"role":"user","content": body})).await;
+            m.record(json!({"role":"user","content": body})).await.unwrap();
         }
         // Latest message is the query.
         m.record(json!({"role":"user","content":"what was the alpha fact?"}))
-            .await;
+            .await.unwrap();
 
         let snap = m.snapshot().await;
         // Should contain at least one message mentioning "alpha facts"
@@ -438,10 +442,10 @@ mod tests {
         let mut m = EmbeddingRagMemory::new(Arc::new(KeywordEmbedder))
             .with_recent_window(4)
             .with_top_k(8);
-        m.pin(json!({"role":"system","content":"sys"})).await;
+        m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
         for i in 0..200 {
             let body = format!("turn {}: alpha keyword for retrieval", i);
-            m.record(json!({"role":"user","content": body})).await;
+            m.record(json!({"role":"user","content": body})).await.unwrap();
         }
         let snap = m.snapshot().await;
         // pinned(1) + top_k(8) + recent(4) = 13 max.
@@ -458,15 +462,15 @@ mod tests {
             .with_recent_window(1)
             .with_top_k(3);
         m.record(json!({"role":"user","content":"turn 0 alpha"}))
-            .await;
+            .await.unwrap();
         m.record(json!({"role":"user","content":"turn 1 alpha"}))
-            .await;
+            .await.unwrap();
         m.record(json!({"role":"user","content":"turn 2 filler"}))
-            .await;
+            .await.unwrap();
         m.record(json!({"role":"user","content":"turn 3 alpha"}))
-            .await;
+            .await.unwrap();
         m.record(json!({"role":"user","content":"query about alpha"}))
-            .await;
+            .await.unwrap();
 
         let snap = m.snapshot().await;
         let alpha_indices: Vec<usize> = snap
@@ -509,7 +513,7 @@ mod tests {
             }
         }
         let mut m = EmbeddingRagMemory::new(Arc::new(KeywordEmbedder));
-        m.record(json!({"role":"user","content":"a"})).await;
+        m.record(json!({"role":"user","content":"a"})).await.unwrap();
         let provider = ShouldNotCall;
         m.maybe_compact(CompactContext {
             provider: &provider,
@@ -527,10 +531,10 @@ mod tests {
         let mut m = EmbeddingRagMemory::new(Arc::new(KeywordEmbedder));
         for i in 0..5 {
             m.record(json!({"role":"user","content":format!("msg{}", i)}))
-                .await;
+                .await.unwrap();
         }
         assert_eq!(m.len(), 5);
-        m.truncate(2).await;
+        m.truncate(2).await.unwrap();
         assert_eq!(m.len(), 2);
     }
 }

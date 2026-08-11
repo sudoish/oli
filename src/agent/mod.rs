@@ -211,7 +211,9 @@ impl Agent {
         if !self.memory.pinned().await.is_empty() {
             return self;
         }
-        self.memory
+        // Ignore pin errors in the builder pattern; they surface later
+        // when agent.run is called if persistence fails.
+        let _ = self.memory
             .pin(json!({ "role": "system", "content": s }))
             .await;
         self
@@ -221,11 +223,12 @@ impl Agent {
     /// context (so `Edit`'s read-first invariant resets too). Pinned
     /// content (system prompt) is preserved and re-injected on the next
     /// turn. Usage counters reset so `/cost` reflects the new turn.
-    pub async fn clear(&mut self) {
-        self.memory.clear().await;
+    pub async fn clear(&mut self) -> Result<()> {
+        self.memory.clear().await?;
         self.ctx = ToolContext::new();
         self.last_usage = None;
         self.session_usage = Usage::default();
+        Ok(())
     }
 
     /// Borrow the per-session tool context. The binary uses this at
@@ -286,7 +289,7 @@ impl Agent {
         }
         // Truncate before the user message — i.e. drop the user
         // message itself and everything after it.
-        self.memory.truncate(record_idx).await;
+        self.memory.truncate(record_idx).await.ok()?;
         Some(body)
     }
 
@@ -349,7 +352,7 @@ impl Agent {
     {
         self.memory
             .record(json!({ "role": "user", "content": prompt }))
-            .await;
+            .await?;
 
         let mut turn = 0usize;
         loop {
@@ -436,7 +439,7 @@ impl Agent {
                 }
             }
 
-            self.memory.record(message).await;
+            self.memory.record(message).await?;
 
             if tool_calls.is_empty() {
                 let content = resp
@@ -487,7 +490,7 @@ impl Agent {
                         "tool_call_id": id,
                         "content": result,
                     }))
-                    .await;
+                    .await?;
             }
         }
     }
@@ -727,7 +730,7 @@ mod tests {
         .await;
 
         agent.run("a").await.unwrap();
-        agent.clear().await;
+        agent.clear().await.unwrap();
         agent.run("b").await.unwrap();
 
         let seen = raw.requests();
@@ -1064,24 +1067,24 @@ mod tests {
         }
         #[async_trait]
         impl Memory for CountingMemory {
-            async fn record(&mut self, m: Value) {
+            async fn record(&mut self, m: Value) -> Result<()> {
                 self.recorded += 1;
-                self.inner.record(m).await;
+                self.inner.record(m).await
             }
             async fn snapshot(&self) -> Vec<Value> {
                 self.inner.snapshot().await
             }
-            async fn pin(&mut self, m: Value) {
-                self.inner.pin(m).await;
+            async fn pin(&mut self, m: Value) -> Result<()> {
+                self.inner.pin(m).await
             }
             fn len(&self) -> usize {
                 self.inner.len()
             }
-            async fn truncate(&mut self, n: usize) {
-                self.inner.truncate(n).await;
+            async fn truncate(&mut self, n: usize) -> Result<()> {
+                self.inner.truncate(n).await
             }
-            async fn clear(&mut self) {
-                self.inner.clear().await;
+            async fn clear(&mut self) -> Result<()> {
+                self.inner.clear().await
             }
         }
 
@@ -1144,7 +1147,7 @@ mod tests {
         let mut agent = Agent::new(Box::new(FixedUsageProvider), Registry::new(), "m".into());
         agent.run("hi").await.unwrap();
         assert_eq!(agent.session_usage.total_tokens, 7);
-        agent.clear().await;
+        agent.clear().await.unwrap();
         assert_eq!(agent.session_usage.total_tokens, 0);
         assert_eq!(agent.last_usage, None);
     }

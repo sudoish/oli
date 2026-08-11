@@ -469,6 +469,18 @@ fn prompt_api_key(provider: oli::wizard_init::WizardProvider) -> Result<String> 
 
 fn select_prompt(argument: Option<String>, piped: &str) -> Result<String> {
     let piped_is_empty = piped.trim().is_empty();
+
+    // Validate --prompt argument was supplied before filtering
+    let arg_was_supplied = argument.is_some();
+    let arg_is_empty_or_whitespace = argument.as_ref().map_or(true, |p| p.trim().is_empty());
+
+    // Reject whitespace-only argument even when stdin has content
+    if arg_was_supplied && arg_is_empty_or_whitespace {
+        return Err(oli::error::AgentError::Config(
+            "prompt argument is empty or whitespace-only".into(),
+        ));
+    }
+
     match (argument.filter(|p| !p.trim().is_empty()), piped_is_empty) {
         (Some(_), false) => Err(oli::error::AgentError::Config(
             "prompt provided both by --prompt and stdin".into(),
@@ -596,8 +608,8 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
         .as_ref()
         .map(|(options, _)| (options.conversation.as_deref(), options.continue_session))
         .unwrap_or((None, false));
-    let session_id = resolve_session_id(conversation, continue_session)?;
-    let (memory, replayed_reads, read_logger) = build_memory(Some(&session_id)).await?;
+    let (session_id, is_fresh) = resolve_session_id(conversation, continue_session)?;
+    let (memory, replayed_reads, read_logger) = build_memory(Some(&session_id), is_fresh).await?;
 
     let mut hooks = hooks::HookRegistry::new();
     for h in plugin_hooks {

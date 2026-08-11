@@ -24,7 +24,7 @@ pub use rag::{Embedder, EmbeddingRagMemory, OllamaEmbedder};
 pub trait Memory: Send + Sync {
     /// Append a message to the active conversation. Called once per user
     /// input, once per assistant response, and once per tool result.
-    async fn record(&mut self, message: Value);
+    async fn record(&mut self, message: Value) -> Result<()>;
 
     /// Materialize the message list to ship in the next chat request.
     /// Pinned messages always come first.
@@ -33,7 +33,7 @@ pub trait Memory: Send + Sync {
     /// Pin a message so it survives every snapshot regardless of
     /// compaction. Used for the system prompt today; later for sticky
     /// instructions.
-    async fn pin(&mut self, message: Value);
+    async fn pin(&mut self, message: Value) -> Result<()>;
 
     /// Return the pinned messages, in pin order. Default is empty for
     /// strategies that don't separate pinned from regular content; the
@@ -52,10 +52,10 @@ pub trait Memory: Send + Sync {
     /// Roll back to a prior `len()`. For `LinearWithCompact` this is a
     /// `Vec::truncate`; for graph-backed implementations it rolls back
     /// recent writes to whatever state matches that count.
-    async fn truncate(&mut self, n: usize);
+    async fn truncate(&mut self, n: usize) -> Result<()>;
 
     /// Drop all session-local state. Pinned content is preserved.
-    async fn clear(&mut self);
+    async fn clear(&mut self) -> Result<()>;
 
     /// Optional hook invoked by the agent before each chat request.
     /// Strategies that don't compact return immediately. Strategies that

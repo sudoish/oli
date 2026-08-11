@@ -178,8 +178,10 @@ impl SlashCommand for Clear {
         "drop conversation history (system prompt is preserved)"
     }
     async fn run(&self, _args: &str, agent: &mut Agent) -> SlashOutcome {
-        agent.clear().await;
-        SlashOutcome::Continue(Some("(history cleared)".into()))
+        match agent.clear().await {
+            Ok(()) => SlashOutcome::Continue(Some("(history cleared)".into())),
+            Err(e) => SlashOutcome::Continue(Some(format!("clear failed: {e}"))),
+        }
     }
 }
 

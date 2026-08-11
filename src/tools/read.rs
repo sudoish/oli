@@ -13,7 +13,9 @@ pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bm
 
 pub struct Read;
 
-/// Build the `[Image: <abs-path> <WxH|?> <FORMAT>]` marker returned to the model.
+/// Build the `[Image: <path> <WxH|?x?> <FORMAT>]` marker returned to the model.
+/// The path may be the canonical absolute path or the original input path when canonicalization fails.
+/// Dimensions are shown as WxH when successfully probed, or ?x? for unknown dimensions.
 pub fn format_image_marker(abs_path: &str, format: &str, dims: Option<(u32, u32)>) -> String {
     let size = match dims {
         Some((w, h)) => format!("{}x{}", w, h),

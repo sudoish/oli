@@ -147,8 +147,8 @@ for the selected provider, and retain it with the release evidence. Mark rows
 for unselected providers `N/A (provider not selected)`; do not use N/A for a
 required check. The example is not verified merely because configuration parses
 or an authorized login succeeds: the denied identity, public-path denial,
-remote login, selected provider, interrupted session, and resume must all be
-exercised.
+remote login, selected provider, conversation persistence, interrupted session,
+and resume must all be exercised.
 
 ## Troubleshooting
 

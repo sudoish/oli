@@ -53,29 +53,35 @@ pub struct PersistedMemory {
 impl PersistedMemory {
     /// Open (or create) the session file for `id` under the default
     /// sessions dir, replaying any prior content into `inner` before
-    /// wrapping. Subsequent mutations append.
-    pub async fn open(id: &str, inner: Box<dyn Memory>) -> Result<Self> {
+    /// wrapping. Subsequent mutations append. When `allow_create` is false,
+    /// an error is returned if the session file does not already exist.
+    pub async fn open(id: &str, inner: Box<dyn Memory>, allow_create: bool) -> Result<Self> {
         let dir = sessions_dir().ok_or_else(|| {
             AgentError::Config(
                 "could not resolve sessions dir (no $HOME or $XDG_CONFIG_HOME?)".into(),
             )
         })?;
-        Self::open_at(&dir, id, inner).await
+        Self::open_at(&dir, id, inner, allow_create).await
     }
 
     /// Same as `open`, but accepts an explicit sessions directory.
     /// Tests use this to avoid touching the user's real config dir.
-    pub async fn open_at(dir: &Path, id: &str, mut inner: Box<dyn Memory>) -> Result<Self> {
+    pub async fn open_at(dir: &Path, id: &str, mut inner: Box<dyn Memory>, allow_create: bool) -> Result<Self> {
         tokio::fs::create_dir_all(dir).await?;
         let path = dir.join(format!("{}.jsonl", id));
 
         let mut replayed_reads = Vec::new();
         if path.exists() {
             replay_into(&path, inner.as_mut(), &mut replayed_reads).await?;
+        } else if !allow_create {
+            return Err(AgentError::Config(format!(
+                "conversation {} does not exist (transcript missing)",
+                id
+            )));
         }
 
         let file = OpenOptions::new()
-            .create(true)
+            .create(allow_create)
             .append(true)
             .open(&path)
             .await?;
@@ -120,17 +126,13 @@ impl PersistedMemory {
         })
     }
 
-    async fn append(&self, op: Value) {
+    async fn append(&self, op: Value) -> Result<()> {
         let mut line = op.to_string();
         line.push('\n');
         let mut f = self.file.lock().await;
-        // Best-effort: a write failure is logged but should not crash
-        // the session — the in-memory state is still authoritative for
-        // the live conversation. Future hook for telemetry/error
-        // reporting; for now we silently swallow to keep the agent loop
-        // resilient against full disks / closed handles.
-        let _ = f.write_all(line.as_bytes()).await;
-        let _ = f.flush().await;
+        f.write_all(line.as_bytes()).await?;
+        f.flush().await?;
+        Ok(())
     }
 }
 
@@ -159,18 +161,18 @@ impl ReadLogger for PersistedReadLogger {
 
 #[async_trait]
 impl Memory for PersistedMemory {
-    async fn record(&mut self, message: Value) {
-        self.append(json!({"op": "record", "msg": &message})).await;
-        self.inner.record(message).await;
+    async fn record(&mut self, message: Value) -> Result<()> {
+        self.append(json!({"op": "record", "msg": &message})).await?;
+        self.inner.record(message).await
     }
 
     async fn snapshot(&self) -> Vec<Value> {
         self.inner.snapshot().await
     }
 
-    async fn pin(&mut self, message: Value) {
-        self.append(json!({"op": "pin", "msg": &message})).await;
-        self.inner.pin(message).await;
+    async fn pin(&mut self, message: Value) -> Result<()> {
+        self.append(json!({"op": "pin", "msg": &message})).await?;
+        self.inner.pin(message).await
     }
 
     async fn pinned(&self) -> Vec<Value> {
@@ -181,14 +183,14 @@ impl Memory for PersistedMemory {
         self.inner.len()
     }
 
-    async fn truncate(&mut self, n: usize) {
-        self.append(json!({"op": "truncate", "n": n})).await;
-        self.inner.truncate(n).await;
+    async fn truncate(&mut self, n: usize) -> Result<()> {
+        self.append(json!({"op": "truncate", "n": n})).await?;
+        self.inner.truncate(n).await
     }
 
-    async fn clear(&mut self) {
-        self.append(json!({"op": "clear"})).await;
-        self.inner.clear().await;
+    async fn clear(&mut self) -> Result<()> {
+        self.append(json!({"op": "clear"})).await?;
+        self.inner.clear().await
     }
 
     async fn maybe_compact(&mut self, ctx: CompactContext<'_>) -> Result<()> {
@@ -214,16 +216,16 @@ async fn replay_into(path: &Path, mem: &mut dyn Memory, reads: &mut Vec<PathBuf>
         match op {
             "pin" => {
                 if let Some(m) = v.get("msg").cloned() {
-                    mem.pin(m).await;
+                    let _ = mem.pin(m).await;
                 }
             }
             "record" => {
                 if let Some(m) = v.get("msg").cloned() {
-                    mem.record(m).await;
+                    let _ = mem.record(m).await;
                 }
             }
             "clear" => {
-                mem.clear().await;
+                let _ = mem.clear().await;
                 // A clear in a prior run wipes session-local state, so
                 // the post-clear read-set should not carry pre-clear
                 // entries.
@@ -231,7 +233,7 @@ async fn replay_into(path: &Path, mem: &mut dyn Memory, reads: &mut Vec<PathBuf>
             }
             "truncate" => {
                 let n = v.get("n").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
-                mem.truncate(n).await;
+                let _ = mem.truncate(n).await;
             }
             "read" => {
                 if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
@@ -326,10 +328,10 @@ mod tests {
     #[tokio::test]
     async fn first_open_creates_file_and_appends_record() {
         let dir = tempdir().unwrap();
-        let mut m = PersistedMemory::open_at(dir.path(), "test1", fresh_inner())
+        let mut m = PersistedMemory::open_at(dir.path(), "test1", fresh_inner(), true)
             .await
             .unwrap();
-        m.record(json!({"role":"user","content":"hi"})).await;
+        m.record(json!({"role":"user","content":"hi"})).await.unwrap();
 
         let body = tokio::fs::read_to_string(dir.path().join("test1.jsonl"))
             .await
@@ -342,14 +344,14 @@ mod tests {
     async fn replay_reconstructs_inner_state() {
         let dir = tempdir().unwrap();
         {
-            let mut m = PersistedMemory::open_at(dir.path(), "rep", fresh_inner())
+            let mut m = PersistedMemory::open_at(dir.path(), "rep", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.pin(json!({"role":"system","content":"sys"})).await;
-            m.record(json!({"role":"user","content":"a"})).await;
-            m.record(json!({"role":"assistant","content":"b"})).await;
+            m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
+            m.record(json!({"role":"user","content":"a"})).await.unwrap();
+            m.record(json!({"role":"assistant","content":"b"})).await.unwrap();
         }
-        let m = PersistedMemory::open_at(dir.path(), "rep", fresh_inner())
+        let m = PersistedMemory::open_at(dir.path(), "rep", fresh_inner(), false)
             .await
             .unwrap();
         let snap = m.snapshot().await;
@@ -365,16 +367,16 @@ mod tests {
     async fn truncate_and_clear_round_trip_through_replay() {
         let dir = tempdir().unwrap();
         {
-            let mut m = PersistedMemory::open_at(dir.path(), "tc", fresh_inner())
+            let mut m = PersistedMemory::open_at(dir.path(), "tc", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.record(json!({"role":"user","content":"a"})).await;
-            m.record(json!({"role":"user","content":"b"})).await;
-            m.record(json!({"role":"user","content":"c"})).await;
-            m.truncate(1).await;
-            m.record(json!({"role":"user","content":"d"})).await;
+            m.record(json!({"role":"user","content":"a"})).await.unwrap();
+            m.record(json!({"role":"user","content":"b"})).await.unwrap();
+            m.record(json!({"role":"user","content":"c"})).await.unwrap();
+            m.truncate(1).await.unwrap();
+            m.record(json!({"role":"user","content":"d"})).await.unwrap();
         }
-        let m = PersistedMemory::open_at(dir.path(), "tc", fresh_inner())
+        let m = PersistedMemory::open_at(dir.path(), "tc", fresh_inner(), false)
             .await
             .unwrap();
         // truncate(1) trimmed records 2 & 3; record("d") appended at
@@ -390,15 +392,15 @@ mod tests {
     async fn clear_drops_state_on_replay_too() {
         let dir = tempdir().unwrap();
         {
-            let mut m = PersistedMemory::open_at(dir.path(), "cl", fresh_inner())
+            let mut m = PersistedMemory::open_at(dir.path(), "cl", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.pin(json!({"role":"system","content":"sys"})).await;
-            m.record(json!({"role":"user","content":"x"})).await;
-            m.clear().await;
-            m.record(json!({"role":"user","content":"y"})).await;
+            m.pin(json!({"role":"system","content":"sys"})).await.unwrap();
+            m.record(json!({"role":"user","content":"x"})).await.unwrap();
+            m.clear().await.unwrap();
+            m.record(json!({"role":"user","content":"y"})).await.unwrap();
         }
-        let m = PersistedMemory::open_at(dir.path(), "cl", fresh_inner())
+        let m = PersistedMemory::open_at(dir.path(), "cl", fresh_inner(), false)
             .await
             .unwrap();
         let snap = m.snapshot().await;
@@ -416,7 +418,7 @@ mod tests {
             "{\"op\":\"record\",\"msg\":{\"role\":\"user\",\"content\":\"a\"}}\nNOT JSON\n",
         )
         .unwrap();
-        let m = PersistedMemory::open_at(dir.path(), "bad", fresh_inner())
+        let m = PersistedMemory::open_at(dir.path(), "bad", fresh_inner(), false)
             .await
             .unwrap();
         assert_eq!(m.len(), 1);
@@ -426,16 +428,16 @@ mod tests {
     async fn list_sessions_in_returns_existing_ids() {
         let dir = tempdir().unwrap();
         {
-            let mut m = PersistedMemory::open_at(dir.path(), "alpha", fresh_inner())
+            let mut m = PersistedMemory::open_at(dir.path(), "alpha", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.record(json!({"role":"user","content":"a"})).await;
+            m.record(json!({"role":"user","content":"a"})).await.unwrap();
         }
         {
-            let mut m = PersistedMemory::open_at(dir.path(), "beta", fresh_inner())
+            let mut m = PersistedMemory::open_at(dir.path(), "beta", fresh_inner(), true)
                 .await
                 .unwrap();
-            m.record(json!({"role":"user","content":"b"})).await;
+            m.record(json!({"role":"user","content":"b"})).await.unwrap();
         }
         let entries = list_sessions_in(dir.path());
         let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
@@ -471,7 +473,7 @@ mod tests {
         // First run: open, attach the logger to a context, mark a read,
         // and close.
         {
-            let m = PersistedMemory::open_at(dir.path(), "rs", fresh_inner())
+            let m = PersistedMemory::open_at(dir.path(), "rs", fresh_inner(), true)
                 .await
                 .unwrap();
             let ctx = ToolContext::new();
@@ -490,7 +492,7 @@ mod tests {
         );
 
         // Second run: replay drains the read into a fresh context.
-        let mut m2 = PersistedMemory::open_at(dir.path(), "rs", fresh_inner())
+        let mut m2 = PersistedMemory::open_at(dir.path(), "rs", fresh_inner(), false)
             .await
             .unwrap();
         let drained = m2.drain_replayed_reads();
@@ -520,17 +522,17 @@ mod tests {
         let post = NamedTempFile::new().unwrap();
 
         {
-            let mut m = PersistedMemory::open_at(dir.path(), "cls", fresh_inner())
+            let mut m = PersistedMemory::open_at(dir.path(), "cls", fresh_inner(), true)
                 .await
                 .unwrap();
             let ctx = ToolContext::new();
             ctx.set_read_logger(m.read_logger()).await;
             ctx.mark_read(pre.path()).await;
-            m.clear().await;
+            m.clear().await.unwrap();
             ctx.mark_read(post.path()).await;
         }
 
-        let mut m2 = PersistedMemory::open_at(dir.path(), "cls", fresh_inner())
+        let mut m2 = PersistedMemory::open_at(dir.path(), "cls", fresh_inner(), false)
             .await
             .unwrap();
         let drained = m2.drain_replayed_reads();
