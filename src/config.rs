@@ -68,49 +68,6 @@ pub struct Config {
     /// each entry the user adds becomes a connected server at startup.
     #[serde(default)]
     pub mcp: McpConfig,
-
-    /// `[ui]` section — terminal-UI preferences shared by the TUI and
-    /// (where relevant) the line-mode REPL. Optional; defaults match
-    /// the pre-W1 behavior.
-    #[serde(default)]
-    pub ui: UiConfig,
-}
-
-/// `[ui]` config block.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub struct UiConfig {
-    /// Which viewport mode the TUI should pick. One of `"auto"`,
-    /// `"fullscreen"`, `"inline"`. `"auto"` defers to capability
-    /// detection (Phase W2): inline inside buffer-terminals,
-    /// fullscreen elsewhere.
-    #[serde(default)]
-    pub viewport: Option<String>,
-
-    /// Override mouse-capture default. `None` = follow the viewport
-    /// and capability defaults (capture in fullscreen, off in
-    /// inline / buffer-terminals). `Some(true)` forces capture on,
-    /// `Some(false)` forces it off — the latter is useful in a
-    /// fullscreen kitty/iTerm2 session when the user wants
-    /// terminal-native selection back.
-    #[serde(default)]
-    pub mouse: Option<bool>,
-
-    /// Override OSC52 clipboard-write default. `None` / `"auto"` =
-    /// follow `Capabilities::osc52` (on in kitty / iTerm2 / WezTerm
-    /// / ghostty / tmux-capable; off in buffer-terminals + generic
-    /// xterm). `"on"` forces the escape; `"off"` always falls back
-    /// to the copy-fallback modal. Useful when a host *does* honor
-    /// OSC52 but we couldn't detect it, or vice versa.
-    #[serde(default)]
-    pub osc52: Option<String>,
-
-    /// Named theme for the TUI. One of `"dark"` (default),
-    /// `"light"`, `"dimmed"`, or `"auto"`. `"auto"` consults
-    /// `$COLORFGBG` and picks `light` on a light-background
-    /// terminal, otherwise `dark`. Unknown names fall back to
-    /// `dark`.
-    #[serde(default)]
-    pub theme: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -316,7 +273,6 @@ impl Config {
             caps: Vec::new(),
             agent: AgentConfig::default(),
             mcp: McpConfig::default(),
-            ui: UiConfig::default(),
         }
     }
 

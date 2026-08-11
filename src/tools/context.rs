@@ -51,7 +51,7 @@ pub struct SessionState {
     /// `None` falls back to the agent process's cwd.
     pub cwd: Option<PathBuf>,
     /// Optional sink for read events. Set at startup when the session is
-    /// backed by `PersistedMemory` so the read-set survives `--resume`.
+    /// backed by `PersistedMemory` so the read-set survives conversation resume.
     pub read_logger: Option<Arc<dyn ReadLogger>>,
 }
 

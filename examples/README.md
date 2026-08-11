@@ -17,7 +17,7 @@ Drop one example in, launch oli, confirm it loaded:
 # from the repo root, after `cargo build`
 mkdir -p .oli/plugins
 cp examples/plugins/safety_net.lua .oli/plugins/
-./target/debug/oli --plain
+./target/debug/oli
 ```
 
 Then inside the session:

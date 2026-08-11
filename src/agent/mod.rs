@@ -7,7 +7,7 @@
 //!   text. Used by the `-p` CLI mode.
 //! - [`Agent::run_streaming`] — same loop but emits incremental
 //!   events (content chunks, tool starts/ends, usage updates) to a
-//!   user-supplied callback. Drives the TUI and the line-mode REPL.
+//!   user-supplied callback. Drives headless runs and the line REPL.
 //!
 //! `Agent::with_*` builder methods layer on optional pieces
 //! (memory strategy, hook registry, MCP handles, plugin manifest,
@@ -201,7 +201,7 @@ impl Agent {
 
     /// Pin a system prompt onto memory so it survives compaction. Empty
     /// strings are ignored. Skipped when the memory already has pinned
-    /// content — on `--resume` the persisted pin is authoritative; we
+    /// content — on conversation resume the persisted pin is authoritative; we
     /// don't want to stack a fresh system prompt on top of the loaded one.
     pub async fn pin_system_prompt(mut self, prompt: impl Into<String>) -> Self {
         let s: String = prompt.into();
@@ -230,7 +230,7 @@ impl Agent {
 
     /// Borrow the per-session tool context. The binary uses this at
     /// startup to wire up a `ReadLogger` (so `Read` calls round-trip
-    /// across `--resume`) and to seed replayed read paths.
+    /// across resumed conversations) and to seed replayed read paths.
     pub fn tool_context(&self) -> &ToolContext {
         &self.ctx
     }
@@ -342,8 +342,7 @@ impl Agent {
     /// they arrive (assistant text via `StreamEvent::Content`, in-flight
     /// tool-call arguments via `StreamEvent::ToolArgsChunk`). Tool-call
     /// rounds are silent on the content side; only model text reaches
-    /// `Content`. Y2 widened this from the older `FnMut(&str)` signature
-    /// so the TUI can preview streaming Edit/Write args.
+    /// `Content`.
     pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<String>
     where
         F: FnMut(StreamEvent<'_>) + Send,

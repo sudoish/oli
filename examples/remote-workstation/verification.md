@@ -24,7 +24,7 @@ the rows for the selected provider and mark every other row
 | Public path denied | From a non-tailnet network, attempt the workstation's public address on TCP 22 | No connection | |
 | Unauthorized identity denied | From an unlisted tailnet identity, attempt `ssh oli-workstation` | No SSH connection | |
 | Version pinned | `oli --version` | `oli 0.1.0` | |
-| Session persistence | Start a session, record its id, disconnect, then `oli --resume <id>` | Prior transcript returns and a new turn succeeds | |
+| Conversation persistence | Run `oli run -p`, record its id, disconnect, then use `oli run --conversation <id> -p` | Prior context returns and a new turn succeeds | |
 | OSC52 | `/copy 1` with `ui.osc52 = "on"` in a supported terminal | Latest assistant message reaches laptop clipboard | |
 | Clipboard fallback | Set `ui.osc52 = "off"`, restart, then `/copy 1` | Selectable fallback opens without emitting OSC52 | |
 

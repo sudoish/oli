@@ -1,12 +1,10 @@
-//! Line-mode interactive REPL — the fallback when the TUI can't
-//! be used (`--plain`, piped stdin/stdout, minimal terminals).
+//! Line-mode interactive REPL — Oli's optional interactive client.
 //! Rustyline drives line editing + history; tool output streams
 //! to stdout as it arrives; Ctrl-C cancels the current turn,
 //! Ctrl-D exits.
 //!
-//! Slash commands live in [`slash`] and are also reused by the
-//! TUI driver, so `/help`, `/cost`, `/clear`, `/sessions` and
-//! plugin- or MCP-registered slashes work in both front-ends.
+//! Slash commands live in [`slash`], so `/help`, `/cost`, `/clear`,
+//! `/sessions` and plugin- or MCP-registered slashes stay available.
 //!
 //! [`ProgressHook`] surfaces tool calls inline (`→ Read(file=…)`)
 //! so the user sees what's happening; the binary registers it
@@ -124,7 +122,7 @@ async fn run_turn(agent: &mut Agent, prompt: &str) {
             let _ = std::io::stdout().flush();
         }
         // ToolArgsChunk events are ignored in line-mode REPL — the
-        // streaming-diff peek is TUI-only.
+        // The line REPL deliberately omits streaming-diff previews.
     };
 
     let cancelled;

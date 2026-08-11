@@ -14,7 +14,7 @@ use async_trait::async_trait;
 
 use crate::agent::Agent;
 use crate::agent::memory::{
-    LinearWithCompact, Memory, PersistedMemory, list_sessions, new_session_id,
+    LinearWithCompact, Memory, PersistedMemory, SessionEntry, list_sessions, new_session_id,
 };
 use crate::config::Config;
 use crate::error::{AgentError, Result};
@@ -55,27 +55,78 @@ pub fn build_default_tools(cfg: &Config, notes_store: Arc<dyn notes::NotesStore>
 
 /// Decide which session id to use for this run. Precedence:
 /// explicit `resume`, then `continue_latest` (latest by mtime),
-/// then a fresh id for interactive mode, then `None` for
-/// ephemeral one-shot mode.
-pub fn resolve_session_id(
+/// then a fresh id. Every top-level run is persisted so a later
+/// invocation can continue it.
+pub fn resolve_session_id(resume: Option<&str>, continue_latest: bool) -> Result<String> {
+    resolve_session_id_from(resume, continue_latest, &list_sessions(), new_session_id)
+}
+
+fn resolve_session_id_from(
     resume: Option<&str>,
     continue_latest: bool,
-    interactive: bool,
-) -> Result<Option<String>> {
+    sessions: &[SessionEntry],
+    fresh_id: impl FnOnce() -> String,
+) -> Result<String> {
     if let Some(id) = resume {
-        return Ok(Some(id.to_string()));
+        let exists = sessions.iter().any(|entry| entry.id == id);
+        if !exists {
+            return Err(AgentError::Config(format!("unknown conversation: {id}")));
+        }
+        return Ok(id.to_string());
     }
     if continue_latest {
-        let latest = list_sessions()
-            .into_iter()
-            .next()
+        let latest = sessions
+            .iter()
+            .max_by_key(|entry| entry.mtime)
             .ok_or_else(|| AgentError::Config("no prior sessions to continue".into()))?;
-        return Ok(Some(latest.id));
+        return Ok(latest.id.clone());
     }
-    if interactive {
-        return Ok(Some(new_session_id()));
+    Ok(fresh_id())
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+    use std::time::{Duration, SystemTime};
+
+    fn entry(id: &str, age: u64) -> SessionEntry {
+        SessionEntry {
+            id: id.into(),
+            path: PathBuf::from(format!("{id}.jsonl")),
+            mtime: Some(SystemTime::UNIX_EPOCH + Duration::from_secs(age)),
+        }
     }
-    Ok(None)
+
+    #[test]
+    fn fresh_runs_allocate_a_new_id() {
+        let id = resolve_session_id_from(None, false, &[], || "fresh-id".into()).unwrap();
+        assert_eq!(id, "fresh-id");
+    }
+
+    #[test]
+    fn explicit_known_conversation_wins() {
+        let sessions = [entry("older", 1), entry("wanted", 2)];
+        let id =
+            resolve_session_id_from(Some("wanted"), true, &sessions, || unreachable!()).unwrap();
+        assert_eq!(id, "wanted");
+    }
+
+    #[test]
+    fn continue_selects_latest_deterministically() {
+        let sessions = [entry("newest", 20), entry("older", 10)];
+        let id = resolve_session_id_from(None, true, &sessions, || unreachable!()).unwrap();
+        assert_eq!(id, "newest");
+    }
+
+    #[test]
+    fn invalid_conversation_fails_without_allocating() {
+        let sessions = [entry("known", 1)];
+        let error = resolve_session_id_from(Some("missing"), false, &sessions, || {
+            panic!("invalid resume must not allocate a transcript id")
+        })
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown conversation: missing"));
+    }
 }
 
 /// Build the agent's memory. With a session id we wrap the

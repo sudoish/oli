@@ -6,18 +6,14 @@ use crate::tools::util::{DEFAULT_MAX_OUTPUT_BYTES, truncate};
 use crate::tools::{Tool, ToolContext};
 
 /// File extensions that produce an `[Image: ...]` marker instead of a
-/// `read_to_string` attempt. Phase Y3: the TUI side parses the marker
-/// and (with `--features images`) renders the file via ratatui-image.
-/// Without the feature, the marker is shown as-is — it's a useful
-/// signal to the model that the path *is* an image, vs. the
+/// `read_to_string` attempt. The marker is a useful signal to the
+/// model that the path *is* an image, vs. the
 /// `read_to_string` UTF-8 error we'd otherwise produce.
 pub const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "gif", "webp", "bmp"];
 
 pub struct Read;
 
-/// Build the `[Image: <abs-path> <WxH|?> <FORMAT>]` marker the TUI
-/// renderer keys on. Kept on its own so the parser side (`tui/image`)
-/// can be tested against the producer without spinning up the tool.
+/// Build the `[Image: <abs-path> <WxH|?> <FORMAT>]` marker returned to the model.
 pub fn format_image_marker(abs_path: &str, format: &str, dims: Option<(u32, u32)>) -> String {
     let size = match dims {
         Some((w, h)) => format!("{}x{}", w, h),
@@ -35,7 +31,7 @@ pub fn format_image_marker(abs_path: &str, format: &str, dims: Option<(u32, u32)
 /// of the file and pattern-matches on PNG / JPEG / GIF magic bytes.
 /// Returns `None` on any unrecognized header — the marker then uses
 /// `?x?` instead of fabricating a size. This keeps `read.rs` free of
-/// the `image` crate dep (which only ships with `--features images`).
+/// a heavyweight image-decoding dependency.
 fn image_dimensions(path: &str) -> Option<(u32, u32)> {
     use std::fs::File;
     use std::io::{BufReader, Read as _};
@@ -101,7 +97,7 @@ impl Tool for Read {
     }
 
     fn description(&self) -> &str {
-        "Read and return the contents of a file. Optional `offset` (1-indexed line) and `limit` (line count) for paginating large files. Image files (PNG/JPEG/GIF/WEBP/BMP) return a `[Image: <abs-path> WxH FORMAT]` marker instead of bytes — the TUI may render the image inline."
+        "Read and return the contents of a file. Optional `offset` (1-indexed line) and `limit` (line count) for paginating large files. Image files (PNG/JPEG/GIF/WEBP/BMP) return a text marker instead of raw bytes."
     }
 
     fn parameters(&self) -> Value {
@@ -144,8 +140,7 @@ impl Tool for Read {
 
         // Phase Y3: image files don't round-trip through `read_to_string`
         // (binary → invalid UTF-8). Detect by extension and emit a
-        // standardized text marker; the TUI side may upgrade this into
-        // a real image render with `--features images`.
+        // standardized text marker for non-binary model context.
         let ext = std::path::Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())

@@ -47,7 +47,7 @@ The roadmap is successful when:
 
 ### In scope
 
-- Stabilizing and releasing the current TUI work.
+- Stabilizing and releasing the headless CLI and line REPL.
 - A remote-workstation reference setup.
 - A private model-plane reference setup.
 - A private MCP service-plane reference setup.
@@ -63,7 +63,8 @@ The roadmap is successful when:
 - IDE integration.
 - Hosted or multi-user oli.
 - Direct `tsnet` or other Tailscale SDK integration.
-- More cosmetic TUI expansion after the current correctness work.
+- A new full-screen terminal interface without evidence that the text-first
+  clients are insufficient.
 - Broad telemetry instrumentation before one vertical trace is useful.
 
 ## Existing foundation
@@ -71,7 +72,7 @@ The roadmap is successful when:
 The old engineering roadmaps are complete and should not be copied into this
 project as new work. The relevant shipped capabilities are:
 
-- TUI and line mode, sessions, resumability, and OSC52 clipboard support.
+- Headless and line-REPL clients, persisted conversations, and resumability.
 - Remote-host ChatGPT authentication through `oli login --paste` and device
   authorization.
 - OpenAI-compatible providers for private Ollama, vLLM, LM Studio, and
@@ -83,7 +84,7 @@ project as new work. The relevant shipped capabilities are:
 
 Current work falls into two categories:
 
-- The stable TUI shell and borderless composer work is release-blocking polish.
+- The persisted headless CLI is the release-blocking product surface.
 - `openspec/changes/add-opt-in-aperture-telemetry/` is a proposal, not an
   implementation. Its deployment assumptions must be validated first.
 
@@ -113,7 +114,7 @@ Suggested project summary:
 
 ### Suggested labels
 
-- `area:tui`
+- `area:cli`
 - `area:remote`
 - `area:model-plane`
 - `area:mcp`
@@ -151,22 +152,20 @@ issue description for traceability.
 **Outcome:** the current user experience is stable enough that every later
 demo tests the product rather than terminal rendering bugs.
 
-#### PA-001 — Finish and verify the stable TUI shell
+#### PA-001 — Finish and verify the persisted headless CLI
 
 - Type: implementation
 - Priority: Urgent
 - Estimate: 3
-- Labels: `area:tui`, `type:implementation`
+- Labels: `area:cli`, `type:implementation`
 - Depends on: none
-- Source plans: `docs/superpowers/plans/2026-08-07-stable-tui-shell.md`,
-  `docs/superpowers/plans/2026-08-07-borderless-composer-restoration.md`
-- Deliverable: fixed ordinary-shell geometry and restored borderless composer.
+- Source change: `openspec/changes/replace-tui-with-headless-cli/`
+- Deliverable: persisted, resumable headless commands and an optional line REPL.
 - Acceptance:
-  - Streamed transcript content never enters progress, composer, or footer
-    rows in the two-frame regression.
-  - Multiline input remains inside the fixed composer region.
-  - Focused TUI tests and `cargo test --lib` pass.
-  - Fullscreen and inline modes are manually verified.
+  - Fresh runs persist a conversation id and resumed runs retain context.
+  - Text stdout and JSON output remain machine-clean.
+  - Headless approvals never block for input.
+  - Focused CLI tests and `cargo test --lib` pass.
 
 #### PA-002 — Cut and document the private-agent baseline release
 

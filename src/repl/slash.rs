@@ -538,7 +538,7 @@ impl SlashCommand for Sessions {
         if entries.len() > 20 {
             out.push_str(&format!("  ... and {} more\n", entries.len() - 20));
         }
-        out.push_str("Resume with: oli --resume <id>");
+        out.push_str("Resume with: oli run --conversation <id> -p <prompt>");
         SlashOutcome::Continue(Some(out))
     }
 }
@@ -865,7 +865,12 @@ impl SlashCommand for ConfigCmd {
 }
 
 async fn reload_config(agent: &mut Agent) -> SlashOutcome {
-    let new_cfg = match crate::config::Config::load_or_default() {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    reload_config_at(agent, &cwd).await
+}
+
+async fn reload_config_at(agent: &mut Agent, cwd: &std::path::Path) -> SlashOutcome {
+    let new_cfg = match crate::config::Config::load_layered(cwd) {
         Ok(c) => std::sync::Arc::new(c),
         Err(e) => {
             return SlashOutcome::Continue(Some(format!("config reload failed: {}", e)));
@@ -1049,12 +1054,6 @@ fn render_paths(agent: &Agent) -> String {
         "Notes",
         crate::notes::filesystem::FilesystemNotesStore::default_dir().as_deref(),
     );
-    #[cfg(feature = "tui")]
-    push_path(
-        &mut out,
-        "TUI history",
-        crate::tui::history::history_path().as_deref(),
-    );
     push_path(
         &mut out,
         "Policy allow-list",
@@ -1139,7 +1138,8 @@ mod tests {
         // openai-compat block with a different model. /config reload
         // should pick that up without losing memory.
         let dir = tempfile::tempdir().unwrap();
-        let cfg_path = dir.path().join("config.toml");
+        let cfg_path = dir.path().join(".oli").join("config.toml");
+        std::fs::create_dir_all(cfg_path.parent().unwrap()).unwrap();
         std::fs::write(
             &cfg_path,
             r#"
@@ -1153,16 +1153,6 @@ default_model = "alt-model"
 "#,
         )
         .unwrap();
-        // Layered loader probes XDG_CONFIG_HOME first; point it at our temp.
-        unsafe {
-            std::env::set_var("XDG_CONFIG_HOME", dir.path());
-        }
-        // load_or_default uses XDG_CONFIG_HOME/oli/config.toml — relocate
-        // our seed file to that path.
-        let real_path = dir.path().join("oli").join("config.toml");
-        std::fs::create_dir_all(real_path.parent().unwrap()).unwrap();
-        std::fs::rename(&cfg_path, &real_path).unwrap();
-
         let mut agent = fresh_agent();
         agent.provider_name = "ollama".into();
         agent.model = "llama".into();
@@ -1173,8 +1163,7 @@ default_model = "alt-model"
             .await;
         let mem_len_before = agent.memory.len();
 
-        let reg = SlashRegistry::default_set();
-        let out = reg.dispatch("config reload", &mut agent).await.unwrap();
+        let out = reload_config_at(&mut agent, dir.path()).await;
         match out {
             SlashOutcome::Continue(Some(body)) => {
                 assert!(body.contains("provider:"));
@@ -1848,11 +1837,8 @@ return p
 
     #[tokio::test]
     async fn paths_marks_definitely_missing_files_as_not_present() {
-        // The TUI history file is `~/.config/oli/tui-history.jsonl`. We
-        // can't pre-create it without polluting the user's real config,
-        // and we can't sandbox std::env::current_dir() either, but we
-        // *can* assert that any line whose path doesn't exist on disk
-        // gets the marker. Walk every line and check the invariant.
+        // We cannot sandbox every user-level path, but can assert that
+        // any listed path absent on disk gets the marker.
         let reg = SlashRegistry::default_set();
         let mut agent = fresh_agent();
         let out = reg.dispatch("paths", &mut agent).await.unwrap();

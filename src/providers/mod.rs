@@ -1,6 +1,5 @@
 //! Chat-completion providers. The `Provider` trait abstracts the
-//! one-shot `chat()` (used by `-p` mode) and the streaming
-//! `chat_stream()` (used by the TUI / REPL) over whatever wire
+//! one-shot `chat()` and the streaming `chat_stream()` used by the REPL over whatever wire
 //! protocol the underlying API speaks.
 //!
 //! Bundled implementations:

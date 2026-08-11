@@ -1,10 +1,12 @@
 //! Binary entry point for `oli`. Parses CLI args, builds the
-//! agent + tool registry from config, and dispatches to the TUI,
-//! the line-mode REPL, or one-shot prompt mode. Reaches into the
+//! agent + tool registry from config, and dispatches to a persisted
+//! headless run or the line-mode REPL. Reaches into the
 //! library at `oli::*` for everything substantive — this file
 //! is intentionally a wiring shim, not where logic lives.
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::Serialize;
+use std::io::{IsTerminal, Read};
 use std::process;
 use std::sync::Arc;
 
@@ -16,8 +18,6 @@ use oli::error::Result;
 use oli::policy::{AlwaysDeny, ConfigPolicy, PolicyConfig, PolicyMode, ReadlineApprover};
 use oli::providers::Provider as ProviderTrait;
 use oli::tools::task::{SubagentSpawner, Task};
-#[cfg(feature = "tui")]
-use oli::tui;
 use oli::{hooks, mcp, notes, plugins, providers, repl};
 
 #[derive(Parser)]
@@ -25,66 +25,62 @@ use oli::{hooks, mcp, notes, plugins, providers, repl};
     author,
     version,
     about,
-    long_about = "A minimal, hackable, single-binary terminal coding agent.\n\n\
-                  Keyboard cheatsheet: docs/cheatsheet.md (in the repo) — \
-                  every shortcut, slash command, file path, and feature flag in one place."
+    long_about = "A minimal, hackable, scriptable coding-agent runtime.\n\n\
+                  Use `oli run` for one-command/one-result automation, or invoke \
+                  `oli` without a subcommand for the line-mode REPL."
 )]
 struct Args {
-    /// Single-shot prompt. If omitted, the binary enters an interactive REPL.
-    #[arg(short = 'p', long)]
-    prompt: Option<String>,
-
-    /// Resume a specific session by id (file stem in
-    /// `~/.config/oli/sessions/`). Conflicts with `--continue`.
-    #[arg(long, conflicts_with = "continue_session")]
-    resume: Option<String>,
-
-    /// Resume the most recent session by mtime. Conflicts with `--resume`.
-    #[arg(long = "continue", conflicts_with = "resume")]
-    continue_session: bool,
-
-    /// Override the per-run turn cap. Falls back to `[agent].max_turns`
-    /// in config (default 40). Useful when one specific task genuinely
-    /// needs to go further than the default.
-    #[arg(long)]
-    max_turns: Option<usize>,
-
-    /// Strict mode: in `-p` runs, force ask mode and deny every approval
-    /// request. Has no effect on interactive runs.
-    #[arg(long)]
-    strict: bool,
-
-    /// Disable the TUI and fall back to the line-mode rustyline REPL.
-    /// Auto-enabled when stdin or stdout isn't a terminal (so
-    /// piped usage still works without setting the flag). Useful
-    /// inside SSH sessions on minimal terminals or when
-    /// terminal-native scrollback / mouse selection matter.
-    #[arg(long)]
-    plain: bool,
-
-    /// Render the TUI inline in the host buffer (no alt-screen,
-    /// no mouse capture by default). Recommended inside Neovim
-    /// `:terminal`, VSCode's integrated terminal, and similar
-    /// buffer-terminals. Overrides `[ui].viewport` from config.
-    /// Conflicts with `--fullscreen`.
-    #[arg(long, conflicts_with = "fullscreen")]
-    inline: bool,
-
-    /// Force the TUI into alternate-screen / fullscreen mode even
-    /// when capability detection or `[ui].viewport` would have
-    /// picked inline. Conflicts with `--inline`.
-    #[arg(long, conflicts_with = "inline")]
-    fullscreen: bool,
-
     #[command(subcommand)]
     cmd: Option<Cmd>,
 }
 
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum OutputMode {
+    #[default]
+    Text,
+    Json,
+}
+
+#[derive(Debug)]
+struct RunOptions {
+    prompt: Option<String>,
+    conversation: Option<String>,
+    continue_session: bool,
+    max_turns: Option<usize>,
+    strict: bool,
+    output: OutputMode,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
-    /// Write a starter `~/.config/oli/config.toml`. Mirrors the
-    /// TUI's first-run wizard but works headlessly — useful in
-    /// Dockerfiles, CI, or any setup where you can't pop a TUI.
+    /// Run one prompt, persist the conversation, print the result, and exit.
+    Run {
+        /// Prompt text. When omitted, Oli reads a non-terminal stdin to EOF.
+        #[arg(short = 'p', long)]
+        prompt: Option<String>,
+
+        /// Continue a persisted conversation by id.
+        #[arg(long, conflicts_with = "continue_session")]
+        conversation: Option<String>,
+
+        /// Continue the most recently modified conversation.
+        #[arg(long = "continue", conflicts_with = "conversation")]
+        continue_session: bool,
+
+        /// Override the configured per-run turn cap.
+        #[arg(long)]
+        max_turns: Option<usize>,
+
+        /// Deny every operation that requires an approval decision.
+        #[arg(long)]
+        strict: bool,
+
+        /// Completed result format written to stdout.
+        #[arg(long, value_enum, default_value_t)]
+        output: OutputMode,
+    },
+
+    /// Write a starter `~/.config/oli/config.toml`.
     Init {
         /// Provider template: ollama (local), openrouter, or
         /// anthropic. Without this flag, prompts on stdin.
@@ -160,6 +156,24 @@ enum Cmd {
 async fn main() {
     let args = Args::parse();
     let result = match args.cmd {
+        Some(Cmd::Run {
+            prompt,
+            conversation,
+            continue_session,
+            max_turns,
+            strict,
+            output,
+        }) => {
+            run_headless(RunOptions {
+                prompt,
+                conversation,
+                continue_session,
+                max_turns,
+                strict,
+                output,
+            })
+            .await
+        }
         Some(Cmd::Init {
             provider,
             api_key,
@@ -175,7 +189,7 @@ async fn main() {
             no_config,
         }) => login_command(check, no_browser, device_auth, paste, no_config).await,
         Some(Cmd::Logout) => logout_command(),
-        None => run(args).await,
+        None => run_interactive().await,
     };
     if let Err(e) = result {
         eprintln!("{}", e);
@@ -248,8 +262,7 @@ fn logout_command() -> Result<()> {
     Ok(())
 }
 
-/// Headless `oli init`. Writes the same config the TUI wizard
-/// produces, falling back to stdin prompts for fields not given
+/// `oli init` writes config, falling back to stdin prompts for fields not given
 /// on the CLI. Refuses to clobber an existing file unless
 /// `--force` is set. For Ollama, also probes the local daemon
 /// and (with `--pull`) downloads the default model.
@@ -454,10 +467,59 @@ fn prompt_api_key(provider: oli::wizard_init::WizardProvider) -> Result<String> 
     Ok(key)
 }
 
-async fn run(args: Args) -> Result<()> {
+fn select_prompt(argument: Option<String>, piped: &str) -> Result<String> {
+    let piped = piped.trim();
+    match (argument.filter(|p| !p.trim().is_empty()), piped.is_empty()) {
+        (Some(_), false) => Err(oli::error::AgentError::Config(
+            "prompt provided both by --prompt and stdin".into(),
+        )),
+        (Some(prompt), true) => Ok(prompt),
+        (None, false) => Ok(piped.to_string()),
+        (None, true) => Err(oli::error::AgentError::Config(
+            "missing prompt: pass --prompt or pipe one to `oli run`".into(),
+        )),
+    }
+}
+
+fn resolve_prompt(argument: Option<String>) -> Result<String> {
+    let mut piped = String::new();
+    if !std::io::stdin().is_terminal() {
+        std::io::stdin().read_to_string(&mut piped)?;
+    }
+    select_prompt(argument, &piped)
+}
+
+#[derive(Serialize)]
+struct UsageOutput {
+    prompt_tokens: u32,
+    completion_tokens: u32,
+    total_tokens: u32,
+}
+
+#[derive(Serialize)]
+struct CompletedRun<'a> {
+    conversation_id: &'a str,
+    response: &'a str,
+    provider: &'a str,
+    model: &'a str,
+    usage: UsageOutput,
+}
+
+async fn run_headless(options: RunOptions) -> Result<()> {
+    let prompt = resolve_prompt(options.prompt.clone())?;
+    run_agent(Some((options, prompt))).await
+}
+
+async fn run_interactive() -> Result<()> {
+    run_agent(None).await
+}
+
+async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
     let cfg = std::sync::Arc::new(Config::load_or_default()?);
     let provider_name = cfg.default_provider.clone();
     let model = cfg.model_for(&provider_name)?;
+    let output_provider = provider_name.clone();
+    let output_model = model.clone();
 
     let provider: Box<dyn ProviderTrait> = providers::build(&cfg, &provider_name)?;
 
@@ -525,13 +587,17 @@ async fn run(args: Args) -> Result<()> {
     let plugin_hooks = plugins.hooks;
 
     let system_prompt = SystemPromptBuilder::from_env().build().await;
-    let policy_config = policy_config_for_run(&cfg.policy, args.strict, args.prompt.is_some());
+    let strict = headless.as_ref().is_some_and(|(options, _)| options.strict);
+    let policy_config = policy_config_for_run(&cfg.policy, strict, headless.is_some());
     let policy = Box::new(ConfigPolicy::from_config(&policy_config));
 
-    let interactive = args.prompt.is_none();
-    let session_id =
-        resolve_session_id(args.resume.as_deref(), args.continue_session, interactive)?;
-    let (memory, replayed_reads, read_logger) = build_memory(session_id.as_deref()).await?;
+    let interactive = headless.is_none();
+    let (conversation, continue_session) = headless
+        .as_ref()
+        .map(|(options, _)| (options.conversation.as_deref(), options.continue_session))
+        .unwrap_or((None, false));
+    let session_id = resolve_session_id(conversation, continue_session)?;
+    let (memory, replayed_reads, read_logger) = build_memory(Some(&session_id)).await?;
 
     let mut hooks = hooks::HookRegistry::new();
     for h in plugin_hooks {
@@ -544,7 +610,10 @@ async fn run(args: Args) -> Result<()> {
         hooks.register(repl::ProgressHook);
     }
 
-    let max_turns = args.max_turns.unwrap_or(cfg.agent.max_turns);
+    let max_turns = headless
+        .as_ref()
+        .and_then(|(options, _)| options.max_turns)
+        .unwrap_or(cfg.agent.max_turns);
 
     let agent_base = Agent::new(provider, tools, model)
         .with_policy(policy)
@@ -568,87 +637,44 @@ async fn run(args: Args) -> Result<()> {
         }
     }
 
-    match args.prompt {
-        Some(p) => {
-            // One-shot: scripted-friendly. `--strict` forces ask mode and
-            // denies each approval request.
-            let mut agent = if args.strict {
-                agent_base.with_approver(Box::new(AlwaysDeny))
-            } else {
-                agent_base
-            }
-            .pin_system_prompt(system_prompt)
-            .await;
-            let output = agent.run(&p).await?;
-            if !output.is_empty() {
-                println!("{}", output);
+    match headless {
+        Some((options, prompt)) => {
+            let mut agent = agent_base
+                .with_approver(Box::new(AlwaysDeny))
+                .pin_system_prompt(system_prompt)
+                .await;
+            let response = agent.run(&prompt).await?;
+            match options.output {
+                OutputMode::Text => {
+                    if !response.is_empty() {
+                        println!("{response}");
+                    }
+                    eprintln!("conversation: {session_id}");
+                }
+                OutputMode::Json => {
+                    let usage = agent.session_usage;
+                    let result = CompletedRun {
+                        conversation_id: &session_id,
+                        response: &response,
+                        provider: &output_provider,
+                        model: &output_model,
+                        usage: UsageOutput {
+                            prompt_tokens: usage.prompt_tokens,
+                            completion_tokens: usage.completion_tokens,
+                            total_tokens: usage.total_tokens,
+                        },
+                    };
+                    println!("{}", serde_json::to_string(&result)?);
+                }
             }
             Ok(())
         }
         None => {
-            // Interactive: pick TUI by default, fall back to the
-            // line-mode REPL on `--plain` or when stdin/stdout
-            // isn't a TTY (piped invocations). When the binary
-            // was built `--no-default-features` (without `tui`),
-            // `use_tui` is forced false and we always use the
-            // line-mode REPL.
-            let tty = std::io::IsTerminal::is_terminal(&std::io::stdin())
-                && std::io::IsTerminal::is_terminal(&std::io::stdout());
-            #[cfg(feature = "tui")]
-            let use_tui = !args.plain && tty;
-            #[cfg(not(feature = "tui"))]
-            let use_tui = {
-                let _ = (args.plain, tty);
-                false
-            };
-            if let Some(id) = &session_id {
-                if !use_tui {
-                    println!("session: {}", id);
-                }
-            }
+            println!("session: {session_id}");
             let agent = agent_base
                 .with_approver(Box::new(ReadlineApprover))
                 .pin_system_prompt(system_prompt)
                 .await;
-            #[cfg(feature = "tui")]
-            {
-                if use_tui {
-                    // Viewport resolution order: explicit CLI flag,
-                    // then `[ui].viewport`, then the W2 auto-detected
-                    // default. W1 hands `Fullscreen` as the auto
-                    // fallback — auto-mode lights up in W2.
-                    let flag = match (args.inline, args.fullscreen) {
-                        (true, _) => Some(tui::Viewport::Inline),
-                        (_, true) => Some(tui::Viewport::Fullscreen),
-                        _ => None,
-                    };
-                    let cfg_choice = cfg
-                        .ui
-                        .viewport
-                        .as_deref()
-                        .map(tui::ViewportChoice::parse)
-                        .unwrap_or_default();
-                    let caps = tui::caps::Capabilities::detect();
-                    let viewport = tui::resolve_mode(flag, cfg_choice, caps.auto_viewport());
-                    let mouse = tui::resolve_mouse(cfg.ui.mouse, caps.mouse, viewport);
-                    let osc52 = tui::caps::resolve_osc52(cfg.ui.osc52.as_deref(), caps.osc52);
-                    let host_hint = caps.host.clone();
-                    let theme = tui::theme::load(cfg.ui.theme.as_deref().unwrap_or("dark"));
-                    return tui::run(
-                        agent,
-                        plugin_slashes,
-                        Some(plugin_reloader),
-                        session_id,
-                        viewport,
-                        mouse,
-                        osc52,
-                        host_hint,
-                        theme,
-                    )
-                    .await;
-                }
-            }
-            let _ = use_tui; // referenced in cfg branch above
             repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
         }
     }
@@ -665,6 +691,75 @@ fn policy_config_for_run(config: &PolicyConfig, strict: bool, one_shot: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_command_parses_the_headless_contract() {
+        let args = Args::try_parse_from([
+            "oli",
+            "run",
+            "--prompt",
+            "hi",
+            "--conversation",
+            "abc",
+            "--output",
+            "json",
+        ])
+        .unwrap();
+        let Some(Cmd::Run {
+            prompt,
+            conversation,
+            output,
+            ..
+        }) = args.cmd
+        else {
+            panic!("expected run command");
+        };
+        assert_eq!(prompt.as_deref(), Some("hi"));
+        assert_eq!(conversation.as_deref(), Some("abc"));
+        assert!(matches!(output, OutputMode::Json));
+    }
+
+    #[test]
+    fn removed_global_prompt_and_tui_flags_are_rejected() {
+        assert!(Args::try_parse_from(["oli", "-p", "hi"]).is_err());
+        assert!(Args::try_parse_from(["oli", "--inline"]).is_err());
+        assert!(Args::try_parse_from(["oli", "--fullscreen"]).is_err());
+        assert!(Args::try_parse_from(["oli", "--plain"]).is_err());
+    }
+
+    #[test]
+    fn conversation_and_continue_are_mutually_exclusive() {
+        assert!(
+            Args::try_parse_from(["oli", "run", "--conversation", "abc", "--continue"]).is_err()
+        );
+    }
+
+    #[test]
+    fn prompt_selection_accepts_exactly_one_source() {
+        assert_eq!(select_prompt(Some("arg".into()), "").unwrap(), "arg");
+        assert_eq!(select_prompt(None, "pipe\n").unwrap(), "pipe");
+        assert!(select_prompt(Some("arg".into()), "pipe").is_err());
+        assert!(select_prompt(None, "  ").is_err());
+    }
+
+    #[test]
+    fn completed_run_serializes_stable_machine_fields() {
+        let run = CompletedRun {
+            conversation_id: "c1",
+            response: "done",
+            provider: "openrouter",
+            model: "model",
+            usage: UsageOutput {
+                prompt_tokens: 2,
+                completion_tokens: 3,
+                total_tokens: 5,
+            },
+        };
+        let value = serde_json::to_value(run).unwrap();
+        assert_eq!(value["conversation_id"], "c1");
+        assert_eq!(value["response"], "done");
+        assert_eq!(value["usage"]["total_tokens"], 5);
+    }
 
     #[test]
     fn strict_one_shot_runs_restore_ask_policy_before_denying_approvals() {

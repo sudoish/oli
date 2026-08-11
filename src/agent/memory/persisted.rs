@@ -46,7 +46,7 @@ pub struct PersistedMemory {
     id: String,
     /// Canonicalized paths replayed from the session file's `read` ops.
     /// Drained by the binary at startup into the live `ToolContext` so
-    /// `Edit`'s read-first invariant survives a `--resume`.
+    /// `Edit`'s read-first invariant survives a resumed conversation.
     replayed_reads: Vec<PathBuf>,
 }
 
@@ -113,7 +113,7 @@ impl PersistedMemory {
     /// Hand out a `ReadLogger` that appends `read` ops to this session's
     /// file. Caller binds it onto the `ToolContext` so the `Read` tool's
     /// `mark_read` calls land in the transcript and round-trip across
-    /// `--resume`.
+    /// conversation resume.
     pub fn read_logger(&self) -> Arc<dyn ReadLogger> {
         Arc::new(PersistedReadLogger {
             file: self.file.clone(),
