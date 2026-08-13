@@ -262,6 +262,8 @@ impl Agent {
         self.ctx = ToolContext::new();
         self.last_usage = None;
         self.session_usage = UsageTotals::default();
+        // The ledger is not reset: it records what the process actually
+        // spent, and dropping history doesn't refund it.
         Ok(())
     }
 
@@ -382,12 +384,12 @@ impl Agent {
             }
             turn += 1;
 
+            let build_started = Instant::now();
             // Sync MCP tools that have notified `tools/list_changed`
             // since the last turn. Cost on a quiet turn is one atomic
             // load per server; on a turn where a server pushed an
             // update, we refetch its `tools/list` and swap registry
             // entries so the model can see the deltas on this turn.
-            let build_started = Instant::now();
             if !self.mcp_handles.is_empty() {
                 let deltas = crate::mcp::refresh_changed_tools(self.mcp_handles.as_ref()).await;
                 for d in deltas {

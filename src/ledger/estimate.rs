@@ -14,7 +14,7 @@ use crate::agent::memory::ContextParts;
 /// Characters per token. Real tokenizers disagree with each other, let
 /// alone with this; 4 is the long-standing rule of thumb across English
 /// prose and source code.
-const CHARS_PER_TOKEN: u64 = 4;
+const CHARS_PER_TOKEN: usize = 4;
 
 /// Framing every message carries beyond its content — role, separators,
 /// and the wrapper the provider adds around each turn.
@@ -39,7 +39,7 @@ pub struct ContextEstimate {
 /// field names are on the wire too, which is most of a tool schema.
 pub fn estimate_value(v: &Value) -> u64 {
     let encoded = v.to_string();
-    encoded.chars().count().div_ceil(CHARS_PER_TOKEN as usize) as u64
+    encoded.chars().count().div_ceil(CHARS_PER_TOKEN) as u64
 }
 
 pub fn estimate_message(m: &Value) -> u64 {
