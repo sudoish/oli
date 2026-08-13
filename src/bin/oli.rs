@@ -213,7 +213,7 @@ async fn main() {
 
 fn replay_command(fixture: &std::path::Path) -> Result<()> {
     let report = oli::replay::compare_path(fixture)?;
-    println!("{}", serde_json::to_string(&report)?);
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
