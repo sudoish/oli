@@ -26,7 +26,7 @@ Spec lives at `specs/README.md`. This doc covers state, not goals.
 | 18f27f7 | B     | Hook short-circuit (`PreToolUse` can return synthetic result), result-mutation hook outcome |
 | e1af9ce | C     | `/plugins reload` (registry rebuild via shared `Arc<Mutex<Registry>>`), `session-cost` in `/cost`, subagent result cap |
 | 2fbecfb | D     | Caching/parity polish: OpenRouter cache control, Anthropic model list, unified-diff preview via `similar`, stale-`Edit` detection (mtime check) |
-| 0193495 | E1    | Plugin instruction-count budget via mlua thread hooks (`max_instructions` config; deterministic timeout for runaway loops) |
+| 0193495 | E1    | Plugin instruction-count budget via mlua thread hooks (`PLUGIN_INSTRUCTION_BUDGET` const; deterministic timeout for runaway loops) |
 | 19b32f8 | E2    | `EmbeddingRagMemory` (retrieval-mediated snapshots; `Embedder` trait + `OllamaEmbedder` default; configurable via `[memory] kind = "rag"`) |
 | 110d8ee | E3    | MCP `tools/list_changed` live refresh (per-turn diff against per-server `Arc<AtomicBool>`; agent loop swaps registry entries atomically) |
 | c23da45 | F     | TUI skeleton + alt-screen lifecycle + `--plain` fallback                                              |
