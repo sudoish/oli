@@ -300,6 +300,14 @@ fn json_run_and_resume_keep_stdout_machine_clean_and_reuse_id() {
     assert_eq!(first_json["provider"], "test");
     assert_eq!(first_json["model"], "test-model");
     assert_eq!(first_json["usage"]["total_tokens"], 5);
+    // A category this provider never reported stays null, and the run
+    // says how many of its calls left it out.
+    assert!(first_json["usage"]["cache_read_tokens"].is_null());
+    assert_eq!(first_json["usage"]["calls"], 1);
+    assert_eq!(
+        first_json["usage"]["unreported_calls"]["cache_read_tokens"],
+        1
+    );
     let id = first_json["conversation_id"].as_str().unwrap().to_string();
 
     let mut second = sandbox.command();
@@ -446,6 +454,9 @@ fn max_turn_exhaustion_is_structured_non_success_and_remains_resumable() {
     assert_eq!(incomplete["reason"], "max_turns_exhausted");
     assert_eq!(incomplete["max_turns"], 1);
     assert!(incomplete.get("response").is_none());
+    // The only call this run made reported no usage at all, so the
+    // object stays absent rather than rendering as a row of zeros.
+    assert!(incomplete["usage"].is_null());
     let id = incomplete["conversation_id"].as_str().unwrap().to_string();
 
     let mut resumed = sandbox.command();

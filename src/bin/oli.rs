@@ -16,7 +16,7 @@ use oli::bootstrap::{DefaultAgentSpawner, build_default_tools, build_memory, res
 use oli::config::Config;
 use oli::error::Result;
 use oli::policy::{AlwaysDeny, ConfigPolicy, PolicyConfig, PolicyMode, ReadlineApprover};
-use oli::providers::Provider as ProviderTrait;
+use oli::providers::{Provider as ProviderTrait, UsageTotals};
 use oli::tools::task::{SubagentSpawner, Task};
 use oli::{hooks, mcp, notes, plugins, providers, repl};
 
@@ -501,11 +501,52 @@ fn resolve_prompt(argument: Option<String>) -> Result<String> {
     select_prompt(argument, &piped)
 }
 
+/// Session token accounting for `--output json`. A category no call
+/// reported serializes as `null`; `unreported_calls` says how much of
+/// each sum is missing, so a consumer can tell a complete total from a
+/// partial one.
 #[derive(Serialize)]
 struct UsageOutput {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    cache_read_tokens: Option<u64>,
+    cache_write_tokens: Option<u64>,
+    reasoning_tokens: Option<u64>,
+    calls: u32,
+    unreported_calls: UnreportedCalls,
+}
+
+#[derive(Serialize)]
+struct UnreportedCalls {
     prompt_tokens: u32,
     completion_tokens: u32,
     total_tokens: u32,
+    cache_read_tokens: u32,
+    cache_write_tokens: u32,
+    reasoning_tokens: u32,
+}
+
+impl From<UsageTotals> for UsageOutput {
+    fn from(t: UsageTotals) -> Self {
+        Self {
+            prompt_tokens: t.prompt_tokens.reported(),
+            completion_tokens: t.completion_tokens.reported(),
+            total_tokens: t.total_tokens.reported(),
+            cache_read_tokens: t.cache_read_tokens.reported(),
+            cache_write_tokens: t.cache_write_tokens.reported(),
+            reasoning_tokens: t.reasoning_tokens.reported(),
+            calls: t.calls,
+            unreported_calls: UnreportedCalls {
+                prompt_tokens: t.prompt_tokens.unreported_calls,
+                completion_tokens: t.completion_tokens.unreported_calls,
+                total_tokens: t.total_tokens.unreported_calls,
+                cache_read_tokens: t.cache_read_tokens.unreported_calls,
+                cache_write_tokens: t.cache_write_tokens.unreported_calls,
+                reasoning_tokens: t.reasoning_tokens.unreported_calls,
+            },
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -678,14 +719,12 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                 .pin_system_prompt(system_prompt)
                 .await?;
             let outcome = agent.run(&prompt).await?;
-            let usage = agent.last_usage.map(|_| {
-                let usage = agent.session_usage;
-                UsageOutput {
-                    prompt_tokens: usage.prompt_tokens,
-                    completion_tokens: usage.completion_tokens,
-                    total_tokens: usage.total_tokens,
-                }
-            });
+            // No call reported anything at all — say nothing rather than
+            // emit a shape full of nulls.
+            let usage = agent
+                .session_usage
+                .any_reported()
+                .then(|| UsageOutput::from(agent.session_usage));
             let response = match outcome {
                 RunOutcome::Completed(response) => response,
                 RunOutcome::MaxTurnsExhausted { limit, message } => {
@@ -755,6 +794,7 @@ fn policy_config_for_run(config: &PolicyConfig, strict: bool, one_shot: bool) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use oli::providers::Usage;
 
     #[test]
     fn run_command_parses_the_headless_contract() {
@@ -814,17 +854,64 @@ mod tests {
             response: "done",
             provider: "openrouter",
             model: "model",
-            usage: Some(UsageOutput {
-                prompt_tokens: 2,
-                completion_tokens: 3,
-                total_tokens: 5,
-            }),
+            usage: Some(UsageOutput::from(totals(&[Usage {
+                prompt_tokens: Some(2),
+                completion_tokens: Some(3),
+                total_tokens: Some(5),
+                ..Usage::default()
+            }]))),
         };
         let value = serde_json::to_value(run).unwrap();
         assert_eq!(value["status"], "completed");
         assert_eq!(value["conversation_id"], "c1");
         assert_eq!(value["response"], "done");
         assert_eq!(value["usage"]["total_tokens"], 5);
+    }
+
+    fn totals(calls: &[Usage]) -> UsageTotals {
+        let mut t = UsageTotals::default();
+        for u in calls {
+            t.add(Some(*u));
+        }
+        t
+    }
+
+    #[test]
+    fn a_category_no_call_reported_serializes_as_null_not_zero() {
+        let usage = UsageOutput::from(totals(&[Usage {
+            prompt_tokens: Some(2),
+            completion_tokens: Some(3),
+            total_tokens: Some(5),
+            ..Usage::default()
+        }]));
+        let value = serde_json::to_value(usage).unwrap();
+        assert_eq!(value["prompt_tokens"], 2);
+        assert!(value["cache_read_tokens"].is_null());
+        assert!(value["cache_write_tokens"].is_null());
+        assert!(value["reasoning_tokens"].is_null());
+        assert_eq!(value["calls"], 1);
+        assert_eq!(value["unreported_calls"]["cache_read_tokens"], 1);
+        assert_eq!(value["unreported_calls"]["prompt_tokens"], 0);
+    }
+
+    #[test]
+    fn a_partial_session_sum_says_how_many_calls_are_missing_from_it() {
+        let usage = UsageOutput::from(totals(&[
+            Usage {
+                prompt_tokens: Some(2),
+                cache_read_tokens: Some(64),
+                ..Usage::default()
+            },
+            Usage {
+                prompt_tokens: Some(3),
+                ..Usage::default()
+            },
+        ]));
+        let value = serde_json::to_value(usage).unwrap();
+        assert_eq!(value["prompt_tokens"], 5);
+        assert_eq!(value["cache_read_tokens"], 64);
+        assert_eq!(value["calls"], 2);
+        assert_eq!(value["unreported_calls"]["cache_read_tokens"], 1);
     }
 
     #[test]

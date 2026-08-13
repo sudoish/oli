@@ -295,26 +295,285 @@ pub struct ChatResponse {
     pub usage: Option<Usage>,
 }
 
+/// Per-call token accounting. Every field is optional because "the
+/// provider didn't report this" has to stay distinguishable from "the
+/// provider reported zero": a count that degrades to 0 understates
+/// without ever saying so. `Usage::default()` is "nothing known".
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Usage {
-    pub prompt_tokens: u32,
-    pub completion_tokens: u32,
-    pub total_tokens: u32,
+    pub prompt_tokens: Option<u32>,
+    pub completion_tokens: Option<u32>,
+    pub total_tokens: Option<u32>,
+    /// Prompt tokens the provider served from its cache.
+    pub cache_read_tokens: Option<u32>,
+    /// Prompt tokens the provider wrote into its cache.
+    pub cache_write_tokens: Option<u32>,
+    /// Completion tokens spent on reasoning the model doesn't return.
+    pub reasoning_tokens: Option<u32>,
 }
 
 impl Usage {
+    /// Parse the OpenAI chat-completions `usage` object. Returns `None`
+    /// when the object carries no counts at all.
     pub fn from_value(v: &Value) -> Option<Self> {
-        let prompt = v.get("prompt_tokens").and_then(|x| x.as_u64())?;
-        let completion = v.get("completion_tokens").and_then(|x| x.as_u64())?;
-        let total = v
-            .get("total_tokens")
-            .and_then(|x| x.as_u64())
-            .unwrap_or(prompt + completion);
-        Some(Self {
-            prompt_tokens: prompt as u32,
-            completion_tokens: completion as u32,
-            total_tokens: total as u32,
-        })
+        let prompt = token_count(v, "prompt_tokens");
+        let completion = token_count(v, "completion_tokens");
+        let usage = Self {
+            prompt_tokens: prompt,
+            completion_tokens: completion,
+            total_tokens: token_count(v, "total_tokens")
+                .or_else(|| derived_total(prompt, completion)),
+            cache_read_tokens: v
+                .get("prompt_tokens_details")
+                .and_then(|d| token_count(d, "cached_tokens")),
+            // Only GPT-5.6-class models report cache writes; earlier
+            // ones omit the key, which is unknown rather than zero.
+            cache_write_tokens: v
+                .get("prompt_tokens_details")
+                .and_then(|d| token_count(d, "cache_write_tokens")),
+            reasoning_tokens: v
+                .get("completion_tokens_details")
+                .and_then(|d| token_count(d, "reasoning_tokens")),
+        };
+        usage.reports_anything().then_some(usage)
+    }
+
+    pub(crate) fn reports_anything(&self) -> bool {
+        self.prompt_tokens
+            .or(self.completion_tokens)
+            .or(self.total_tokens)
+            .or(self.cache_read_tokens)
+            .or(self.cache_write_tokens)
+            .or(self.reasoning_tokens)
+            .is_some()
+    }
+}
+
+pub(crate) fn token_count(v: &Value, key: &str) -> Option<u32> {
+    v.get(key)?.as_u64().map(|n| n as u32)
+}
+
+/// A total the wire omitted is the sum of its parts — but only once
+/// both parts are known. Deriving it from one known part would be
+/// inventing the other.
+pub(crate) fn derived_total(prompt: Option<u32>, completion: Option<u32>) -> Option<u32> {
+    Some(prompt?.saturating_add(completion?))
+}
+
+/// Sum of one token category across a session, alongside the number of
+/// calls that never reported it — so the sum can say how much of the
+/// session it actually covers.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TokenTotal {
+    tokens: Option<u64>,
+    pub unreported_calls: u32,
+}
+
+impl TokenTotal {
+    fn add(&mut self, value: Option<u32>) {
+        match value {
+            Some(n) => *self.tokens.get_or_insert(0) += u64::from(n),
+            None => self.unreported_calls += 1,
+        }
+    }
+
+    /// `None` when no call reported this category: the sum of nothing
+    /// is unknown, not zero.
+    pub fn reported(&self) -> Option<u64> {
+        self.tokens
+    }
+}
+
+/// Running token accounting for a session. Sums only reported values
+/// and counts the silent calls per category, so a total can render as
+/// "12,340 (2 of 5 calls did not report)" instead of quietly passing
+/// off missing data as zero.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct UsageTotals {
+    /// Provider calls observed, whether or not they reported anything.
+    pub calls: u32,
+    pub prompt_tokens: TokenTotal,
+    pub completion_tokens: TokenTotal,
+    pub total_tokens: TokenTotal,
+    pub cache_read_tokens: TokenTotal,
+    pub cache_write_tokens: TokenTotal,
+    pub reasoning_tokens: TokenTotal,
+}
+
+impl UsageTotals {
+    pub fn add(&mut self, usage: Option<Usage>) {
+        self.calls += 1;
+        self.prompt_tokens.add(usage.and_then(|u| u.prompt_tokens));
+        self.completion_tokens
+            .add(usage.and_then(|u| u.completion_tokens));
+        self.total_tokens.add(usage.and_then(|u| u.total_tokens));
+        self.cache_read_tokens
+            .add(usage.and_then(|u| u.cache_read_tokens));
+        self.cache_write_tokens
+            .add(usage.and_then(|u| u.cache_write_tokens));
+        self.reasoning_tokens
+            .add(usage.and_then(|u| u.reasoning_tokens));
+    }
+
+    /// Whether any call reported any category. A session where every
+    /// call stayed silent has no accounting to render at all.
+    pub fn any_reported(&self) -> bool {
+        [
+            &self.prompt_tokens,
+            &self.completion_tokens,
+            &self.total_tokens,
+            &self.cache_read_tokens,
+            &self.cache_write_tokens,
+            &self.reasoning_tokens,
+        ]
+        .into_iter()
+        .any(|t| t.reported().is_some())
+    }
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_usage_object_with_no_counts_at_all_is_not_usage() {
+        assert_eq!(Usage::from_value(&json!({})), None);
+        assert_eq!(Usage::from_value(&json!({"queue_time": 0.4})), None);
+    }
+
+    #[test]
+    fn a_category_the_wire_omits_stays_unknown_rather_than_zero() {
+        let u = Usage::from_value(&json!({"prompt_tokens": 10, "completion_tokens": 4})).unwrap();
+        assert_eq!(u.prompt_tokens, Some(10));
+        assert_eq!(u.completion_tokens, Some(4));
+        assert_eq!(u.cache_read_tokens, None);
+        assert_eq!(u.cache_write_tokens, None);
+        assert_eq!(u.reasoning_tokens, None);
+    }
+
+    #[test]
+    fn a_reported_zero_is_kept_apart_from_an_unreported_category() {
+        let u = Usage::from_value(&json!({
+            "prompt_tokens": 10,
+            "completion_tokens": 4,
+            "prompt_tokens_details": {"cached_tokens": 0}
+        }))
+        .unwrap();
+        assert_eq!(u.cache_read_tokens, Some(0));
+        assert_eq!(u.reasoning_tokens, None);
+    }
+
+    #[test]
+    fn openai_token_details_populate_cache_read_write_and_reasoning() {
+        let u = Usage::from_value(&json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "total_tokens": 120,
+            "prompt_tokens_details": {"cached_tokens": 1920, "cache_write_tokens": 512},
+            "completion_tokens_details": {"reasoning_tokens": 12}
+        }))
+        .unwrap();
+        assert_eq!(u.cache_read_tokens, Some(1920));
+        assert_eq!(u.cache_write_tokens, Some(512));
+        assert_eq!(u.reasoning_tokens, Some(12));
+    }
+
+    #[test]
+    fn a_model_too_old_to_report_cache_writes_leaves_them_unknown() {
+        // Pre-GPT-5.6 models report cached_tokens and omit the write
+        // counter entirely — which is unknown, not zero.
+        let u = Usage::from_value(&json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 64}
+        }))
+        .unwrap();
+        assert_eq!(u.cache_read_tokens, Some(64));
+        assert_eq!(u.cache_write_tokens, None);
+    }
+
+    #[test]
+    fn an_absent_total_is_derived_only_when_both_parts_are_known() {
+        let both = Usage::from_value(&json!({"prompt_tokens": 3, "completion_tokens": 5})).unwrap();
+        assert_eq!(both.total_tokens, Some(8));
+
+        let half = Usage::from_value(&json!({"prompt_tokens": 3})).unwrap();
+        assert_eq!(half.total_tokens, None);
+    }
+
+    #[test]
+    fn a_wire_total_is_taken_as_given_even_when_it_differs_from_the_sum() {
+        // The provider bills the total; deriving over the top of a
+        // reported one would substitute our arithmetic for its answer.
+        let u = Usage::from_value(&json!({
+            "prompt_tokens": 3,
+            "completion_tokens": 5,
+            "total_tokens": 100
+        }))
+        .unwrap();
+        assert_eq!(u.total_tokens, Some(100));
+    }
+
+    #[test]
+    fn session_totals_sum_only_the_calls_that_reported() {
+        let mut totals = UsageTotals::default();
+        totals.add(Some(Usage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(4),
+            total_tokens: Some(14),
+            ..Usage::default()
+        }));
+        totals.add(None);
+        totals.add(Some(Usage {
+            prompt_tokens: Some(6),
+            ..Usage::default()
+        }));
+
+        assert_eq!(totals.calls, 3);
+        assert_eq!(totals.prompt_tokens.reported(), Some(16));
+        assert_eq!(totals.prompt_tokens.unreported_calls, 1);
+        assert_eq!(totals.completion_tokens.reported(), Some(4));
+        assert_eq!(totals.completion_tokens.unreported_calls, 2);
+    }
+
+    #[test]
+    fn a_category_no_call_reported_totals_to_unknown_not_zero() {
+        let mut totals = UsageTotals::default();
+        totals.add(Some(Usage {
+            prompt_tokens: Some(10),
+            ..Usage::default()
+        }));
+        totals.add(None);
+
+        assert_eq!(totals.cache_read_tokens.reported(), None);
+        assert_eq!(totals.cache_read_tokens.unreported_calls, 2);
+    }
+
+    #[test]
+    fn a_call_that_reported_nothing_still_counts_as_a_call() {
+        let mut totals = UsageTotals::default();
+        totals.add(None);
+        totals.add(None);
+        assert_eq!(totals.calls, 2);
+        assert_eq!(totals.prompt_tokens.reported(), None);
+        assert_eq!(totals.prompt_tokens.unreported_calls, 2);
+    }
+
+    #[test]
+    fn totals_report_nothing_until_some_call_reports_something() {
+        let mut totals = UsageTotals::default();
+        assert!(!totals.any_reported());
+        totals.add(None);
+        assert!(!totals.any_reported());
+
+        // A category nobody looks at first is still enough to say the
+        // session has accounting worth rendering.
+        totals.add(Some(Usage {
+            reasoning_tokens: Some(7),
+            ..Usage::default()
+        }));
+        assert!(totals.any_reported());
     }
 }
 

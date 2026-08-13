@@ -56,7 +56,9 @@ use std::collections::HashMap;
 
 use crate::auth::session::ChatGptAuth;
 use crate::error::{AgentError, Result};
-use crate::providers::{ChatRequest, ChatResponse, Provider, StreamEvent, StreamSink, Usage};
+use crate::providers::{
+    ChatRequest, ChatResponse, Provider, StreamEvent, StreamSink, Usage, derived_total, token_count,
+};
 
 /// Client identifier sent as the `originator` header.
 ///
@@ -795,17 +797,25 @@ fn output_text_of(item: &Value) -> Option<String> {
 /// Responses reports `input_tokens`/`output_tokens`; Oli's [`Usage`]
 /// is named for the Chat Completions fields.
 fn usage_from_responses(usage: &Value) -> Option<Usage> {
-    let input = usage.get("input_tokens").and_then(|v| v.as_u64())?;
-    let output = usage.get("output_tokens").and_then(|v| v.as_u64())?;
-    let total = usage
-        .get("total_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(input + output);
-    Some(Usage {
-        prompt_tokens: input as u32,
-        completion_tokens: output as u32,
-        total_tokens: total as u32,
-    })
+    let input = token_count(usage, "input_tokens");
+    let output = token_count(usage, "output_tokens");
+    let parsed = Usage {
+        prompt_tokens: input,
+        completion_tokens: output,
+        total_tokens: token_count(usage, "total_tokens").or_else(|| derived_total(input, output)),
+        cache_read_tokens: usage
+            .get("input_tokens_details")
+            .and_then(|d| token_count(d, "cached_tokens")),
+        // Only GPT-5.6-class models report cache writes; earlier ones
+        // omit the key, which is unknown rather than zero.
+        cache_write_tokens: usage
+            .get("input_tokens_details")
+            .and_then(|d| token_count(d, "cache_write_tokens")),
+        reasoning_tokens: usage
+            .get("output_tokens_details")
+            .and_then(|d| token_count(d, "reasoning_tokens")),
+    };
+    parsed.reports_anything().then_some(parsed)
 }
 
 #[async_trait]
@@ -1240,11 +1250,58 @@ mod tests {
         assert_eq!(
             acc.finish().usage,
             Some(Usage {
-                prompt_tokens: 10,
-                completion_tokens: 4,
-                total_tokens: 14
+                prompt_tokens: Some(10),
+                completion_tokens: Some(4),
+                total_tokens: Some(14),
+                ..Usage::default()
             })
         );
+    }
+
+    #[test]
+    fn responses_token_details_populate_cache_read_write_and_reasoning() {
+        let mut acc = ResponsesAcc::default();
+        apply(
+            &mut acc,
+            json!({
+                "type": "response.completed",
+                "response": {"usage": {
+                    "input_tokens": 100,
+                    "input_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 20},
+                    "output_tokens": 40,
+                    "output_tokens_details": {"reasoning_tokens": 32},
+                    "total_tokens": 140
+                }}
+            }),
+        );
+        let u = acc.finish().usage.unwrap();
+        assert_eq!(u.cache_read_tokens, Some(80));
+        assert_eq!(u.cache_write_tokens, Some(20));
+        assert_eq!(u.reasoning_tokens, Some(32));
+    }
+
+    #[test]
+    fn a_wire_total_is_taken_as_given_even_when_it_differs_from_the_sum() {
+        let u = usage_from_responses(&json!({
+            "input_tokens": 3,
+            "output_tokens": 5,
+            "total_tokens": 100
+        }))
+        .unwrap();
+        assert_eq!(u.total_tokens, Some(100));
+    }
+
+    #[test]
+    fn absent_responses_token_details_stay_unknown_rather_than_zero() {
+        let u = usage_from_responses(&json!({"input_tokens": 3, "output_tokens": 5})).unwrap();
+        assert_eq!(u.cache_read_tokens, None);
+        assert_eq!(u.cache_write_tokens, None);
+        assert_eq!(u.reasoning_tokens, None);
+    }
+
+    #[test]
+    fn a_usage_object_with_no_counts_is_no_usage() {
+        assert_eq!(usage_from_responses(&json!({})), None);
     }
 
     #[test]
@@ -1257,7 +1314,7 @@ mod tests {
                 "response": {"usage": {"input_tokens": 3, "output_tokens": 5}}
             }),
         );
-        assert_eq!(acc.finish().usage.unwrap().total_tokens, 8);
+        assert_eq!(acc.finish().usage.unwrap().total_tokens, Some(8));
     }
 
     #[test]

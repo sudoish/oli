@@ -28,7 +28,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::hooks::{HookRegistry, PreToolDecision};
 use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
-use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage};
+use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage, UsageTotals};
 use crate::tools::{Registry, ToolContext};
 
 /// Typed terminal state for one agent invocation. Callers that need to
@@ -84,9 +84,9 @@ pub struct Agent {
     pub last_usage: Option<Usage>,
     /// Running total of every per-call usage since session start (or
     /// the last `clear`). `/cost` renders this alongside `last_usage`
-    /// so the user can spot a session that's drifting expensive.
-    /// Providers that don't report usage simply don't contribute.
-    pub session_usage: Usage,
+    /// so the user can spot a session that's drifting expensive. Calls
+    /// a provider didn't report are counted, not summed as zero.
+    pub session_usage: UsageTotals,
     /// Gate every tool call. Default is `ConfigPolicy::defaults()` (Read /
     /// Glob / Grep auto-allow, Edit / Write / Bash ask, common dev shell
     /// commands on the bash allowlist).
@@ -132,7 +132,7 @@ impl Agent {
             caps,
             memory: Box::new(LinearWithCompact::new()),
             last_usage: None,
-            session_usage: Usage::default(),
+            session_usage: UsageTotals::default(),
             policy: Box::new(ConfigPolicy::defaults()),
             approver: Box::new(AlwaysApprove),
             cfg: None,
@@ -246,7 +246,7 @@ impl Agent {
         self.memory.clear().await?;
         self.ctx = ToolContext::new();
         self.last_usage = None;
-        self.session_usage = Usage::default();
+        self.session_usage = UsageTotals::default();
         Ok(())
     }
 
@@ -408,7 +408,8 @@ impl Agent {
             }
             let current_tokens = self
                 .last_usage
-                .map(|u| u.prompt_tokens as usize)
+                .and_then(|u| u.prompt_tokens)
+                .map(|p| p as usize)
                 .unwrap_or(0);
             self.memory
                 .maybe_compact(CompactContext {
@@ -427,20 +428,9 @@ impl Agent {
 
             let sink_dyn: StreamSink<'_> = sink;
             let resp = self.provider.chat_stream(req, sink_dyn).await?;
+            self.session_usage.add(resp.usage);
             if let Some(u) = resp.usage {
                 self.last_usage = Some(u);
-                self.session_usage.prompt_tokens = self
-                    .session_usage
-                    .prompt_tokens
-                    .saturating_add(u.prompt_tokens);
-                self.session_usage.completion_tokens = self
-                    .session_usage
-                    .completion_tokens
-                    .saturating_add(u.completion_tokens);
-                self.session_usage.total_tokens = self
-                    .session_usage
-                    .total_tokens
-                    .saturating_add(u.total_tokens);
             }
 
             // Models without native tool-call support sometimes emit calls
@@ -779,9 +769,10 @@ mod tests {
                 Ok(ChatResponse {
                     message: assistant_text("done"),
                     usage: Some(Usage {
-                        prompt_tokens: 12,
-                        completion_tokens: 5,
-                        total_tokens: 17,
+                        prompt_tokens: Some(12),
+                        completion_tokens: Some(5),
+                        total_tokens: Some(17),
+                        ..Usage::default()
                     }),
                 })
             }
@@ -789,9 +780,9 @@ mod tests {
         let mut agent = Agent::new(Box::new(UsageProvider), Registry::new(), "m".into());
         agent.run("hi").await.unwrap();
         let u = agent.last_usage.expect("usage should be captured");
-        assert_eq!(u.prompt_tokens, 12);
-        assert_eq!(u.completion_tokens, 5);
-        assert_eq!(u.total_tokens, 17);
+        assert_eq!(u.prompt_tokens, Some(12));
+        assert_eq!(u.completion_tokens, Some(5));
+        assert_eq!(u.total_tokens, Some(17));
     }
 
     #[tokio::test]
@@ -1141,9 +1132,10 @@ mod tests {
                 Ok(ChatResponse {
                     message: assistant_text("ok"),
                     usage: Some(Usage {
-                        prompt_tokens: 10,
-                        completion_tokens: 3,
-                        total_tokens: 13,
+                        prompt_tokens: Some(10),
+                        completion_tokens: Some(3),
+                        total_tokens: Some(13),
+                        ..Usage::default()
                     }),
                 })
             }
@@ -1153,11 +1145,119 @@ mod tests {
         agent.run("b").await.unwrap();
         agent.run("c").await.unwrap();
         // last_usage reflects only the most recent round.
-        assert_eq!(agent.last_usage.unwrap().prompt_tokens, 10);
+        assert_eq!(agent.last_usage.unwrap().prompt_tokens, Some(10));
         // session_usage sums across all three.
-        assert_eq!(agent.session_usage.prompt_tokens, 30);
-        assert_eq!(agent.session_usage.completion_tokens, 9);
-        assert_eq!(agent.session_usage.total_tokens, 39);
+        assert_eq!(agent.session_usage.calls, 3);
+        assert_eq!(agent.session_usage.prompt_tokens.reported(), Some(30));
+        assert_eq!(agent.session_usage.completion_tokens.reported(), Some(9));
+        assert_eq!(agent.session_usage.total_tokens.reported(), Some(39));
+    }
+
+    #[tokio::test]
+    async fn a_call_the_provider_did_not_report_is_counted_never_summed_as_zero() {
+        struct SometimesUsageProvider {
+            seen: std::sync::atomic::AtomicUsize,
+        }
+        #[async_trait]
+        impl Provider for SometimesUsageProvider {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                let n = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ChatResponse {
+                    message: assistant_text("ok"),
+                    usage: (n == 0).then(|| Usage {
+                        prompt_tokens: Some(10),
+                        completion_tokens: Some(3),
+                        total_tokens: Some(13),
+                        ..Usage::default()
+                    }),
+                })
+            }
+        }
+        let mut agent = Agent::new(
+            Box::new(SometimesUsageProvider {
+                seen: std::sync::atomic::AtomicUsize::new(0),
+            }),
+            Registry::new(),
+            "m".into(),
+        );
+        agent.run("a").await.unwrap();
+        agent.run("b").await.unwrap();
+
+        assert_eq!(agent.session_usage.calls, 2);
+        assert_eq!(agent.session_usage.prompt_tokens.reported(), Some(10));
+        assert_eq!(agent.session_usage.prompt_tokens.unreported_calls, 1);
+        // Nothing was ever reported here, so the total stays unknown
+        // rather than collapsing to a confident zero.
+        assert_eq!(agent.session_usage.cache_read_tokens.reported(), None);
+        assert_eq!(agent.session_usage.cache_read_tokens.unreported_calls, 2);
+        // last_usage still holds the most recent *reported* call.
+        assert_eq!(agent.last_usage.unwrap().prompt_tokens, Some(10));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_prompt_count_leaves_compaction_at_zero_tokens() {
+        // The compaction trigger has always treated "no usage" as zero
+        // tokens used. An unreported prompt count must land in the same
+        // place, not somewhere new.
+        use std::sync::{Arc, Mutex};
+        struct ObservingMemory {
+            inner: LinearWithCompact,
+            observed: Arc<Mutex<Vec<usize>>>,
+        }
+        #[async_trait]
+        impl Memory for ObservingMemory {
+            async fn record(&mut self, m: Value) -> Result<()> {
+                self.inner.record(m).await
+            }
+            async fn snapshot(&self) -> Vec<Value> {
+                self.inner.snapshot().await
+            }
+            async fn pin(&mut self, m: Value) -> Result<()> {
+                self.inner.pin(m).await
+            }
+            fn len(&self) -> usize {
+                self.inner.len()
+            }
+            async fn truncate(&mut self, n: usize) -> Result<()> {
+                self.inner.truncate(n).await
+            }
+            async fn clear(&mut self) -> Result<()> {
+                self.inner.clear().await
+            }
+            async fn maybe_compact(&mut self, ctx: CompactContext<'_>) -> Result<()> {
+                self.observed.lock().unwrap().push(ctx.current_tokens);
+                Ok(())
+            }
+        }
+
+        struct CompletionOnlyProvider;
+        #[async_trait]
+        impl Provider for CompletionOnlyProvider {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: assistant_text("ok"),
+                    usage: Some(Usage {
+                        completion_tokens: Some(4),
+                        ..Usage::default()
+                    }),
+                })
+            }
+        }
+
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = Agent::new(
+            Box::new(CompletionOnlyProvider),
+            Registry::new(),
+            "m".into(),
+        )
+        .with_memory(Box::new(ObservingMemory {
+            inner: LinearWithCompact::new(),
+            observed: observed.clone(),
+        }));
+        agent.run("a").await.unwrap();
+        agent.run("b").await.unwrap();
+
+        assert_eq!(*observed.lock().unwrap(), vec![0, 0]);
     }
 
     #[tokio::test]
@@ -1169,18 +1269,19 @@ mod tests {
                 Ok(ChatResponse {
                     message: assistant_text("ok"),
                     usage: Some(Usage {
-                        prompt_tokens: 5,
-                        completion_tokens: 2,
-                        total_tokens: 7,
+                        prompt_tokens: Some(5),
+                        completion_tokens: Some(2),
+                        total_tokens: Some(7),
+                        ..Usage::default()
                     }),
                 })
             }
         }
         let mut agent = Agent::new(Box::new(FixedUsageProvider), Registry::new(), "m".into());
         agent.run("hi").await.unwrap();
-        assert_eq!(agent.session_usage.total_tokens, 7);
+        assert_eq!(agent.session_usage.total_tokens.reported(), Some(7));
         agent.clear().await.unwrap();
-        assert_eq!(agent.session_usage.total_tokens, 0);
+        assert_eq!(agent.session_usage, UsageTotals::default());
         assert_eq!(agent.last_usage, None);
     }
 

@@ -215,24 +215,86 @@ impl SlashCommand for Cost {
         "show last call + session-total token usage"
     }
     async fn run(&self, _args: &str, agent: &mut Agent) -> SlashOutcome {
-        let last = match agent.last_usage {
-            Some(u) => format!(
-                "last call: {} prompt + {} completion = {} tokens",
-                u.prompt_tokens, u.completion_tokens, u.total_tokens
-            ),
-            None => "last call: (no usage yet — provider may not report it)".into(),
-        };
+        let mut lines: Vec<String> = Vec::new();
+        match agent.last_usage {
+            Some(u) => {
+                lines.push(format!(
+                    "last call: {} prompt + {} completion = {} tokens",
+                    render_tokens(u.prompt_tokens),
+                    render_tokens(u.completion_tokens),
+                    render_tokens(u.total_tokens)
+                ));
+                lines.push(format!(
+                    "last call: cache read {}, cache write {}, reasoning {}",
+                    render_tokens(u.cache_read_tokens),
+                    render_tokens(u.cache_write_tokens),
+                    render_tokens(u.reasoning_tokens)
+                ));
+            }
+            None => lines.push("last call: (no usage yet — provider may not report it)".into()),
+        }
+
         let s = agent.session_usage;
-        let session = if s.total_tokens == 0 && s.prompt_tokens == 0 && s.completion_tokens == 0 {
-            "session: (no usage recorded yet)".to_string()
+        if s.calls == 0 {
+            lines.push("session: (no usage recorded yet)".into());
         } else {
-            format!(
-                "session: {} prompt + {} completion = {} tokens",
-                s.prompt_tokens, s.completion_tokens, s.total_tokens
-            )
-        };
-        SlashOutcome::Continue(Some(format!("{}\n{}", last, session)))
+            lines.push(format!(
+                "session ({} {}): {} prompt + {} completion = {} tokens",
+                s.calls,
+                if s.calls == 1 { "call" } else { "calls" },
+                render_total(&s.prompt_tokens),
+                render_total(&s.completion_tokens),
+                render_total(&s.total_tokens)
+            ));
+            lines.push(format!(
+                "session: cache read {}, cache write {}, reasoning {}",
+                render_total(&s.cache_read_tokens),
+                render_total(&s.cache_write_tokens),
+                render_total(&s.reasoning_tokens)
+            ));
+            if let Some(gaps) = unreported_line(&s) {
+                lines.push(gaps);
+            }
+        }
+        SlashOutcome::Continue(Some(lines.join("\n")))
     }
+}
+
+fn render_tokens(v: Option<u32>) -> String {
+    match v {
+        Some(n) => n.to_string(),
+        None => "unknown".into(),
+    }
+}
+
+fn render_total(t: &crate::providers::TokenTotal) -> String {
+    match t.reported() {
+        Some(n) => n.to_string(),
+        None => "unknown".into(),
+    }
+}
+
+/// Names the categories whose session sums are incomplete. Without it a
+/// partial sum reads as a full one.
+fn unreported_line(s: &crate::providers::UsageTotals) -> Option<String> {
+    let gaps: Vec<String> = [
+        ("prompt", &s.prompt_tokens),
+        ("completion", &s.completion_tokens),
+        ("total", &s.total_tokens),
+        ("cache read", &s.cache_read_tokens),
+        ("cache write", &s.cache_write_tokens),
+        ("reasoning", &s.reasoning_tokens),
+    ]
+    .into_iter()
+    .filter(|(_, t)| t.unreported_calls > 0)
+    .map(|(name, t)| {
+        format!(
+            "{} ({} of {} calls did not report)",
+            name, t.unreported_calls, s.calls
+        )
+    })
+    .collect();
+    (!gaps.is_empty()).then(|| format!("incomplete: {}", gaps.join(", ")))
 }
 
 pub struct Tools;
@@ -310,7 +372,10 @@ impl SlashCommand for MemoryCmd {
                     recorded, pinned, synthesized
                 );
                 if let Some(u) = agent.last_usage {
-                    out.push_str(&format!("\nlast prompt tokens: {}", u.prompt_tokens));
+                    out.push_str(&format!(
+                        "\nlast prompt tokens: {}",
+                        render_tokens(u.prompt_tokens)
+                    ));
                 }
                 SlashOutcome::Continue(Some(out))
             }
@@ -1334,9 +1399,10 @@ default_model = "alt-model"
         let reg = SlashRegistry::default_set();
         let mut agent = fresh_agent();
         agent.last_usage = Some(crate::providers::Usage {
-            prompt_tokens: 10,
-            completion_tokens: 4,
-            total_tokens: 14,
+            prompt_tokens: Some(10),
+            completion_tokens: Some(4),
+            total_tokens: Some(14),
+            ..crate::providers::Usage::default()
         });
         let out = reg.dispatch("cost", &mut agent).await.unwrap();
         match out {
@@ -1356,15 +1422,19 @@ default_model = "alt-model"
         let reg = SlashRegistry::default_set();
         let mut agent = fresh_agent();
         agent.last_usage = Some(crate::providers::Usage {
-            prompt_tokens: 7,
-            completion_tokens: 3,
-            total_tokens: 10,
+            prompt_tokens: Some(7),
+            completion_tokens: Some(3),
+            total_tokens: Some(10),
+            ..crate::providers::Usage::default()
         });
-        agent.session_usage = crate::providers::Usage {
-            prompt_tokens: 22,
-            completion_tokens: 9,
-            total_tokens: 31,
-        };
+        for (prompt, completion, total) in [(15, 6, 21), (7, 3, 10)] {
+            agent.session_usage.add(Some(crate::providers::Usage {
+                prompt_tokens: Some(prompt),
+                completion_tokens: Some(completion),
+                total_tokens: Some(total),
+                ..crate::providers::Usage::default()
+            }));
+        }
         let out = reg.dispatch("cost", &mut agent).await.unwrap();
         match out {
             SlashOutcome::Continue(Some(msg)) => {
@@ -1373,9 +1443,61 @@ default_model = "alt-model"
                 assert!(msg.contains("7 prompt"));
                 assert!(msg.contains("10 tokens"));
                 // session line
-                assert!(msg.contains("session:"));
+                assert!(msg.contains("session (2 calls):"));
                 assert!(msg.contains("22 prompt"));
                 assert!(msg.contains("31 tokens"));
+            }
+            _ => panic!("expected Continue(Some(_)), got {:?}", out),
+        }
+    }
+
+    #[tokio::test]
+    async fn cost_renders_an_unreported_category_as_unknown_not_zero() {
+        let reg = SlashRegistry::default_set();
+        let mut agent = fresh_agent();
+        agent.last_usage = Some(crate::providers::Usage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(4),
+            total_tokens: Some(14),
+            cache_read_tokens: Some(2048),
+            ..crate::providers::Usage::default()
+        });
+        let out = reg.dispatch("cost", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(msg)) => {
+                assert!(msg.contains("cache read 2048"), "{msg}");
+                assert!(msg.contains("cache write unknown"), "{msg}");
+                assert!(msg.contains("reasoning unknown"), "{msg}");
+                assert!(!msg.contains("cache write 0"), "{msg}");
+            }
+            _ => panic!("expected Continue(Some(_)), got {:?}", out),
+        }
+    }
+
+    #[tokio::test]
+    async fn cost_names_the_calls_missing_from_a_partial_session_sum() {
+        let reg = SlashRegistry::default_set();
+        let mut agent = fresh_agent();
+        agent.session_usage.add(Some(crate::providers::Usage {
+            prompt_tokens: Some(10),
+            completion_tokens: Some(4),
+            total_tokens: Some(14),
+            ..crate::providers::Usage::default()
+        }));
+        agent.session_usage.add(None);
+        let out = reg.dispatch("cost", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(msg)) => {
+                assert!(msg.contains("session (2 calls): 10 prompt"), "{msg}");
+                assert!(msg.contains("cache read unknown"), "{msg}");
+                assert!(
+                    msg.contains("prompt (1 of 2 calls did not report)"),
+                    "{msg}"
+                );
+                assert!(
+                    msg.contains("cache read (2 of 2 calls did not report)"),
+                    "{msg}"
+                );
             }
             _ => panic!("expected Continue(Some(_)), got {:?}", out),
         }
