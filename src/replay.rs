@@ -220,7 +220,9 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
                 (Some(candidate), Some(control)) => Some(delta(candidate.total, control.total)),
                 _ => None,
             },
-            cost: cost_delta(&candidate, &control),
+            // Recorded cost is provider-accounted across all billed components,
+            // while control cost models input context only. They are not comparable.
+            cost: None,
             // The counterfactual arm was never dispatched, so there is no
             // latency to compare against.
             latency_ms: None,
@@ -643,15 +645,6 @@ fn cost_rollup<'a>(
     out
 }
 
-fn cost_delta(candidate: &ArmReport, control: &ArmReport) -> Option<f64> {
-    let candidate = candidate.cost.measured.as_ref()?;
-    let control = control.cost.modeled.as_ref()?;
-    if candidate.currency.as_ref()? != control.currency.as_ref()? {
-        return None;
-    }
-    Some(candidate.amount? - control.amount?)
-}
-
 fn delta(candidate: u64, control: u64) -> i64 {
     i128::from(candidate)
         .saturating_sub(i128::from(control))
@@ -768,7 +761,7 @@ mod tests {
         );
 
         let delta = &run.comparisons[0].candidate_minus_control;
-        assert!((delta.cost.unwrap() - 0.000196).abs() < 1e-12);
+        assert!(delta.cost.is_none());
         assert!(delta.latency_ms.is_none());
     }
 
