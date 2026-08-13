@@ -254,26 +254,39 @@ fn validate_ledger_schema(schema: &str) -> Result<()> {
 }
 
 fn validate_transcript_meta(transcript: &[Value], runs: &[CapturedRun]) -> Result<()> {
-    for event in transcript {
-        if event.get("op").and_then(Value::as_str) != Some("meta") {
-            continue;
-        }
-        let Some(meta) = event.get("meta") else {
-            continue;
-        };
-        let matches = runs.iter().any(|run| {
-            metadata_field_matches(meta, "provider", &run.identity.provider)
-                && metadata_field_matches(meta, "model", &run.identity.model)
-                && metadata_field_matches(meta, "strategy", &run.identity.strategy)
-                && metadata_field_matches(meta, "config_hash", &run.identity.config_hash)
-        });
-        if !matches {
+    let metas: Vec<&Value> = transcript
+        .iter()
+        .filter(|event| event.get("op").and_then(Value::as_str) == Some("meta"))
+        .filter_map(|event| event.get("meta"))
+        .collect();
+
+    for meta in &metas {
+        if !runs.iter().any(|run| meta_matches_run(meta, run)) {
             return Err(AgentError::Config(
                 "transcript meta does not match a pinned ledger identity".into(),
             ));
         }
     }
+    // Old transcripts have no metadata at all and remain replayable. Once a
+    // capture does carry metadata, validate the join in both directions so an
+    // unrelated extra ledger run cannot borrow another run's transcript.
+    if !metas.is_empty()
+        && runs
+            .iter()
+            .any(|run| !metas.iter().any(|meta| meta_matches_run(meta, run)))
+    {
+        return Err(AgentError::Config(
+            "pinned ledger identity has no matching transcript meta".into(),
+        ));
+    }
     Ok(())
+}
+
+fn meta_matches_run(meta: &Value, run: &CapturedRun) -> bool {
+    metadata_field_matches(meta, "provider", &run.identity.provider)
+        && metadata_field_matches(meta, "model", &run.identity.model)
+        && metadata_field_matches(meta, "strategy", &run.identity.strategy)
+        && metadata_field_matches(meta, "config_hash", &run.identity.config_hash)
 }
 
 fn metadata_field_matches(meta: &Value, field: &str, expected: &str) -> bool {
@@ -341,6 +354,19 @@ fn is_materialized_request(requests: &[RequestObservation], index: usize) -> boo
     requests
         .get(index + 1)
         .is_none_or(|next| next.turn != requests[index].turn)
+        && !is_legacy_linear_compaction(&requests[index])
+}
+
+fn is_legacy_linear_compaction(observation: &RequestObservation) -> bool {
+    // Ledger v1 did not label a call's purpose. Linear compaction requests are
+    // nevertheless distinguishable from agent requests in existing captures:
+    // they summarize only recent messages and never carry pinned content,
+    // an existing summary, or tool schemas. This also catches `/compact`, whose
+    // call occupies a turn by itself rather than preceding a model request.
+    observation.strategy == "linear-with-compact"
+        && observation.estimated.pinned == 0
+        && observation.estimated.tool_schemas == 0
+        && observation.estimated.summary == 0
 }
 
 struct MaterializedReplay {
@@ -353,6 +379,7 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
     let mut estimates = vec![None; tool_schemas.len()];
     let mut next_request = 0;
     let mut uncertain = false;
+    let mut assistant_records: Vec<(usize, usize)> = Vec::new();
 
     for event in transcript {
         match event.get("op").and_then(Value::as_str) {
@@ -380,6 +407,7 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
                                 total: pinned_tokens + tool_tokens + recent_tokens,
                             });
                         }
+                        assistant_records.push((recent.len(), next_request));
                         next_request += 1;
                     }
                     recent.push(message.clone());
@@ -393,12 +421,32 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
                     .and_then(Value::as_u64)
                     .and_then(|len| usize::try_from(len).ok())
                 {
+                    let removed_requests: Vec<usize> = assistant_records
+                        .iter()
+                        .filter(|(message_index, _)| *message_index >= len)
+                        .map(|(_, request_index)| *request_index)
+                        .collect();
+                    if !removed_requests.is_empty() {
+                        for request_index in &removed_requests {
+                            estimates[*request_index] = None;
+                        }
+                        assistant_records.retain(|(message_index, _)| *message_index < len);
+                        next_request = next_request.saturating_sub(removed_requests.len());
+                        // A completed `/undo` and a cancelled in-flight tool
+                        // turn have the same transcript shape in ledger v1.
+                        // Reuse the request slot but report a miss rather than
+                        // assigning the rolled-back context to a later call.
+                        uncertain = true;
+                    }
                     recent.truncate(len);
                 } else {
                     uncertain = true;
                 }
             }
-            Some("clear") => recent.clear(),
+            Some("clear") => {
+                recent.clear();
+                assistant_records.clear();
+            }
             Some("meta" | "read") => {}
             Some(_) | None => uncertain = true,
         }
@@ -463,6 +511,24 @@ mod tests {
         assert_eq!(candidate.strategy_internal_calls, 1);
         assert_eq!(candidate.materialization_misses, 1);
         assert!(run.comparisons[0].candidate_minus_control.total.unwrap() < 0);
+    }
+
+    #[test]
+    fn standalone_compaction_calls_remain_strategy_internal() {
+        let mut value: Value = serde_json::from_slice(&fixture("compacted")).unwrap();
+        let mut requests: Vec<&mut Value> = value["ledger"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|record| record["kind"] == "request")
+            .collect();
+        requests[3]["turn"] = json!(4);
+        requests[4]["turn"] = json!(5);
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let candidate = &report.runs[0].arms[1];
+        assert_eq!(candidate.requests, 4);
+        assert_eq!(candidate.strategy_internal_calls, 1);
     }
 
     #[test]
@@ -549,6 +615,18 @@ mod tests {
     }
 
     #[test]
+    fn every_pinned_ledger_identity_must_match_transcript_metadata() {
+        let mut value: Value = serde_json::from_slice(&fixture("fresh")).unwrap();
+        let mut extra = value["ledger"][0].clone();
+        extra["run"] = json!("unrelated-run");
+        extra["model"] = json!("unrelated-model");
+        value["ledger"].as_array_mut().unwrap().push(extra);
+
+        let error = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("ledger identity"), "{error}");
+    }
+
+    #[test]
     fn unknown_state_events_turn_following_snapshots_into_explicit_misses() {
         let mut value: Value = serde_json::from_slice(&fixture("fresh")).unwrap();
         value["transcript"]
@@ -596,6 +674,23 @@ mod tests {
                 ["candidate_minus_control"]["total"]
                 .is_null()
         );
+    }
+
+    #[test]
+    fn rolled_back_assistants_do_not_consume_the_next_request_slot() {
+        let mut value: Value = serde_json::from_slice(&fixture("fresh")).unwrap();
+        value["transcript"].as_array_mut().unwrap().extend([
+            json!({"op": "truncate", "n": 0}),
+            json!({"op": "record", "msg": {"role": "user", "content": "retry"}}),
+            json!({"op": "record", "msg": {"role": "assistant", "content": "done"}}),
+        ]);
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let run = &report.runs[0];
+        assert_eq!(run.arms[0].requests, 1);
+        assert_eq!(run.arms[0].materialization_misses, 1);
+        assert!(run.arms[0].first_request.is_none());
+        assert!(run.comparisons[0].candidate_minus_control.total.is_none());
     }
 
     #[test]
