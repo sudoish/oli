@@ -47,6 +47,7 @@ pub mod plugins;
 pub mod policy;
 pub mod providers;
 pub mod repl;
+pub mod replay;
 pub mod tools;
 pub mod wizard_init;
 

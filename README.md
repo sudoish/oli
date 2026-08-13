@@ -135,6 +135,7 @@ run `oli` without a subcommand for the line-mode REPL.
 | `oli run --output json -p "..."` | Emit one machine-readable result object. |
 | `oli run --strict -p "..."` | Deny every operation requiring approval. |
 | `oli run --max-turns N -p "..."` | Override the turn cap for one run. |
+| `oli replay --fixture capture.json` | Compare captured full-history and recorded-linear contexts offline. |
 
 Headless runs distinguish completion from turn-cap exhaustion. Successful JSON
 results include `"status":"completed"`. If `max_turns` is exhausted, Oli exits
@@ -253,6 +254,18 @@ aggregate under `accounting`. Everything stays on disk; nothing is
 transmitted. Every request and summary carries a run id, so repeated
 resumes remain unambiguous inside the append-only file; normal and failed
 runs both end with a summary record.
+
+`oli replay --fixture <path>` reads a synthetic or captured object containing
+the transcript and ledger arrays, reconstructs full-history request contexts,
+and compares them with the recorded linear strategy. It emits deterministic
+JSON only: provider, model, configuration hash, strategy/version/arm, estimated
+context categories, turns, strategy-internal calls, and explicit materialization
+misses.
+The command does not load provider configuration, issue network requests, or
+write session/worktree state. A SHA-256 fixture digest ties every report back to
+the exact immutable input. Summary-bearing linear snapshots remain comparable
+by their PA-501 estimates but are counted as misses because their generated
+summary content is not present in today's raw transcript.
 
 ### Signing in with a ChatGPT subscription
 

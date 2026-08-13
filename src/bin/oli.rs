@@ -84,6 +84,13 @@ enum Cmd {
         output: OutputMode,
     },
 
+    /// Compare captured memory strategies without contacting a provider.
+    Replay {
+        /// Immutable JSON fixture containing `transcript` and `ledger` arrays.
+        #[arg(long)]
+        fixture: std::path::PathBuf,
+    },
+
     /// Write a starter `~/.config/oli/config.toml`.
     Init {
         /// Provider template: ollama (local), openrouter, or
@@ -178,6 +185,7 @@ async fn main() {
             })
             .await
         }
+        Some(Cmd::Replay { fixture }) => replay_command(&fixture),
         Some(Cmd::Init {
             provider,
             api_key,
@@ -201,6 +209,12 @@ async fn main() {
         }
         process::exit(1);
     }
+}
+
+fn replay_command(fixture: &std::path::Path) -> Result<()> {
+    let report = oli::replay::compare_path(fixture)?;
+    println!("{}", serde_json::to_string(&report)?);
+    Ok(())
 }
 
 /// `oli login`. Runs the ChatGPT subscription OAuth flow, stores the
