@@ -31,7 +31,7 @@ use tokio::sync::Mutex;
 use crate::error::{AgentError, Result};
 use crate::tools::context::ReadLogger;
 
-use super::{CompactContext, Memory};
+use super::{CompactContext, ContextParts, Memory};
 
 pub struct PersistedMemory {
     inner: Box<dyn Memory>,
@@ -175,6 +175,10 @@ impl Memory for PersistedMemory {
 
     async fn snapshot(&self) -> Vec<Value> {
         self.inner.snapshot().await
+    }
+
+    async fn snapshot_parts(&self) -> ContextParts {
+        self.inner.snapshot_parts().await
     }
 
     async fn pin(&mut self, message: Value) -> Result<()> {

@@ -21,7 +21,7 @@ use serde_json::{Value, json};
 use crate::error::Result;
 use crate::providers::ChatRequest;
 
-use super::{CompactContext, Memory};
+use super::{CompactContext, ContextParts, Memory};
 
 const MIN_MESSAGES_TO_COMPACT: usize = 4;
 
@@ -66,6 +66,14 @@ impl Memory for LinearWithCompact {
         }
         out.extend(self.messages.iter().cloned());
         out
+    }
+
+    async fn snapshot_parts(&self) -> ContextParts {
+        ContextParts {
+            pinned: self.pinned.clone(),
+            summary: self.summary.iter().cloned().collect(),
+            recent: self.messages.clone(),
+        }
     }
 
     async fn pin(&mut self, message: Value) -> Result<()> {
@@ -481,6 +489,93 @@ mod tests {
                 .unwrap()
                 .contains("Earlier conversation summary")
         );
+    }
+
+    #[tokio::test]
+    async fn snapshot_parts_before_compaction_has_no_summary() {
+        let mut m = LinearWithCompact::new();
+        m.pin(json!({"role":"system","content":"sys"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"a"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"assistant","content":"b"}))
+            .await
+            .unwrap();
+
+        let parts = m.snapshot_parts().await;
+        assert_eq!(parts.pinned.len(), 1);
+        assert!(parts.summary.is_empty());
+        assert_eq!(parts.recent.len(), 2);
+        assert_eq!(parts.flatten(), m.snapshot().await);
+    }
+
+    #[tokio::test]
+    async fn snapshot_parts_separates_the_summary_from_live_records_after_compaction() {
+        struct StubSummary;
+        #[async_trait]
+        impl Provider for StubSummary {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: json!({"role":"assistant","content":"S"}),
+                    usage: None,
+                })
+            }
+        }
+
+        let mut m = LinearWithCompact::new();
+        m.pin(json!({"role":"system","content":"sys"}))
+            .await
+            .unwrap();
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            m.record(json!({"role": role, "content": format!("msg{}", i)}))
+                .await
+                .unwrap();
+        }
+        let provider = StubSummary;
+        m.maybe_compact(CompactContext {
+            provider: &provider,
+            model: "x",
+            target_tokens: 10,
+            current_tokens: 1_000,
+        })
+        .await
+        .unwrap();
+
+        let parts = m.snapshot_parts().await;
+        assert_eq!(parts.pinned.len(), 1);
+        assert_eq!(parts.summary.len(), 1);
+        assert!(
+            parts.summary[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("Earlier conversation summary")
+        );
+        assert!(!parts.recent.is_empty());
+        assert_eq!(parts.flatten(), m.snapshot().await);
+    }
+
+    #[tokio::test]
+    async fn a_live_system_record_is_not_mistaken_for_the_rolling_summary() {
+        // The agent loop used to approximate "is this the summary?" by
+        // checking the first non-pinned message's role. A system-role
+        // record recorded by the caller defeats that.
+        let mut m = LinearWithCompact::new();
+        m.pin(json!({"role":"system","content":"sys"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"system","content":"a live system note"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"u"}))
+            .await
+            .unwrap();
+
+        let parts = m.snapshot_parts().await;
+        assert!(parts.summary.is_empty());
+        assert_eq!(parts.recent.len(), 2);
     }
 
     #[tokio::test]

@@ -266,49 +266,26 @@ impl Agent {
     /// Pinned content (the system prompt) and the rolling
     /// summary are preserved.
     pub async fn undo_last_user_turn(&mut self) -> Option<String> {
-        let snap = self.memory.snapshot().await;
-        let pinned = self.memory.pinned().await;
-        let pin_count = pinned.len();
-        // Find the index of the last user message in the
-        // snapshot. The snapshot includes pinned + (optional
-        // summary) + live records; we need to translate the
-        // snapshot index back to a logical record position.
-        let last_user_snap = snap
+        // Only the `recent` part maps onto logical record positions:
+        // pinned content and the rolling summary were never `record`ed.
+        let parts = self.memory.snapshot_parts().await;
+        let (offset, _) = parts
+            .recent
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, m)| m.get("role").and_then(|v| v.as_str()) == Some("user"))
-            .map(|(i, _)| i);
-        let snap_idx = last_user_snap?;
-        // Skip if the match is in the pinned prefix.
-        if snap_idx < pin_count {
-            return None;
-        }
-        let body = snap
-            .get(snap_idx)
-            .and_then(|m| m.get("content"))
+            .find(|(_, m)| m.get("role").and_then(|v| v.as_str()) == Some("user"))?;
+        let body = parts.recent[offset]
+            .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        // Number of pre-user records (relative to pinned + summary):
-        // snap_idx - pin_count, then subtract any leading summary
-        // entry (LinearWithCompact emits one between pinned and
-        // live). We don't have a direct "is_summary" check, so
-        // approximate: the summary is a system-role message
-        // emitted by `LinearWithCompact::maybe_compact`. If the
-        // first non-pinned snap entry has role==system AND we
-        // *might* have run compact, treat it as a summary slot.
-        let mut record_idx = snap_idx - pin_count;
-        if let Some(first_post_pin) = snap.get(pin_count) {
-            if first_post_pin.get("role").and_then(|v| v.as_str()) == Some("system")
-                && record_idx > 0
-            {
-                record_idx -= 1;
-            }
-        }
+        // `recent` is the tail of the record sequence, so its first
+        // element sits at `len() - recent.len()`.
+        let base = self.memory.len().checked_sub(parts.recent.len())?;
         // Truncate before the user message — i.e. drop the user
         // message itself and everything after it.
-        self.memory.truncate(record_idx).await.ok()?;
+        self.memory.truncate(base + offset).await.ok()?;
         Some(body)
     }
 
@@ -1336,6 +1313,72 @@ mod tests {
         assert_eq!(post.len(), 3); // sys + u1 + a1
         assert_eq!(post[1]["content"], "first");
         assert_eq!(post[2]["content"], "a1");
+    }
+
+    #[tokio::test]
+    async fn undo_last_user_turn_keeps_a_live_system_record_it_used_to_swallow() {
+        // The old role-sniffing approximation treated any system message
+        // sitting first after the pinned prefix as a rolling summary and
+        // shifted the truncate target one record too far back.
+        let provider = FakeProvider::new(vec![assistant_text("done")]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
+            .pin_system_prompt("sys")
+            .await
+            .unwrap();
+        agent
+            .memory
+            .record(json!({"role":"system","content":"a live system note"}))
+            .await
+            .unwrap();
+        agent.run("hello").await.unwrap();
+
+        assert_eq!(agent.undo_last_user_turn().await.as_deref(), Some("hello"));
+        let post = agent.memory.snapshot().await;
+        assert_eq!(post.len(), 2);
+        assert_eq!(post[1]["content"], "a live system note");
+    }
+
+    #[tokio::test]
+    async fn undo_last_user_turn_after_compaction_targets_the_live_window() {
+        struct StubSummary;
+        #[async_trait]
+        impl Provider for StubSummary {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: assistant_text("S"),
+                    usage: None,
+                })
+            }
+        }
+
+        let mut mem = LinearWithCompact::new();
+        mem.pin(json!({"role":"system","content":"sys"})).await.unwrap();
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            mem.record(json!({"role": role, "content": format!("msg{}", i)}))
+                .await
+                .unwrap();
+        }
+        let stub = StubSummary;
+        mem.maybe_compact(CompactContext {
+            provider: &stub,
+            model: "m",
+            target_tokens: 10,
+            current_tokens: 1_000,
+        })
+        .await
+        .unwrap();
+
+        let provider = FakeProvider::new(vec![]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
+            .with_memory(Box::new(mem));
+
+        // Live window is msg4 (user) + msg5 (assistant); undo drops both
+        // and leaves the summary intact.
+        assert_eq!(agent.undo_last_user_turn().await.as_deref(), Some("msg4"));
+        let parts = agent.memory.snapshot_parts().await;
+        assert_eq!(parts.summary.len(), 1);
+        assert!(parts.recent.is_empty());
     }
 
     #[tokio::test]

@@ -30,6 +30,25 @@ pub trait Memory: Send + Sync {
     /// Pinned messages always come first.
     async fn snapshot(&self) -> Vec<Value>;
 
+    /// The same messages `snapshot` returns, in the same order, labelled
+    /// by where they came from. Callers that need to know whether a
+    /// system message is the rolling summary or a live record use this
+    /// rather than guessing from roles.
+    ///
+    /// The default splits off the pinned prefix and calls the remainder
+    /// recent — correct for any strategy that doesn't synthesize
+    /// content of its own. Strategies that do must override.
+    async fn snapshot_parts(&self) -> ContextParts {
+        let pinned = self.pinned().await;
+        let mut snapshot = self.snapshot().await;
+        let recent = snapshot.split_off(pinned.len().min(snapshot.len()));
+        ContextParts {
+            pinned,
+            summary: Vec::new(),
+            recent,
+        }
+    }
+
     /// Pin a message so it survives every snapshot regardless of
     /// compaction. Used for the system prompt today; later for sticky
     /// instructions.
@@ -63,6 +82,29 @@ pub trait Memory: Send + Sync {
     /// turns.
     async fn maybe_compact(&mut self, _ctx: CompactContext<'_>) -> Result<()> {
         Ok(())
+    }
+}
+
+/// A snapshot broken down by provenance. Concatenating the fields in
+/// declaration order reproduces `Memory::snapshot` exactly.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContextParts {
+    /// System prompt and anything else pinned past compaction.
+    pub pinned: Vec<Value>,
+    /// Strategy-synthesized stand-in for records it no longer holds
+    /// verbatim — today, `LinearWithCompact`'s rolling summary.
+    pub summary: Vec<Value>,
+    /// Records still held verbatim, in insertion order.
+    pub recent: Vec<Value>,
+}
+
+impl ContextParts {
+    pub fn flatten(&self) -> Vec<Value> {
+        let mut out = Vec::with_capacity(self.pinned.len() + self.summary.len() + self.recent.len());
+        out.extend(self.pinned.iter().cloned());
+        out.extend(self.summary.iter().cloned());
+        out.extend(self.recent.iter().cloned());
+        out
     }
 }
 
