@@ -264,8 +264,8 @@ misses.
 The command does not load provider configuration, issue network requests, or
 write session/worktree state. A SHA-256 fixture digest ties every report back to
 the exact immutable input. Summary-bearing linear snapshots remain comparable
-by their PA-501 estimates but are counted as misses because their generated
-summary content is not present in today's raw transcript.
+by their recorded prompt-accounting estimates but are counted as misses because
+their generated summary content is not present in today's raw transcript.
 
 ### Signing in with a ChatGPT subscription
 

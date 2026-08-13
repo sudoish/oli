@@ -294,6 +294,7 @@ fn replay_is_provider_free_machine_readable_and_does_not_create_runtime_state() 
         "linear-with-compact"
     );
     assert!(!xdg.path().join("oli").exists());
+    assert!(!home.path().join(".config/oli").exists());
     assert_eq!(std::fs::read(fixture).unwrap(), before);
 }
 

@@ -388,8 +388,15 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
                 }
             }
             Some("truncate") => {
-                let len = event.get("n").and_then(Value::as_u64).unwrap_or(0) as usize;
-                recent.truncate(len);
+                if let Some(len) = event
+                    .get("n")
+                    .and_then(Value::as_u64)
+                    .and_then(|len| usize::try_from(len).ok())
+                {
+                    recent.truncate(len);
+                } else {
+                    uncertain = true;
+                }
             }
             Some("clear") => recent.clear(),
             Some("meta" | "read") => {}
@@ -548,6 +555,31 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .insert(2, json!({"op": "future-state-op"}));
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let run = &report.runs[0];
+        assert_eq!(run.arms[0].materialization_misses, 1);
+        assert!(run.arms[0].first_request.is_none());
+        assert!(
+            run.comparisons[0]
+                .candidate_minus_control
+                .first_request
+                .is_none()
+        );
+        assert!(
+            serde_json::to_value(report).unwrap()["runs"][0]["comparisons"][0]
+                ["candidate_minus_control"]["total"]
+                .is_null()
+        );
+    }
+
+    #[test]
+    fn malformed_truncate_events_turn_following_snapshots_into_explicit_misses() {
+        let mut value: Value = serde_json::from_slice(&fixture("fresh")).unwrap();
+        value["transcript"]
+            .as_array_mut()
+            .unwrap()
+            .insert(2, json!({"op": "truncate"}));
 
         let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
         let run = &report.runs[0];
