@@ -603,7 +603,7 @@ hooks — one mechanism, two registration sources.
 
 | If you want to… | Read |
 | --- | --- |
-| Use oli day-to-day | [`docs/cheatsheet.md`](docs/cheatsheet.md) — every keybind, slash, file path, and feature flag. |
+| Use oli day-to-day | [`docs/cheatsheet.md`](docs/cheatsheet.md) — every slash command, file path, and env var. |
 | Understand the design | [`specs/README.md`](specs/README.md) — mission, principles, in/out of scope, full config schema, plugin contract, roadmap. |
 | Track what's shipped | [`specs/progress.md`](specs/progress.md) — phase-by-phase status with commit SHAs. |
 | Write a plugin | [`examples/README.md`](examples/README.md) — 60-second tour + host API reference. |

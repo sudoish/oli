@@ -31,12 +31,11 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub env: HashMap<String, String>,
 
-    /// streamable-http: endpoint URL. Reserved for phase 5b.
+    /// streamable-http: endpoint URL.
     #[serde(default)]
     pub url: Option<String>,
 
     /// streamable-http: extra headers (typically `Authorization`).
-    /// Reserved for phase 5b.
     #[serde(default)]
     pub headers: HashMap<String, String>,
 

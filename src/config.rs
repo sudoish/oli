@@ -29,9 +29,8 @@ use crate::error::{AgentError, Result};
 use crate::mcp::McpConfig;
 use crate::policy::PolicyConfig;
 
-/// Top-level harness config. Modeled progressively as phases land:
-/// providers (phase 0), policy (phase 2), plugins / subprocess tools
-/// (phase 2/3), per-project overrides (phase 4).
+/// Top-level harness config: providers, policy, plugins and subprocess
+/// tools, with per-project overrides layered on top.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
     pub default_provider: String,
@@ -81,8 +80,8 @@ pub struct Config {
 pub struct AgentConfig {
     /// Maximum number of model turns per top-level `run` invocation.
     /// Bounds the loop so a flaky model that re-issues the same tool
-    /// call on every turn (qwen with the fallback parser, observed
-    /// during Phase 3 smoke) can't spin forever. Default 40.
+    /// call on every turn (observed with qwen on the fallback parser)
+    /// can't spin forever. Default 40.
     #[serde(default = "AgentConfig::default_max_turns")]
     pub max_turns: usize,
 
@@ -453,8 +452,8 @@ mod tests {
 
     #[test]
     fn resolve_api_key_prefers_env_var() {
-        // SAFETY: setting an env var with a unique name; threaded test isolation
-        // is acceptable for Phase 0.
+        // SAFETY: the var name is unique to this test, so no other
+        // thread in the suite reads or writes it.
         unsafe {
             std::env::set_var("__AGENT_TEST_API_KEY", "from-env");
         }

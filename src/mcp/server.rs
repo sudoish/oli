@@ -31,9 +31,9 @@ pub struct ToolMeta {
     pub input_schema: Value,
 }
 
-/// Negotiated capability flags from `initialize`. v1 only consumes
-/// `tools` — `resources` and `prompts` are reserved for phase 5c
-/// and parsed today so the struct mirrors the wire protocol.
+/// Negotiated capability flags from `initialize`. Only `tools` is
+/// consumed; `resources` and `prompts` are parsed so the struct mirrors
+/// the wire protocol.
 #[derive(Clone, Debug, Default)]
 pub struct ServerCapabilities {
     pub tools: bool,
@@ -62,8 +62,8 @@ pub struct McpServer {
     pub tools: Vec<ToolMeta>,
     pub health: HealthState,
     /// Backing buffer for `/mcp logs <server>`. Populated by the stdio
-    /// transport's stderr capture; for HTTP transports we'll wire this
-    /// to a different source in phase 5b.
+    /// transport's stderr capture; `None` for HTTP servers, which have
+    /// no equivalent side channel.
     pub stderr_source: Option<Arc<StdioTransport>>,
 }
 

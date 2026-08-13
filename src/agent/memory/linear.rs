@@ -306,9 +306,17 @@ fn render_for_summary(msgs: &[Value]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::providers::fake::{FakeProvider, NeverCalled};
     use crate::providers::{ChatResponse, Provider};
     use async_trait::async_trait;
     use serde_json::json;
+
+    /// A compaction provider whose summary body is all the test cares
+    /// about. `constant` because compaction call counts are an
+    /// implementation detail no test here is asserting.
+    fn summarizer(body: &str) -> FakeProvider {
+        FakeProvider::constant(json!({"role": "assistant", "content": body}), None)
+    }
 
     #[tokio::test]
     async fn record_and_snapshot_round_trip_in_order() {
@@ -398,14 +406,6 @@ mod tests {
 
     #[tokio::test]
     async fn maybe_compact_skips_at_the_exact_budget_boundary() {
-        struct ShouldNotCall;
-        #[async_trait]
-        impl Provider for ShouldNotCall {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                unreachable!("provider should not be called when within budget")
-            }
-        }
-
         let mut m = LinearWithCompact::new();
         for i in 0..6 {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
@@ -413,7 +413,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let provider = ShouldNotCall;
+        let provider = NeverCalled("provider should not be called when within budget");
         m.maybe_compact(CompactContext {
             provider: &provider,
             model: "x",
@@ -430,17 +430,6 @@ mod tests {
 
     #[tokio::test]
     async fn maybe_compact_summarizes_when_over_budget() {
-        struct StubSummary;
-        #[async_trait]
-        impl Provider for StubSummary {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                Ok(ChatResponse {
-                    message: json!({"role":"assistant","content":"COMPACTED"}),
-                    usage: None,
-                })
-            }
-        }
-
         let mut m = LinearWithCompact::new();
         for i in 0..6 {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
@@ -448,7 +437,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let provider = StubSummary;
+        let provider = summarizer("COMPACTED");
         let report = m
             .maybe_compact(CompactContext {
                 provider: &provider,
@@ -628,14 +617,6 @@ mod tests {
 
     #[tokio::test]
     async fn an_incomplete_tool_cycle_is_never_selected_for_compaction() {
-        struct ShouldNotCall;
-        #[async_trait]
-        impl Provider for ShouldNotCall {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                panic!("malformed tool history must not be summarized")
-            }
-        }
-
         let mut m = LinearWithCompact::new();
         m.record(json!({"role":"user","content":"u1"}))
             .await
@@ -658,7 +639,7 @@ mod tests {
 
         let result = m
             .maybe_compact(CompactContext {
-                provider: &ShouldNotCall,
+                provider: &NeverCalled("malformed tool history must not be summarized"),
                 model: "x",
                 target_tokens: 10,
                 hard_limit_tokens: 2_000,
@@ -676,17 +657,6 @@ mod tests {
         // Half-point lands at index 3. cut should snap forward to the next
         // user (index 4), so the assistant(tool_call) at index 1 + tool at
         // index 2 stay together — both go into the summary.
-        struct StubSummary;
-        #[async_trait]
-        impl Provider for StubSummary {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                Ok(ChatResponse {
-                    message: json!({"role":"assistant","content":"S"}),
-                    usage: None,
-                })
-            }
-        }
-
         let mut m = LinearWithCompact::new();
         m.record(json!({"role":"user","content":"u1"}))
             .await
@@ -710,7 +680,7 @@ mod tests {
             .await
             .unwrap();
 
-        let provider = StubSummary;
+        let provider = summarizer("S");
         m.maybe_compact(CompactContext {
             provider: &provider,
             model: "x",
@@ -731,17 +701,6 @@ mod tests {
 
     #[tokio::test]
     async fn truncate_after_compaction_below_base_keeps_summary_drops_live() {
-        struct StubSummary;
-        #[async_trait]
-        impl Provider for StubSummary {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                Ok(ChatResponse {
-                    message: json!({"role":"assistant","content":"S"}),
-                    usage: None,
-                })
-            }
-        }
-
         let mut m = LinearWithCompact::new();
         for i in 0..6 {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
@@ -749,7 +708,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let provider = StubSummary;
+        let provider = summarizer("S");
         m.maybe_compact(CompactContext {
             provider: &provider,
             model: "x",
@@ -798,17 +757,6 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_parts_separates_the_summary_from_live_records_after_compaction() {
-        struct StubSummary;
-        #[async_trait]
-        impl Provider for StubSummary {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                Ok(ChatResponse {
-                    message: json!({"role":"assistant","content":"S"}),
-                    usage: None,
-                })
-            }
-        }
-
         let mut m = LinearWithCompact::new();
         m.pin(json!({"role":"system","content":"sys"}))
             .await
@@ -819,7 +767,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let provider = StubSummary;
+        let provider = summarizer("S");
         m.maybe_compact(CompactContext {
             provider: &provider,
             model: "x",
@@ -869,19 +817,12 @@ mod tests {
         // The trait default would unconditionally return Ok; verify
         // LinearWithCompact's override does the same when budget is fine,
         // without calling the provider.
-        struct ShouldNotCall;
-        #[async_trait]
-        impl Provider for ShouldNotCall {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                unreachable!("provider must not be called when not over budget")
-            }
-        }
         let mut m = LinearWithCompact::new();
         m.record(json!({"role":"user","content":"u"}))
             .await
             .unwrap();
 
-        let provider = ShouldNotCall;
+        let provider = NeverCalled("provider must not be called when not over budget");
         m.maybe_compact(CompactContext {
             provider: &provider,
             model: "x",

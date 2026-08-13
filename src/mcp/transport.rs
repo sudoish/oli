@@ -1,7 +1,6 @@
 //! `McpTransport` — the JSON-RPC 2.0 wire used by every MCP server.
-//! Two impls in v1: `StdioTransport` (newline-delimited JSON over a
-//! child process's stdio) and a future `HttpTransport` (streamable-http,
-//! deferred to phase 5b).
+//! Two impls: `StdioTransport` (newline-delimited JSON over a child
+//! process's stdio) and `HttpTransport` (streamable-http).
 //!
 //! Implementations own their own request-id allocation and response
 //! demuxing — the `McpServer` runtime only ever calls `request` and
