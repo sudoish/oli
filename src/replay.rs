@@ -6,10 +6,11 @@ use sha2::{Digest, Sha256};
 
 use crate::error::{AgentError, Result};
 use crate::ledger::{
-    ContextEstimate, ContextRollup, RequestObservation, RequestPurpose, RunIdentity, RunSummary,
+    ContextEstimate, ContextRollup, CostEstimate, CostRollup, LatencyRollup, RequestObservation,
+    RequestPurpose, ResolvedPrice, RunIdentity, RunSummary, TokenRollup,
 };
 
-pub const SCHEMA: &str = "oli.replay/1";
+pub const SCHEMA: &str = "oli.replay/2";
 const FULL_HISTORY_ARM: &str = "full-history";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -47,15 +48,28 @@ pub struct ArmReport {
     pub requests: u32,
     pub strategy_internal_calls: u32,
     pub turns: u32,
-    pub estimated: crate::ledger::ContextRollup,
-    pub first_request: Option<crate::ledger::ContextEstimate>,
+    pub estimated: ContextRollup,
+    pub reported: Option<TokenRollup>,
+    pub cost: ArmCost,
+    pub latency_ms: Option<LatencyRollup>,
+    pub first_request: Option<ContextEstimate>,
     pub materialization_misses: u32,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct ArmCost {
+    /// Offline input-token model for a counterfactual arm.
+    pub modeled: Option<CostRollup>,
+    /// Provider-accounted cost for requests that were actually dispatched.
+    pub measured: Option<CostRollup>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct EstimateDelta {
     pub total: Option<i64>,
     pub first_request: Option<i64>,
+    pub cost: Option<f64>,
+    pub latency_ms: Option<i64>,
 }
 
 pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
@@ -90,6 +104,7 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
                 }
                 runs[run_index].resumed = Some(resumed);
                 runs[run_index].terminated = true;
+                runs[run_index].latency_total_ms = Some(summary.latency_ms.total_ms);
             }
             _ => {}
         }
@@ -139,6 +154,12 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
             .filter_map(|estimate| *estimate)
             .collect();
         let candidate_arm = format!("recorded:{}", captured.identity.strategy);
+        let control_cost = modeled_cost(full_estimates, &materialized_requests);
+        let candidate_cost = measured_cost(&captured.requests);
+        let candidate_reported = reported_rollup(&captured.requests);
+        let candidate_latency = captured
+            .latency_total_ms
+            .map(|total_ms| latency_rollup(&captured.requests, total_ms));
 
         let control = ArmReport {
             arm: FULL_HISTORY_ARM.into(),
@@ -152,6 +173,12 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
                 .max()
                 .unwrap_or(0),
             estimated: rollup(&full_present),
+            reported: None,
+            cost: ArmCost {
+                modeled: Some(control_cost),
+                measured: None,
+            },
+            latency_ms: None,
             first_request: full_estimates.first().and_then(|estimate| *estimate),
             materialization_misses: control_misses,
         };
@@ -171,6 +198,12 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
                 .max()
                 .unwrap_or(0),
             estimated: rollup(&current_estimates),
+            reported: Some(candidate_reported),
+            cost: ArmCost {
+                modeled: None,
+                measured: Some(candidate_cost),
+            },
+            latency_ms: candidate_latency,
             first_request: current_estimates.first().copied(),
             // A summary-bearing estimate is comparable, but the raw
             // transcript cannot reconstruct the summary content that
@@ -187,6 +220,12 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
                 (Some(candidate), Some(control)) => Some(delta(candidate.total, control.total)),
                 _ => None,
             },
+            // Recorded cost is provider-accounted across all billed components,
+            // while control cost models input context only. They are not comparable.
+            cost: None,
+            // The counterfactual arm was never dispatched, so there is no
+            // latency to compare against.
+            latency_ms: None,
         };
         comparisons.push(RunComparison {
             session: captured.identity.session,
@@ -227,6 +266,7 @@ struct CapturedRun {
     requests: Vec<RequestObservation>,
     resumed: Option<bool>,
     terminated: bool,
+    latency_total_ms: Option<u64>,
 }
 
 fn run_index(runs: &mut Vec<CapturedRun>, identity: RunIdentity) -> Result<usize> {
@@ -242,6 +282,7 @@ fn run_index(runs: &mut Vec<CapturedRun>, identity: RunIdentity) -> Result<usize
         requests: Vec::new(),
         resumed: None,
         terminated: false,
+        latency_total_ms: None,
     });
     Ok(runs.len() - 1)
 }
@@ -474,6 +515,136 @@ fn rollup(estimates: &[ContextEstimate]) -> ContextRollup {
     out
 }
 
+fn reported_rollup(observations: &[RequestObservation]) -> TokenRollup {
+    let mut out = TokenRollup::default();
+    for observation in observations {
+        out.fresh_input.add(observation.reported.billed.fresh_input);
+        out.cache_read.add(observation.reported.billed.cache_read);
+        out.cache_write.add(observation.reported.billed.cache_write);
+        out.output.add(observation.reported.billed.output);
+        out.uncached_input.add(observation.reported.uncached_input);
+        out.total_input.add(observation.reported.total_input);
+    }
+    out
+}
+
+fn latency_rollup(observations: &[RequestObservation], total_ms: u64) -> LatencyRollup {
+    let mut out = LatencyRollup {
+        total_ms,
+        ..LatencyRollup::default()
+    };
+    for observation in observations {
+        out.context_build_ms += observation.latency.context_build_ms;
+        out.compaction_ms += observation.latency.compaction_ms;
+        out.model_ms += observation.latency.model_ms;
+        out.tool_ms += observation.latency.tool_ms;
+        match observation.latency.ttft_ms {
+            Some(ttft_ms) => {
+                out.best_ttft_ms = Some(out.best_ttft_ms.map_or(ttft_ms, |best| best.min(ttft_ms)))
+            }
+            None => out.calls_without_ttft += 1,
+        }
+    }
+    out
+}
+
+fn measured_cost(observations: &[RequestObservation]) -> CostRollup {
+    cost_rollup(
+        observations
+            .iter()
+            .map(|observation| (&observation.cost, observation.price.as_ref())),
+    )
+}
+
+fn modeled_cost(
+    estimates: &[Option<ContextEstimate>],
+    observations: &[&RequestObservation],
+) -> CostRollup {
+    let costs: Vec<(CostEstimate, Option<&ResolvedPrice>)> = estimates
+        .iter()
+        .zip(observations)
+        .map(
+            |(estimate, observation)| match (estimate, observation.price.as_ref()) {
+                (Some(estimate), Some(price)) => (
+                    CostEstimate {
+                        // Replay can model the input context, but not cache behavior
+                        // or how many output tokens a request would have produced.
+                        amount: Some(estimate.total as f64 * price.input_per_mtok / 1_000_000.0),
+                        currency: Some(price.currency.clone()),
+                        unknown: Vec::new(),
+                    },
+                    Some(price),
+                ),
+                (None, price) => (
+                    CostEstimate {
+                        amount: None,
+                        currency: price.map(|price| price.currency.clone()),
+                        unknown: vec!["full-history context could not be materialized".into()],
+                    },
+                    price,
+                ),
+                (Some(_), None) => (
+                    CostEstimate {
+                        amount: None,
+                        currency: None,
+                        unknown: vec!["no pricing configured for this model".into()],
+                    },
+                    None,
+                ),
+            },
+        )
+        .collect();
+    cost_rollup(costs.iter().map(|(cost, price)| (cost, *price)))
+}
+
+fn cost_rollup<'a>(
+    costs: impl IntoIterator<Item = (&'a CostEstimate, Option<&'a ResolvedPrice>)>,
+) -> CostRollup {
+    let mut out = CostRollup::default();
+    let mut amount = 0.0;
+    let mut currencies = Vec::new();
+
+    for (cost, price) in costs {
+        match cost.amount {
+            Some(value) => {
+                amount += value;
+                out.priced_calls += 1;
+            }
+            None => out.unpriced_calls += 1,
+        }
+        if let Some(currency) = &cost.currency
+            && !currencies.contains(currency)
+        {
+            currencies.push(currency.clone());
+        }
+        if let Some(price) = price
+            && !out.prices.contains(price)
+        {
+            out.prices.push(price.clone());
+        }
+        for reason in &cost.unknown {
+            if !out.unknown.contains(reason) {
+                out.unknown.push(reason.clone());
+            }
+        }
+    }
+
+    out.price = (out.prices.len() == 1).then(|| out.prices[0].clone());
+    match currencies.as_slice() {
+        [currency] => {
+            out.currency = Some(currency.clone());
+            if out.priced_calls > 0 && out.unpriced_calls == 0 {
+                out.amount = Some(amount);
+            }
+        }
+        [] => {}
+        _ => out
+            .unknown
+            .push("multiple currencies used across run".into()),
+    }
+    out
+}
+
 fn delta(candidate: u64, control: u64) -> i64 {
     i128::from(candidate)
         .saturating_sub(i128::from(control))
@@ -518,6 +689,122 @@ mod tests {
         assert_eq!(candidate.strategy_internal_calls, 1);
         assert_eq!(candidate.materialization_misses, 1);
         assert!(run.comparisons[0].candidate_minus_control.total.unwrap() < 0);
+    }
+
+    #[test]
+    fn recorded_measurements_stay_distinct_from_counterfactual_modeled_cost() {
+        let mut value: Value = serde_json::from_slice(&fixture("fresh")).unwrap();
+        let request = value["ledger"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|record| record["kind"] == "request")
+            .unwrap();
+        request["price"] = json!({
+            "matched": "baseline-model",
+            "effective": "2026-08-01",
+            "currency": "USD",
+            "input_per_mtok": 2.0,
+            "output_per_mtok": 5.0,
+            "cache_read_per_mtok": 0.2,
+            "cache_write_per_mtok": 2.5
+        });
+        request["cost"] = json!({
+            "amount": 0.00033,
+            "currency": "USD",
+            "unknown": []
+        });
+        request["latency"] = json!({
+            "context_build_ms": 3,
+            "compaction_ms": 1,
+            "ttft_ms": 2,
+            "model_ms": 7,
+            "tool_ms": 11
+        });
+        value["ledger"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|record| record["kind"] == "summary")
+            .unwrap()["latency_ms"]["total_ms"] = json!(25);
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let run = &report.runs[0];
+        let control = &run.arms[0];
+        let candidate = &run.arms[1];
+
+        assert!(control.reported.is_none());
+        assert!(control.cost.measured.is_none());
+        assert!((control.cost.modeled.as_ref().unwrap().amount.unwrap() - 0.000134).abs() < 1e-12);
+        assert!(control.latency_ms.is_none());
+
+        assert_eq!(
+            candidate.reported.as_ref().unwrap().total_input.tokens,
+            Some(120)
+        );
+        assert!(candidate.cost.modeled.is_none());
+        assert_eq!(
+            candidate.cost.measured.as_ref().unwrap().amount,
+            Some(0.00033)
+        );
+        assert_eq!(
+            candidate.latency_ms,
+            Some(crate::ledger::LatencyRollup {
+                context_build_ms: 3,
+                compaction_ms: 1,
+                model_ms: 7,
+                tool_ms: 11,
+                total_ms: 25,
+                best_ttft_ms: Some(2),
+                calls_without_ttft: 0,
+            })
+        );
+
+        let delta = &run.comparisons[0].candidate_minus_control;
+        assert!(delta.cost.is_none());
+        assert!(delta.latency_ms.is_none());
+    }
+
+    #[test]
+    fn one_unknown_request_makes_the_whole_arm_cost_and_delta_unknown() {
+        let mut value: Value = serde_json::from_slice(&fixture("compacted")).unwrap();
+        for request in value["ledger"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .filter(|record| record["kind"] == "request" && record["purpose"] == "agent")
+        {
+            request["price"] = json!({
+                "matched": "baseline-model",
+                "effective": "2026-08-01",
+                "currency": "USD",
+                "input_per_mtok": 2.0,
+                "output_per_mtok": 5.0,
+                "cache_read_per_mtok": 0.2,
+                "cache_write_per_mtok": 2.5
+            });
+            request["cost"] = json!({
+                "amount": 0.01,
+                "currency": "USD",
+                "unknown": []
+            });
+        }
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let run = &report.runs[0];
+        let control = run.arms[0].cost.modeled.as_ref().unwrap();
+        let candidate = run.arms[1].cost.measured.as_ref().unwrap();
+
+        assert!(control.amount.is_some());
+        assert_eq!(control.unpriced_calls, 0);
+        assert_eq!(candidate.amount, None);
+        assert_eq!(candidate.priced_calls, 4);
+        assert_eq!(candidate.unpriced_calls, 1);
+        assert_eq!(
+            candidate.unknown,
+            vec!["no pricing configured for this model"]
+        );
+        assert!(run.comparisons[0].candidate_minus_control.cost.is_none());
     }
 
     #[test]

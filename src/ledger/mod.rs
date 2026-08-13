@@ -289,7 +289,7 @@ pub struct Rollup {
 }
 
 impl Rollup {
-    fn add(&mut self, v: Option<u64>) {
+    pub(crate) fn add(&mut self, v: Option<u64>) {
         match v {
             Some(n) => {
                 self.tokens = Some(self.tokens.unwrap_or(0) + n);
