@@ -44,6 +44,7 @@
         "total_input": 1000,
         "uncached_input": 1000
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
@@ -95,12 +96,13 @@
         "total_input": 2000,
         "uncached_input": 2000
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
       "strategy_version": 1,
-      "turn": 1
+      "turn": 2
     },
     {
       "call": 3,
@@ -146,15 +148,68 @@
         "total_input": 7000,
         "uncached_input": 7000
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
       "strategy_version": 1,
-      "turn": 1
+      "turn": 3
     },
     {
       "call": 4,
+      "config_hash": "27d40e16e9d59337",
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "unknown": [
+          "no pricing configured for this model"
+        ]
+      },
+      "estimated": {
+        "pinned": 0,
+        "recent": 107,
+        "summary": 0,
+        "tool_schemas": 0,
+        "total": 107
+      },
+      "kind": "request",
+      "latency": {
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "ttft_ms": null
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "reported": {
+        "accounting": "cache_inclusive",
+        "billed": {
+          "cache_read": null,
+          "cache_write": null,
+          "fresh_input": null,
+          "output": null
+        },
+        "cache_read": null,
+        "cache_write": null,
+        "completion": null,
+        "prompt": null,
+        "reasoning": null,
+        "total": null,
+        "total_input": null,
+        "uncached_input": null
+      },
+      "run": "baseline-run-1",
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "started_at_ms": 0,
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "turn": 4
+    },
+    {
+      "call": 5,
       "config_hash": "27d40e16e9d59337",
       "cost": {
         "amount": null,
@@ -197,23 +252,24 @@
         "total_input": 3000,
         "uncached_input": 2488
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
       "strategy_version": 1,
-      "turn": 1
+      "turn": 4
     },
     {
       "accounting": "cache_inclusive",
-      "calls": 4,
+      "calls": 5,
       "config_hash": "27d40e16e9d59337",
       "context": {
         "pinned": 68,
-        "recent": 149,
+        "recent": 256,
         "summary": 27,
         "tool_schemas": 136,
-        "total": 380
+        "total": 487
       },
       "cost": {
         "amount": null,
@@ -223,7 +279,7 @@
         "unknown": [
           "no pricing configured for this model"
         ],
-        "unpriced_calls": 4
+        "unpriced_calls": 5
       },
       "first_request": {
         "call": 1,
@@ -256,7 +312,7 @@
       "kind": "summary",
       "latency_ms": {
         "best_ttft_ms": 0,
-        "calls_without_ttft": 0,
+        "calls_without_ttft": 1,
         "compaction_ms": 0,
         "context_build_ms": 0,
         "model_ms": 0,
@@ -266,6 +322,7 @@
       "model": "baseline-model",
       "provider": "baseline-provider",
       "resumed": false,
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "strategy": "linear-with-compact",
@@ -274,35 +331,35 @@
         "cache_read": {
           "reported_calls": 4,
           "tokens": 512,
-          "unreported_calls": 0
+          "unreported_calls": 1
         },
         "cache_write": {
           "reported_calls": 4,
           "tokens": 0,
-          "unreported_calls": 0
+          "unreported_calls": 1
         },
         "fresh_input": {
           "reported_calls": 4,
           "tokens": 12488,
-          "unreported_calls": 0
+          "unreported_calls": 1
         },
         "output": {
           "reported_calls": 4,
           "tokens": 40,
-          "unreported_calls": 0
+          "unreported_calls": 1
         },
         "total_input": {
           "reported_calls": 4,
           "tokens": 13000,
-          "unreported_calls": 0
+          "unreported_calls": 1
         },
         "uncached_input": {
           "reported_calls": 4,
           "tokens": 12488,
-          "unreported_calls": 0
+          "unreported_calls": 1
         }
       },
-      "turns": 1
+      "turns": 4
     }
   ],
   "transcript": [

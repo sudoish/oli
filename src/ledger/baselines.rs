@@ -116,9 +116,14 @@ const MODEL: &str = "baseline-model";
 const PROVIDER: &str = "baseline-provider";
 const SESSION: &str = "baseline";
 
-fn identity() -> RunIdentity {
+fn identity(resumed: bool) -> RunIdentity {
     RunIdentity {
         session: SESSION.into(),
+        run: if resumed {
+            "baseline-run-2".into()
+        } else {
+            "baseline-run-1".into()
+        },
         provider: PROVIDER.into(),
         model: MODEL.into(),
         strategy: crate::bootstrap::MEMORY_STRATEGY.into(),
@@ -128,7 +133,7 @@ fn identity() -> RunIdentity {
 }
 
 fn ledger_for(dir: &TempDir, resumed: bool) -> Ledger {
-    Ledger::new(identity(), PromptAccounting::CacheInclusive)
+    Ledger::new(identity(resumed), PromptAccounting::CacheInclusive)
         .with_sink(ledger_path(dir.path(), SESSION))
         .resumed(resumed)
 }
@@ -154,7 +159,7 @@ async fn run_in(
             "provider": PROVIDER,
             "model": MODEL,
             "strategy": crate::bootstrap::MEMORY_STRATEGY,
-            "config_hash": identity().config_hash,
+            "config_hash": identity(resumed).config_hash,
         }))
         .await?;
 
@@ -261,7 +266,16 @@ async fn a_long_session_baseline_holds() {
         prompts.push("keep going");
     }
     run_in(&dir, script, &prompts, false).await.unwrap();
-    assert_fixture("long", &collect(&dir));
+    let fixture = collect(&dir);
+    let turns: Vec<u64> = fixture["ledger"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|record| record["kind"] == "request")
+        .map(|record| record["turn"].as_u64().unwrap())
+        .collect();
+    assert_eq!(turns, (1..=8).collect::<Vec<_>>());
+    assert_fixture("long", &fixture);
 }
 
 #[tokio::test]
@@ -330,5 +344,16 @@ async fn a_resumed_session_baseline_holds() {
         .clone();
     assert_eq!(resumed_summary["resumed"], true);
     assert_eq!(resumed_summary["first_request"]["uncached_input"], 128);
+    let runs: std::collections::HashSet<&str> = fixture["ledger"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|record| record["run"].as_str())
+        .collect();
+    assert_eq!(
+        runs.len(),
+        2,
+        "each append-only ledger run needs a unique id"
+    );
     assert_fixture("resumed", &fixture);
 }

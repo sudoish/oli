@@ -250,7 +250,9 @@ estimate broken down by context category, what the provider reported,
 latency, and cost — is appended to `~/.config/oli/sessions/<id>.ledger.jsonl`
 beside the transcript, and `oli run --output json` carries the run's
 aggregate under `accounting`. Everything stays on disk; nothing is
-transmitted.
+transmitted. Every request and summary carries a run id, so repeated
+resumes remain unambiguous inside the append-only file; normal and failed
+runs both end with a summary record.
 
 ### Signing in with a ChatGPT subscription
 

@@ -185,8 +185,11 @@ impl Memory for EmbeddingRagMemory {
 
     /// RAG keeps the full transcript indexed; growth is bounded at
     /// snapshot time, not via summarization. This is a no-op.
-    async fn maybe_compact(&mut self, _ctx: CompactContext<'_>) -> Result<()> {
-        Ok(())
+    async fn maybe_compact(
+        &mut self,
+        _ctx: CompactContext<'_>,
+    ) -> Result<Option<super::CompactionReport>> {
+        Ok(None)
     }
 }
 

@@ -505,6 +505,17 @@ fn provider_failure_writes_only_stderr_and_exits_nonzero() {
     assert_eq!(out.stdout, "");
     assert!(out.stderr.contains("provider error"), "{}", out.stderr);
     assert!(out.stderr.contains("boom from provider"), "{}", out.stderr);
+
+    let ledger = std::fs::read_dir(sandbox.sessions_dir())
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.to_string_lossy().ends_with(".ledger.jsonl"))
+        .expect("failed runs still create a terminated ledger");
+    let records: Vec<Value> = transcript(&ledger)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.last().unwrap()["kind"], "summary");
 }
 
 #[test]

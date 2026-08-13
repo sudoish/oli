@@ -44,6 +44,7 @@
         "total_input": 200,
         "uncached_input": 200
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
@@ -95,6 +96,7 @@
         "total_input": 240,
         "uncached_input": 112
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
@@ -146,12 +148,13 @@
         "total_input": 240,
         "uncached_input": 240
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
       "strategy_version": 1,
-      "turn": 1
+      "turn": 3
     },
     {
       "call": 4,
@@ -197,12 +200,13 @@
         "total_input": 280,
         "uncached_input": 152
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
       "strategy_version": 1,
-      "turn": 2
+      "turn": 4
     },
     {
       "call": 5,
@@ -248,12 +252,13 @@
         "total_input": 280,
         "uncached_input": 280
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
       "strategy_version": 1,
-      "turn": 1
+      "turn": 5
     },
     {
       "call": 6,
@@ -299,12 +304,13 @@
         "total_input": 320,
         "uncached_input": 192
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
       "strategy_version": 1,
-      "turn": 2
+      "turn": 6
     },
     {
       "call": 7,
@@ -350,12 +356,13 @@
         "total_input": 320,
         "uncached_input": 320
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
       "strategy_version": 1,
-      "turn": 1
+      "turn": 7
     },
     {
       "call": 8,
@@ -401,12 +408,13 @@
         "total_input": 360,
         "uncached_input": 232
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
       "strategy_version": 1,
-      "turn": 2
+      "turn": 8
     },
     {
       "accounting": "cache_inclusive",
@@ -470,6 +478,7 @@
       "model": "baseline-model",
       "provider": "baseline-provider",
       "resumed": false,
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "strategy": "linear-with-compact",
@@ -506,7 +515,7 @@
           "unreported_calls": 0
         }
       },
-      "turns": 2
+      "turns": 8
     }
   ],
   "transcript": [

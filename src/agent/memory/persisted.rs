@@ -230,7 +230,10 @@ impl Memory for PersistedMemory {
         self.inner.clear().await
     }
 
-    async fn maybe_compact(&mut self, ctx: CompactContext<'_>) -> Result<()> {
+    async fn maybe_compact(
+        &mut self,
+        ctx: CompactContext<'_>,
+    ) -> Result<Option<super::CompactionReport>> {
         // Compaction is internal restructuring: it doesn't change the
         // logical record sequence the transcript captures. Replay will
         // see the originals and let a future session decide whether to

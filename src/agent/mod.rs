@@ -28,7 +28,7 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::error::Result;
 use crate::hooks::{HookRegistry, PreToolDecision};
-use crate::ledger::{Latency, Ledger, as_ms, estimate_context};
+use crate::ledger::{Latency, Ledger, as_ms, estimate_context, now_ms};
 use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
 use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage, UsageTotals};
 use crate::tools::{Registry, ToolContext};
@@ -60,7 +60,7 @@ pub mod memory;
 pub mod tool_parse;
 
 pub use caps::{ModelCaps, caps_for, caps_for_with_overrides};
-pub use memory::{CompactContext, LinearWithCompact, Memory};
+pub use memory::{CompactContext, CompactionReport, LinearWithCompact, Memory};
 
 pub struct Agent {
     pub provider: Box<dyn Provider>,
@@ -212,6 +212,27 @@ impl Agent {
         }
     }
 
+    /// Re-resolve the ledger inputs that can change in a live REPL.
+    /// Call after swapping provider/model or installing a reloaded config.
+    pub fn refresh_ledger_accounting(&mut self) {
+        let Some(cfg) = self.cfg.clone() else {
+            return;
+        };
+        let profile = crate::bootstrap::run_accounting_profile(
+            cfg.as_ref(),
+            &self.provider_name,
+            &self.model,
+            self.max_turns.unwrap_or(0),
+        );
+        self.ledger.reconfigure(
+            self.provider_name.clone(),
+            self.model.clone(),
+            profile.config_hash,
+            profile.accounting,
+            profile.price,
+        );
+    }
+
     /// Override the default policy. Pairs with `with_approver` for
     /// REPL-vs-script approval ergonomics.
     pub fn with_policy(mut self, policy: Box<dyn Policy>) -> Self {
@@ -311,14 +332,36 @@ impl Agent {
     /// returns — strategies that decide there's nothing to compact (too
     /// few messages) report success without changing state.
     pub async fn force_compact(&mut self) -> Result<()> {
-        self.memory
+        let report = self
+            .memory
             .maybe_compact(CompactContext {
                 provider: self.provider.as_ref(),
                 model: &self.model,
                 target_tokens: 0,
                 current_tokens: usize::MAX,
             })
-            .await
+            .await?;
+        if let Some(report) = report {
+            let turn = self.ledger.summary().turns.saturating_add(1);
+            self.record_compaction(turn, report).await;
+        }
+        Ok(())
+    }
+
+    async fn record_compaction(&mut self, turn: u32, report: CompactionReport) {
+        self.session_usage.add(report.usage);
+        if let Some(usage) = report.usage {
+            self.last_usage = Some(usage);
+        }
+        self.ledger
+            .record_started(
+                report.started_at_ms,
+                turn,
+                report.estimated,
+                report.usage,
+                report.latency,
+            )
+            .await;
     }
 
     /// Run a single tool call through the policy gate, then through the
@@ -370,10 +413,11 @@ impl Agent {
             .record(json!({ "role": "user", "content": prompt }))
             .await?;
 
-        let mut turn = 0usize;
+        let first_turn = self.ledger.next_turn();
+        let mut invocation_turn = 0usize;
         loop {
             if let Some(cap) = self.max_turns {
-                if turn >= cap {
+                if invocation_turn >= cap {
                     let msg = format!("(max_turns reached: {})", cap);
                     let msg = self.hooks.dispatch_stop(msg).await;
                     return Ok(RunOutcome::MaxTurnsExhausted {
@@ -382,7 +426,8 @@ impl Agent {
                     });
                 }
             }
-            turn += 1;
+            let turn = first_turn.saturating_add(invocation_turn as u32);
+            invocation_turn += 1;
 
             let build_started = Instant::now();
             // Sync MCP tools that have notified `tools/list_changed`
@@ -407,7 +452,8 @@ impl Agent {
                 .map(|p| p as usize)
                 .unwrap_or(0);
             let compact_started = Instant::now();
-            self.memory
+            let compaction = self
+                .memory
                 .maybe_compact(CompactContext {
                     provider: self.provider.as_ref(),
                     model: &self.model,
@@ -416,6 +462,9 @@ impl Agent {
                 })
                 .await?;
             let compaction_ms = as_ms(compact_started.elapsed());
+            if let Some(report) = compaction {
+                self.record_compaction(turn, report).await;
+            }
 
             let parts = self.memory.snapshot_parts().await;
             let tool_schemas = self.tools.openai_schemas();
@@ -431,6 +480,7 @@ impl Agent {
                 ..Latency::default()
             };
 
+            let request_started_at_ms = now_ms();
             let model_started = Instant::now();
             // Time to first token is only observable from the stream,
             // and only when the turn produces text at all — a pure
@@ -478,7 +528,7 @@ impl Agent {
 
             if tool_calls.is_empty() {
                 self.ledger
-                    .record(turn as u32, estimated, resp.usage, latency)
+                    .record_started(request_started_at_ms, turn, estimated, resp.usage, latency)
                     .await;
                 let content = resp
                     .message
@@ -533,7 +583,7 @@ impl Agent {
             }
             latency.tool_ms = as_ms(tools_started.elapsed());
             self.ledger
-                .record(turn as u32, estimated, resp.usage, latency)
+                .record_started(request_started_at_ms, turn, estimated, resp.usage, latency)
                 .await;
         }
     }
@@ -1252,9 +1302,12 @@ mod tests {
             async fn clear(&mut self) -> Result<()> {
                 self.inner.clear().await
             }
-            async fn maybe_compact(&mut self, ctx: CompactContext<'_>) -> Result<()> {
+            async fn maybe_compact(
+                &mut self,
+                ctx: CompactContext<'_>,
+            ) -> Result<Option<memory::CompactionReport>> {
                 self.observed.lock().unwrap().push(ctx.current_tokens);
-                Ok(())
+                Ok(None)
             }
         }
 

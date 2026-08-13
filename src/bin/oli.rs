@@ -741,8 +741,9 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                 .with_approver(Box::new(AlwaysDeny))
                 .pin_system_prompt(system_prompt)
                 .await?;
-            let outcome = agent.run(&prompt).await?;
+            let outcome = agent.run(&prompt).await;
             let accounting = agent.ledger.finish().await;
+            let outcome = outcome?;
             // No call reported anything at all — say nothing rather than
             // emit a shape full of nulls.
             let usage = agent

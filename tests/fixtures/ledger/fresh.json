@@ -44,6 +44,7 @@
         "total_input": 120,
         "uncached_input": 120
       },
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "started_at_ms": 0,
@@ -113,6 +114,7 @@
       "model": "baseline-model",
       "provider": "baseline-provider",
       "resumed": false,
+      "run": "baseline-run-1",
       "schema": "oli.ledger/1",
       "session": "baseline",
       "strategy": "linear-with-compact",

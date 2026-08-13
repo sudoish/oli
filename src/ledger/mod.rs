@@ -181,6 +181,7 @@ pub struct RequestObservation {
     pub kind: String,
     pub schema: String,
     pub session: String,
+    pub run: String,
     /// Model turn within the run that issued it, 1-based.
     pub turn: u32,
     /// Provider call within this run, 1-based.
@@ -197,10 +198,15 @@ pub struct RequestObservation {
     pub cost: CostEstimate,
 }
 
-/// Identity every observation in a run carries. Fixed for the run.
+/// Identity carried by run summaries and used as the active template for
+/// new observations. Session/run/strategy stay fixed; provider, model,
+/// accounting inputs, and config hash can refresh after a live REPL swap.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct RunIdentity {
     pub session: String,
+    /// Unique invocation within the append-only session ledger. Call and
+    /// turn counters restart for each run, so consumers join on this id.
+    pub run: String,
     pub provider: String,
     pub model: String,
     /// Memory strategy in force, by name.
@@ -393,11 +399,54 @@ impl Ledger {
         self.path.as_deref()
     }
 
+    /// Next model turn across repeated `Agent::run` calls in this run.
+    pub fn next_turn(&self) -> u32 {
+        self.observations
+            .iter()
+            .map(|observation| observation.turn)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+    }
+
+    /// Refresh the identity and billing inputs used by subsequent
+    /// observations after an interactive provider, model, or config
+    /// swap. Existing observations retain the values active when they
+    /// were sent.
+    pub fn reconfigure(
+        &mut self,
+        provider: String,
+        model: String,
+        config_hash: String,
+        accounting: PromptAccounting,
+        price: Option<ResolvedPrice>,
+    ) {
+        self.identity.provider = provider;
+        self.identity.model = model;
+        self.identity.config_hash = config_hash;
+        self.accounting = accounting;
+        self.price = price;
+    }
+
     /// Account for one provider call and append it to the sink. Write
     /// failures land in diagnostics: losing a measurement must never
     /// take down the run it was measuring.
     pub async fn record(
         &mut self,
+        turn: u32,
+        estimated: ContextEstimate,
+        usage: Option<Usage>,
+        latency: Latency,
+    ) {
+        self.record_started(now_ms(), turn, estimated, usage, latency)
+            .await;
+    }
+
+    /// Account for a provider call whose dispatch timestamp was captured
+    /// by the caller immediately before sending the request.
+    pub async fn record_started(
+        &mut self,
+        started_at_ms: u64,
         turn: u32,
         estimated: ContextEstimate,
         usage: Option<Usage>,
@@ -409,6 +458,7 @@ impl Ledger {
             kind: "request".into(),
             schema: SCHEMA.into(),
             session: self.identity.session.clone(),
+            run: self.identity.run.clone(),
             turn,
             call: self.observations.len() as u32 + 1,
             provider: self.identity.provider.clone(),
@@ -416,7 +466,7 @@ impl Ledger {
             strategy: self.identity.strategy.clone(),
             strategy_version: self.identity.strategy_version,
             config_hash: self.identity.config_hash.clone(),
-            started_at_ms: now_ms(),
+            started_at_ms,
             estimated,
             reported,
             latency,
@@ -547,7 +597,7 @@ async fn append_line(path: &std::path::Path, line: &str) -> std::io::Result<()> 
     f.flush().await
 }
 
-fn now_ms() -> u64 {
+pub fn now_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
@@ -689,6 +739,7 @@ mod tests {
         let mut ledger = Ledger::new(
             RunIdentity {
                 session: "s".into(),
+                run: "r".into(),
                 provider: "p".into(),
                 model: "m".into(),
                 strategy: "linear-with-compact".into(),
@@ -812,6 +863,7 @@ mod tests {
         let mut ledger = Ledger::new(
             RunIdentity {
                 session: "s1".into(),
+                run: "r1".into(),
                 provider: "test".into(),
                 model: "test-model".into(),
                 strategy: "linear-with-compact".into(),
@@ -861,6 +913,62 @@ mod tests {
         assert_eq!(first["kind"], "request");
         assert_eq!(second["kind"], "summary");
         assert!(path.to_string_lossy().ends_with(".ledger.jsonl"));
+    }
+
+    #[tokio::test]
+    async fn a_caller_supplied_dispatch_timestamp_is_preserved_exactly() {
+        let mut ledger = Ledger::new(RunIdentity::default(), PromptAccounting::Unknown);
+        ledger
+            .record_started(
+                123_456,
+                1,
+                ContextEstimate::default(),
+                None,
+                Latency::default(),
+            )
+            .await;
+        assert_eq!(ledger.observations()[0].started_at_ms, 123_456);
+    }
+
+    #[tokio::test]
+    async fn reconfiguration_changes_future_observations_without_rewriting_history() {
+        let mut ledger = Ledger::new(
+            RunIdentity {
+                provider: "old".into(),
+                model: "old-model".into(),
+                config_hash: "old-hash".into(),
+                ..RunIdentity::default()
+            },
+            PromptAccounting::CacheExclusive,
+        );
+        ledger
+            .record(1, ContextEstimate::default(), None, Latency::default())
+            .await;
+        ledger.reconfigure(
+            "new".into(),
+            "new-model".into(),
+            "new-hash".into(),
+            PromptAccounting::CacheInclusive,
+            None,
+        );
+        ledger
+            .record(2, ContextEstimate::default(), None, Latency::default())
+            .await;
+
+        let observations = ledger.observations();
+        assert_eq!(observations[0].provider, "old");
+        assert_eq!(observations[0].config_hash, "old-hash");
+        assert_eq!(
+            observations[0].reported.accounting,
+            PromptAccounting::CacheExclusive
+        );
+        assert_eq!(observations[1].provider, "new");
+        assert_eq!(observations[1].model, "new-model");
+        assert_eq!(observations[1].config_hash, "new-hash");
+        assert_eq!(
+            observations[1].reported.accounting,
+            PromptAccounting::CacheInclusive
+        );
     }
 
     #[test]

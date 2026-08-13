@@ -272,7 +272,7 @@ fn accounting_lines(agent: &crate::agent::Agent) -> Vec<String> {
     }
     let mut lines = vec![
         format!(
-            "context (estimated): {} pinned + {} tool schemas + {} summary + {} recent = {} tokens",
+            "context (estimated, since process start): {} pinned + {} tool schemas + {} summary + {} recent = {} tokens",
             s.context.pinned,
             s.context.tool_schemas,
             s.context.summary,
@@ -572,6 +572,7 @@ impl SlashCommand for Provider {
         agent.model = new_model.clone();
         agent.caps = agent.resolve_caps(&new_model);
         agent.last_usage = None;
+        agent.refresh_ledger_accounting();
 
         SlashOutcome::Continue(Some(format!(
             "switched to provider {} (model {})",
@@ -614,8 +615,9 @@ impl SlashCommand for Model {
         // Swap path. Caps are recomputed from the new model id; the same
         // provider client serves it.
         agent.model = arg.to_string();
-        agent.caps = crate::agent::caps_for(arg);
+        agent.caps = agent.resolve_caps(arg);
         agent.last_usage = None;
+        agent.refresh_ledger_accounting();
         SlashOutcome::Continue(Some(format!("model switched to {}", arg)))
     }
 }
@@ -1037,6 +1039,7 @@ async fn reload_config_at(agent: &mut Agent, cwd: &std::path::Path) -> SlashOutc
     // last_usage doesn't survive a swap — the prior usage was
     // measured against a different model/provider.
     agent.last_usage = None;
+    agent.refresh_ledger_accounting();
 
     let summary = if changes.is_empty() {
         "config reloaded (no provider/model change)".to_string()

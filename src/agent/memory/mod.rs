@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use serde_json::Value;
 
 use crate::error::Result;
-use crate::providers::Provider;
+use crate::ledger::{ContextEstimate, Latency};
+use crate::providers::{Provider, Usage};
 
 pub mod linear;
 pub mod persisted;
@@ -80,8 +81,11 @@ pub trait Memory: Send + Sync {
     /// Strategies that don't compact return immediately. Strategies that
     /// do may run an LLM call against `ctx.provider` to summarize older
     /// turns.
-    async fn maybe_compact(&mut self, _ctx: CompactContext<'_>) -> Result<()> {
-        Ok(())
+    async fn maybe_compact(
+        &mut self,
+        _ctx: CompactContext<'_>,
+    ) -> Result<Option<CompactionReport>> {
+        Ok(None)
     }
 }
 
@@ -120,4 +124,14 @@ pub struct CompactContext<'a> {
     /// Live token count of the most recent snapshot, supplied by the
     /// agent's token tracker.
     pub current_tokens: usize,
+}
+
+/// Accounting returned when compaction itself dispatches a provider
+/// request. The agent records this as a first-class request so summary
+/// generation cannot disappear from token, cost, or latency totals.
+pub struct CompactionReport {
+    pub started_at_ms: u64,
+    pub estimated: ContextEstimate,
+    pub usage: Option<Usage>,
+    pub latency: Latency,
 }

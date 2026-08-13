@@ -15,13 +15,16 @@
 //! verbatim, we drop the live message window and keep the summary —
 //! best-effort, but predictable.
 
+use std::time::Instant;
+
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
 use crate::error::Result;
+use crate::ledger::{ContextEstimate, Latency, as_ms, estimate::estimate_messages, now_ms};
 use crate::providers::ChatRequest;
 
-use super::{CompactContext, ContextParts, Memory};
+use super::{CompactContext, CompactionReport, ContextParts, Memory};
 
 const MIN_MESSAGES_TO_COMPACT: usize = 4;
 
@@ -115,12 +118,12 @@ impl Memory for LinearWithCompact {
         Ok(())
     }
 
-    async fn maybe_compact(&mut self, ctx: CompactContext<'_>) -> Result<()> {
+    async fn maybe_compact(&mut self, ctx: CompactContext<'_>) -> Result<Option<CompactionReport>> {
         if ctx.current_tokens <= ctx.target_tokens {
-            return Ok(());
+            return Ok(None);
         }
         if self.messages.len() < MIN_MESSAGES_TO_COMPACT {
-            return Ok(());
+            return Ok(None);
         }
 
         // Aim to drain roughly the older half, but snap forward to the
@@ -132,7 +135,7 @@ impl Memory for LinearWithCompact {
             cut += 1;
         }
         if cut == 0 || cut >= self.messages.len() {
-            return Ok(());
+            return Ok(None);
         }
 
         let older: Vec<Value> = self.messages.drain(..cut).collect();
@@ -171,7 +174,17 @@ impl Memory for LinearWithCompact {
             tools: vec![],
         };
 
+        let prompt_tokens = estimate_messages(&req.messages);
+        let estimated = ContextEstimate {
+            recent: prompt_tokens,
+            total: prompt_tokens,
+            ..ContextEstimate::default()
+        };
+        let started_at_ms = now_ms();
+        let model_started = Instant::now();
         let resp = ctx.provider.chat(req).await?;
+        let model_ms = as_ms(model_started.elapsed());
+        let usage = resp.usage;
         let summary_text = resp
             .message
             .get("content")
@@ -184,7 +197,15 @@ impl Memory for LinearWithCompact {
             "content": format!("[Earlier conversation summary]\n{}", summary_text),
         }));
 
-        Ok(())
+        Ok(Some(CompactionReport {
+            started_at_ms,
+            estimated,
+            usage,
+            latency: Latency {
+                model_ms,
+                ..Latency::default()
+            },
+        }))
     }
 }
 
@@ -362,14 +383,18 @@ mod tests {
                 .unwrap();
         }
         let provider = StubSummary;
-        m.maybe_compact(CompactContext {
-            provider: &provider,
-            model: "x",
-            target_tokens: 10,
-            current_tokens: 1_000,
-        })
-        .await
-        .unwrap();
+        let report = m
+            .maybe_compact(CompactContext {
+                provider: &provider,
+                model: "x",
+                target_tokens: 10,
+                current_tokens: 1_000,
+            })
+            .await
+            .unwrap()
+            .expect("a provider-backed compaction must report its accounting");
+        assert!(report.estimated.total > 0);
+        assert_eq!(report.estimated.total, report.estimated.recent);
 
         // record_count stays at 6 — compaction is not visible at the
         // logical-position level, only at the physical one.

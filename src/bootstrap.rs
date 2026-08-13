@@ -179,6 +179,86 @@ pub async fn build_memory(
 pub const MEMORY_STRATEGY: &str = "linear-with-compact";
 pub const MEMORY_STRATEGY_VERSION: u32 = 1;
 
+pub struct RunAccountingProfile {
+    pub settings: serde_json::Value,
+    pub provider_kind: String,
+    pub config_hash: String,
+    pub accounting: PromptAccounting,
+    pub price: Option<crate::ledger::ResolvedPrice>,
+}
+
+/// Resolve every runtime input that affects the identity or cost of a
+/// request. The REPL reuses this after live provider/model/config swaps,
+/// keeping observations comparable to those built at startup.
+pub fn run_accounting_profile(
+    cfg: &Config,
+    provider_name: &str,
+    model: &str,
+    max_turns: usize,
+) -> RunAccountingProfile {
+    let ctx_window = crate::agent::caps_for_with_overrides(model, &cfg.caps).ctx_window;
+    let provider_kind = cfg
+        .provider(provider_name)
+        .map(|p| p.kind.clone())
+        .unwrap_or_default();
+    let price = pricing::resolve(&cfg.pricing, model, pricing::today());
+    let settings = serde_json::json!({
+        "provider": provider_name,
+        "provider_kind": provider_kind,
+        "model": model,
+        "strategy": MEMORY_STRATEGY,
+        "strategy_version": MEMORY_STRATEGY_VERSION,
+        "max_turns": max_turns,
+        "policy_mode": format!("{:?}", cfg.policy.mode),
+        "ctx_window": ctx_window,
+        "pricing": price,
+    });
+    let config_hash = ledger::config_hash(&settings);
+    RunAccountingProfile {
+        settings,
+        accounting: PromptAccounting::for_provider_kind(&provider_kind),
+        provider_kind,
+        config_hash,
+        price,
+    }
+}
+
+#[cfg(test)]
+mod accounting_tests {
+    use super::*;
+
+    #[test]
+    fn resolved_pricing_is_part_of_the_comparability_hash() {
+        let mut cfg = Config::env_default();
+        cfg.pricing.push(crate::ledger::PriceEntry {
+            model: "model".into(),
+            effective: None,
+            currency: "USD".into(),
+            input_per_mtok: 1.0,
+            output_per_mtok: 2.0,
+            cache_read_per_mtok: Some(0.1),
+            cache_write_per_mtok: Some(1.25),
+        });
+        let before = run_accounting_profile(&cfg, "provider", "model-v1", 40);
+        cfg.pricing[0].input_per_mtok = 3.0;
+        let after = run_accounting_profile(&cfg, "provider", "model-v1", 40);
+
+        assert_ne!(before.config_hash, after.config_hash);
+        assert_ne!(before.settings["pricing"], after.settings["pricing"]);
+    }
+
+    #[test]
+    fn provider_accounting_convention_is_part_of_the_comparability_hash() {
+        let mut cfg = Config::env_default();
+        let before = run_accounting_profile(&cfg, "openrouter", "model-v1", 40);
+        cfg.providers.get_mut("openrouter").unwrap().kind = "anthropic".into();
+        let after = run_accounting_profile(&cfg, "openrouter", "model-v1", 40);
+
+        assert_ne!(before.config_hash, after.config_hash);
+        assert_ne!(before.accounting, after.accounting);
+    }
+}
+
 /// Session identity plus the accounting ledger for one run.
 ///
 /// The `meta` value is what lands in the transcript's `meta` op; the
@@ -192,37 +272,21 @@ pub fn build_run_accounting(
     is_fresh: bool,
     max_turns: usize,
 ) -> (serde_json::Value, Ledger) {
-    let ctx_window = crate::agent::caps_for_with_overrides(model, &cfg.caps).ctx_window;
-    let settings = serde_json::json!({
-        "provider": provider_name,
-        "model": model,
-        "strategy": MEMORY_STRATEGY,
-        "strategy_version": MEMORY_STRATEGY_VERSION,
-        "max_turns": max_turns,
-        "policy_mode": format!("{:?}", cfg.policy.mode),
-        "ctx_window": ctx_window,
-    });
-    let config_hash = ledger::config_hash(&settings);
-
-    let kind = cfg
-        .provider(provider_name)
-        .map(|p| p.kind.clone())
-        .unwrap_or_default();
-    let mut meta = settings.clone();
-    meta["config_hash"] = serde_json::Value::String(config_hash.clone());
-    meta["provider_kind"] = serde_json::Value::String(kind.clone());
+    let profile = run_accounting_profile(cfg, provider_name, model, max_turns);
+    let mut meta = profile.settings.clone();
+    meta["config_hash"] = serde_json::Value::String(profile.config_hash.clone());
 
     let identity = RunIdentity {
         session: session_id.to_string(),
+        run: crate::agent::memory::new_session_id(),
         provider: provider_name.to_string(),
         model: model.to_string(),
         strategy: MEMORY_STRATEGY.to_string(),
         strategy_version: MEMORY_STRATEGY_VERSION,
-        config_hash,
+        config_hash: profile.config_hash,
     };
-    let price = pricing::resolve(&cfg.pricing, model, pricing::today());
-    let mut ledger = Ledger::new(identity, PromptAccounting::for_provider_kind(&kind))
-        .with_price(price)
+    let mut ledger = Ledger::new(identity, profile.accounting)
+        .with_price(profile.price)
         .resumed(!is_fresh);
     if let Some(dir) = crate::agent::memory::persisted::sessions_dir() {
         ledger = ledger.with_sink(ledger::ledger_path(&dir, session_id));
