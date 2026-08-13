@@ -18,6 +18,7 @@ use crate::agent::memory::{
 };
 use crate::config::Config;
 use crate::error::{AgentError, Result};
+use crate::ledger::{self, Ledger, PromptAccounting, RunIdentity, pricing};
 use crate::mcp;
 use crate::notes;
 use crate::policy::ConfigPolicy;
@@ -155,6 +156,7 @@ mod session_tests {
 pub async fn build_memory(
     session_id: Option<&str>,
     is_fresh: bool,
+    meta: Option<serde_json::Value>,
 ) -> Result<(Box<dyn Memory>, Vec<PathBuf>, Option<Arc<dyn ReadLogger>>)> {
     let inner: Box<dyn Memory> = Box::new(LinearWithCompact::new());
     match session_id {
@@ -162,10 +164,70 @@ pub async fn build_memory(
             let mut persisted = PersistedMemory::open(id, inner, is_fresh).await?;
             let reads = persisted.drain_replayed_reads();
             let logger = persisted.read_logger();
+            if let Some(meta) = meta {
+                persisted.write_meta(meta).await?;
+            }
             Ok((Box::new(persisted), reads, Some(logger)))
         }
         None => Ok((inner, Vec::new(), None)),
     }
+}
+
+/// The memory strategy `build_memory` installs, and the version of what
+/// it puts in the context. Recorded on every observation so two runs are
+/// only compared when they were built the same way.
+pub const MEMORY_STRATEGY: &str = "linear-with-compact";
+pub const MEMORY_STRATEGY_VERSION: u32 = 1;
+
+/// Session identity plus the accounting ledger for one run.
+///
+/// The `meta` value is what lands in the transcript's `meta` op; the
+/// ledger writes measurements to a sibling file and never to the
+/// transcript.
+pub fn build_run_accounting(
+    cfg: &Config,
+    provider_name: &str,
+    model: &str,
+    session_id: &str,
+    is_fresh: bool,
+    max_turns: usize,
+) -> (serde_json::Value, Ledger) {
+    let ctx_window = crate::agent::caps_for_with_overrides(model, &cfg.caps).ctx_window;
+    let settings = serde_json::json!({
+        "provider": provider_name,
+        "model": model,
+        "strategy": MEMORY_STRATEGY,
+        "strategy_version": MEMORY_STRATEGY_VERSION,
+        "max_turns": max_turns,
+        "policy_mode": format!("{:?}", cfg.policy.mode),
+        "ctx_window": ctx_window,
+    });
+    let config_hash = ledger::config_hash(&settings);
+
+    let kind = cfg
+        .provider(provider_name)
+        .map(|p| p.kind.clone())
+        .unwrap_or_default();
+    let mut meta = settings.clone();
+    meta["config_hash"] = serde_json::Value::String(config_hash.clone());
+    meta["provider_kind"] = serde_json::Value::String(kind.clone());
+
+    let identity = RunIdentity {
+        session: session_id.to_string(),
+        provider: provider_name.to_string(),
+        model: model.to_string(),
+        strategy: MEMORY_STRATEGY.to_string(),
+        strategy_version: MEMORY_STRATEGY_VERSION,
+        config_hash,
+    };
+    let price = pricing::resolve(&cfg.pricing, model, pricing::today());
+    let mut ledger = Ledger::new(identity, PromptAccounting::for_provider_kind(&kind))
+        .with_price(price)
+        .resumed(!is_fresh);
+    if let Some(dir) = crate::agent::memory::persisted::sessions_dir() {
+        ledger = ledger.with_sink(ledger::ledger_path(&dir, session_id));
+    }
+    (meta, ledger)
 }
 
 /// `SubagentSpawner` impl that builds a fresh agent from config
