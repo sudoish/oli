@@ -454,6 +454,9 @@ fn max_turn_exhaustion_is_structured_non_success_and_remains_resumable() {
     assert_eq!(incomplete["reason"], "max_turns_exhausted");
     assert_eq!(incomplete["max_turns"], 1);
     assert!(incomplete.get("response").is_none());
+    // The only call this run made reported no usage at all, so the
+    // object stays absent rather than rendering as a row of zeros.
+    assert!(incomplete["usage"].is_null());
     let id = incomplete["conversation_id"].as_str().unwrap().to_string();
 
     let mut resumed = sandbox.command();

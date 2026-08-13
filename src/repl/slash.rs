@@ -287,9 +287,14 @@ fn unreported_line(s: &crate::providers::UsageTotals) -> Option<String> {
     ]
     .into_iter()
     .filter(|(_, t)| t.unreported_calls > 0)
-    .map(|(name, t)| format!("{} ({} of {} calls)", name, t.unreported_calls, s.calls))
+    .map(|(name, t)| {
+        format!(
+            "{} ({} of {} calls did not report)",
+            name, t.unreported_calls, s.calls
+        )
+    })
     .collect();
-    (!gaps.is_empty()).then(|| format!("not reported by every call: {}", gaps.join(", ")))
+    (!gaps.is_empty()).then(|| format!("incomplete: {}", gaps.join(", ")))
 }
 
 pub struct Tools;
@@ -1485,8 +1490,14 @@ default_model = "alt-model"
             SlashOutcome::Continue(Some(msg)) => {
                 assert!(msg.contains("session (2 calls): 10 prompt"), "{msg}");
                 assert!(msg.contains("cache read unknown"), "{msg}");
-                assert!(msg.contains("prompt (1 of 2 calls)"), "{msg}");
-                assert!(msg.contains("cache read (2 of 2 calls)"), "{msg}");
+                assert!(
+                    msg.contains("prompt (1 of 2 calls did not report)"),
+                    "{msg}"
+                );
+                assert!(
+                    msg.contains("cache read (2 of 2 calls did not report)"),
+                    "{msg}"
+                );
             }
             _ => panic!("expected Continue(Some(_)), got {:?}", out),
         }

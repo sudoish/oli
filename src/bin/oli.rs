@@ -722,8 +722,9 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
             // No call reported anything at all — say nothing rather than
             // emit a shape full of nulls.
             let usage = agent
-                .last_usage
-                .map(|_| UsageOutput::from(agent.session_usage));
+                .session_usage
+                .any_reported()
+                .then(|| UsageOutput::from(agent.session_usage));
             let response = match outcome {
                 RunOutcome::Completed(response) => response,
                 RunOutcome::MaxTurnsExhausted { limit, message } => {

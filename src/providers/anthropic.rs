@@ -335,6 +335,9 @@ fn anthropic_usage_from_value(v: &Value) -> Option<Usage> {
     let usage = Usage {
         prompt_tokens: input,
         completion_tokens: output,
+        // input_tokens excludes cache reads and writes, so this total
+        // understates the context processed — and it isn't comparable
+        // with OpenAI's, whose prompt_tokens includes them.
         total_tokens: derived_total(input, output),
         cache_read_tokens: token_count(v, "cache_read_input_tokens"),
         cache_write_tokens: token_count(v, "cache_creation_input_tokens"),

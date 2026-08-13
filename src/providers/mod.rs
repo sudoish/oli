@@ -414,6 +414,21 @@ impl UsageTotals {
         self.reasoning_tokens
             .add(usage.and_then(|u| u.reasoning_tokens));
     }
+
+    /// Whether any call reported any category. A session where every
+    /// call stayed silent has no accounting to render at all.
+    pub fn any_reported(&self) -> bool {
+        [
+            &self.prompt_tokens,
+            &self.completion_tokens,
+            &self.total_tokens,
+            &self.cache_read_tokens,
+            &self.cache_write_tokens,
+            &self.reasoning_tokens,
+        ]
+        .into_iter()
+        .any(|t| t.reported().is_some())
+    }
 }
 
 #[cfg(test)]
@@ -543,6 +558,22 @@ mod usage_tests {
         assert_eq!(totals.calls, 2);
         assert_eq!(totals.prompt_tokens.reported(), None);
         assert_eq!(totals.prompt_tokens.unreported_calls, 2);
+    }
+
+    #[test]
+    fn totals_report_nothing_until_some_call_reports_something() {
+        let mut totals = UsageTotals::default();
+        assert!(!totals.any_reported());
+        totals.add(None);
+        assert!(!totals.any_reported());
+
+        // A category nobody looks at first is still enough to say the
+        // session has accounting worth rendering.
+        totals.add(Some(Usage {
+            reasoning_tokens: Some(7),
+            ..Usage::default()
+        }));
+        assert!(totals.any_reported());
     }
 }
 
