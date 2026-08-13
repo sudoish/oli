@@ -519,9 +519,15 @@ fn rollup(estimates: &[ContextEstimate]) -> ContextRollup {
 fn reported_rollup(observations: &[RequestObservation]) -> TokenRollup {
     let mut out = TokenRollup::default();
     for observation in observations {
-        add_rollup(&mut out.fresh_input, observation.reported.billed.fresh_input);
+        add_rollup(
+            &mut out.fresh_input,
+            observation.reported.billed.fresh_input,
+        );
         add_rollup(&mut out.cache_read, observation.reported.billed.cache_read);
-        add_rollup(&mut out.cache_write, observation.reported.billed.cache_write);
+        add_rollup(
+            &mut out.cache_write,
+            observation.reported.billed.cache_write,
+        );
         add_rollup(&mut out.output, observation.reported.billed.output);
         add_rollup(&mut out.uncached_input, observation.reported.uncached_input);
         add_rollup(&mut out.total_input, observation.reported.total_input);
@@ -574,34 +580,36 @@ fn modeled_cost(
     let costs: Vec<(CostEstimate, Option<&ResolvedPrice>)> = estimates
         .iter()
         .zip(observations)
-        .map(|(estimate, observation)| match (estimate, observation.price.as_ref()) {
-            (Some(estimate), Some(price)) => (
-                CostEstimate {
-                    // Replay can model the input context, but not cache behavior
-                    // or how many output tokens a request would have produced.
-                    amount: Some(estimate.total as f64 * price.input_per_mtok / 1_000_000.0),
-                    currency: Some(price.currency.clone()),
-                    unknown: Vec::new(),
-                },
-                Some(price),
-            ),
-            (None, price) => (
-                CostEstimate {
-                    amount: None,
-                    currency: price.map(|price| price.currency.clone()),
-                    unknown: vec!["full-history context could not be materialized".into()],
-                },
-                price,
-            ),
-            (Some(_), None) => (
-                CostEstimate {
-                    amount: None,
-                    currency: None,
-                    unknown: vec!["no pricing configured for this model".into()],
-                },
-                None,
-            ),
-        })
+        .map(
+            |(estimate, observation)| match (estimate, observation.price.as_ref()) {
+                (Some(estimate), Some(price)) => (
+                    CostEstimate {
+                        // Replay can model the input context, but not cache behavior
+                        // or how many output tokens a request would have produced.
+                        amount: Some(estimate.total as f64 * price.input_per_mtok / 1_000_000.0),
+                        currency: Some(price.currency.clone()),
+                        unknown: Vec::new(),
+                    },
+                    Some(price),
+                ),
+                (None, price) => (
+                    CostEstimate {
+                        amount: None,
+                        currency: price.map(|price| price.currency.clone()),
+                        unknown: vec!["full-history context could not be materialized".into()],
+                    },
+                    price,
+                ),
+                (Some(_), None) => (
+                    CostEstimate {
+                        amount: None,
+                        currency: None,
+                        unknown: vec!["no pricing configured for this model".into()],
+                    },
+                    None,
+                ),
+            },
+        )
         .collect();
     cost_rollup(costs.iter().map(|(cost, price)| (cost, *price)))
 }
@@ -753,22 +761,18 @@ mod tests {
 
         assert!(control.reported.is_none());
         assert!(control.cost.measured.is_none());
-        assert!(
-            (control.cost.modeled.as_ref().unwrap().amount.unwrap() - 0.000134).abs() < 1e-12
-        );
+        assert!((control.cost.modeled.as_ref().unwrap().amount.unwrap() - 0.000134).abs() < 1e-12);
         assert!(control.latency_ms.is_none());
 
         assert_eq!(
-            candidate
-                .reported
-                .as_ref()
-                .unwrap()
-                .total_input
-                .tokens,
+            candidate.reported.as_ref().unwrap().total_input.tokens,
             Some(120)
         );
         assert!(candidate.cost.modeled.is_none());
-        assert_eq!(candidate.cost.measured.as_ref().unwrap().amount, Some(0.00033));
+        assert_eq!(
+            candidate.cost.measured.as_ref().unwrap().amount,
+            Some(0.00033)
+        );
         assert_eq!(
             candidate.latency_ms,
             Some(crate::ledger::LatencyRollup {
