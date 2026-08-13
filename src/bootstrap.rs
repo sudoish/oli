@@ -196,7 +196,8 @@ pub fn run_accounting_profile(
     model: &str,
     max_turns: usize,
 ) -> RunAccountingProfile {
-    let ctx_window = crate::agent::caps_for_with_overrides(model, &cfg.caps).ctx_window;
+    let caps = crate::agent::caps_for_with_overrides(model, &cfg.caps);
+    let ctx_window = caps.ctx_window;
     let provider_kind = cfg
         .provider(provider_name)
         .map(|p| p.kind.clone())
@@ -211,6 +212,7 @@ pub fn run_accounting_profile(
         "max_turns": max_turns,
         "policy_mode": format!("{:?}", cfg.policy.mode),
         "ctx_window": ctx_window,
+        "ctx_window_authoritative": caps.ctx_window_is_authoritative,
         "context_target_tokens": cfg.agent.context_target_tokens,
         "pricing": price,
     });

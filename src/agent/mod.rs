@@ -348,13 +348,17 @@ impl Agent {
         let tool_schemas = self.tools.openai_schemas();
         let before = estimate_context(&parts, &tool_schemas);
         let budget = self.request_budget();
+        let compaction_hard_limit = budget
+            .hard_limit_is_authoritative
+            .then_some(budget.hard_limit_tokens)
+            .unwrap_or(usize::MAX);
         let report = self
             .memory
             .maybe_compact(CompactContext {
                 provider: self.provider.as_ref(),
                 model: &self.model,
                 target_tokens: 0,
-                hard_limit_tokens: budget.hard_limit_tokens,
+                hard_limit_tokens: compaction_hard_limit,
                 next_request_tokens: usize::try_from(before.total).unwrap_or(usize::MAX),
             })
             .await?;
@@ -485,6 +489,10 @@ impl Agent {
             let mut parts = self.memory.snapshot_parts().await;
             let mut estimated = estimate_context(&parts, &tool_schemas);
             let budget = self.request_budget();
+            let compaction_hard_limit = budget
+                .hard_limit_is_authoritative
+                .then_some(budget.hard_limit_tokens)
+                .unwrap_or(usize::MAX);
             let compact_started = Instant::now();
             for _ in 0..MAX_COMPACTION_PASSES {
                 let compaction = match self
@@ -493,7 +501,7 @@ impl Agent {
                         provider: self.provider.as_ref(),
                         model: &self.model,
                         target_tokens: budget.target_tokens,
-                        hard_limit_tokens: budget.hard_limit_tokens,
+                        hard_limit_tokens: compaction_hard_limit,
                         next_request_tokens: usize::try_from(estimated.total).unwrap_or(usize::MAX),
                     })
                     .await
@@ -527,7 +535,9 @@ impl Agent {
                 estimated = after;
             }
             let compaction_ms = as_ms(compact_started.elapsed());
-            if estimated.total > budget.hard_limit_tokens as u64 {
+            if budget.hard_limit_is_authoritative
+                && estimated.total > budget.hard_limit_tokens as u64
+            {
                 return Err(crate::error::AgentError::Config(format!(
                     "materialized request estimate {} exceeds hard context limit {} after compaction",
                     estimated.total, budget.hard_limit_tokens
@@ -1561,10 +1571,44 @@ mod tests {
         let mut agent = Agent::new(Box::new(ShouldNotCall), Registry::new(), "m".into())
             .with_memory(Box::new(memory));
         agent.caps.ctx_window = 100;
+        agent.caps.ctx_window_is_authoritative = true;
 
         let error = agent.run("continue").await.unwrap_err();
         assert!(error.to_string().contains("exceeds hard context limit 100"));
         assert!(agent.ledger.observations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_models_fallback_window_never_becomes_a_local_hard_rejection() {
+        struct Completes;
+        #[async_trait]
+        impl Provider for Completes {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: assistant_text("provider accepted it"),
+                    usage: None,
+                })
+            }
+        }
+
+        let mut memory = LinearWithCompact::new();
+        memory
+            .record(json!({"role":"user","content":"x".repeat(40_000)}))
+            .await
+            .unwrap();
+        let mut agent = Agent::new(
+            Box::new(Completes),
+            Registry::new(),
+            "custom-model-with-unknown-window".into(),
+        )
+        .with_memory(Box::new(memory));
+        assert!(!agent.caps.ctx_window_is_authoritative);
+
+        let outcome = agent.run("continue").await.unwrap();
+        assert_eq!(
+            outcome,
+            RunOutcome::Completed("provider accepted it".into())
+        );
     }
 
     #[tokio::test]
