@@ -1,0 +1,686 @@
+{
+  "ledger": [
+    {
+      "call": 1,
+      "config_hash": "27d40e16e9d59337",
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "unknown": [
+          "no pricing configured for this model"
+        ]
+      },
+      "estimated": {
+        "pinned": 17,
+        "recent": 14,
+        "summary": 0,
+        "tool_schemas": 34,
+        "total": 65
+      },
+      "kind": "request",
+      "latency": {
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "ttft_ms": null
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "reported": {
+        "accounting": "cache_inclusive",
+        "billed": {
+          "cache_read": 0,
+          "cache_write": 0,
+          "fresh_input": 200,
+          "output": 12
+        },
+        "cache_read": 0,
+        "cache_write": 0,
+        "completion": 12,
+        "prompt": 200,
+        "reasoning": null,
+        "total": 212,
+        "total_input": 200,
+        "uncached_input": 200
+      },
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "started_at_ms": 0,
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "turn": 1
+    },
+    {
+      "call": 2,
+      "config_hash": "27d40e16e9d59337",
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "unknown": [
+          "no pricing configured for this model"
+        ]
+      },
+      "estimated": {
+        "pinned": 17,
+        "recent": 68,
+        "summary": 0,
+        "tool_schemas": 34,
+        "total": 119
+      },
+      "kind": "request",
+      "latency": {
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "ttft_ms": 0
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "reported": {
+        "accounting": "cache_inclusive",
+        "billed": {
+          "cache_read": 128,
+          "cache_write": 0,
+          "fresh_input": 112,
+          "output": 20
+        },
+        "cache_read": 128,
+        "cache_write": 0,
+        "completion": 20,
+        "prompt": 240,
+        "reasoning": null,
+        "total": 260,
+        "total_input": 240,
+        "uncached_input": 112
+      },
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "started_at_ms": 0,
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "turn": 2
+    },
+    {
+      "call": 3,
+      "config_hash": "27d40e16e9d59337",
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "unknown": [
+          "no pricing configured for this model"
+        ]
+      },
+      "estimated": {
+        "pinned": 17,
+        "recent": 96,
+        "summary": 0,
+        "tool_schemas": 34,
+        "total": 147
+      },
+      "kind": "request",
+      "latency": {
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "ttft_ms": null
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "reported": {
+        "accounting": "cache_inclusive",
+        "billed": {
+          "cache_read": 0,
+          "cache_write": 0,
+          "fresh_input": 240,
+          "output": 12
+        },
+        "cache_read": 0,
+        "cache_write": 0,
+        "completion": 12,
+        "prompt": 240,
+        "reasoning": null,
+        "total": 252,
+        "total_input": 240,
+        "uncached_input": 240
+      },
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "started_at_ms": 0,
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "turn": 1
+    },
+    {
+      "call": 4,
+      "config_hash": "27d40e16e9d59337",
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "unknown": [
+          "no pricing configured for this model"
+        ]
+      },
+      "estimated": {
+        "pinned": 17,
+        "recent": 150,
+        "summary": 0,
+        "tool_schemas": 34,
+        "total": 201
+      },
+      "kind": "request",
+      "latency": {
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "ttft_ms": 0
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "reported": {
+        "accounting": "cache_inclusive",
+        "billed": {
+          "cache_read": 128,
+          "cache_write": 0,
+          "fresh_input": 152,
+          "output": 20
+        },
+        "cache_read": 128,
+        "cache_write": 0,
+        "completion": 20,
+        "prompt": 280,
+        "reasoning": null,
+        "total": 300,
+        "total_input": 280,
+        "uncached_input": 152
+      },
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "started_at_ms": 0,
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "turn": 2
+    },
+    {
+      "call": 5,
+      "config_hash": "27d40e16e9d59337",
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "unknown": [
+          "no pricing configured for this model"
+        ]
+      },
+      "estimated": {
+        "pinned": 17,
+        "recent": 178,
+        "summary": 0,
+        "tool_schemas": 34,
+        "total": 229
+      },
+      "kind": "request",
+      "latency": {
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "ttft_ms": null
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "reported": {
+        "accounting": "cache_inclusive",
+        "billed": {
+          "cache_read": 0,
+          "cache_write": 0,
+          "fresh_input": 280,
+          "output": 12
+        },
+        "cache_read": 0,
+        "cache_write": 0,
+        "completion": 12,
+        "prompt": 280,
+        "reasoning": null,
+        "total": 292,
+        "total_input": 280,
+        "uncached_input": 280
+      },
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "started_at_ms": 0,
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "turn": 1
+    },
+    {
+      "call": 6,
+      "config_hash": "27d40e16e9d59337",
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "unknown": [
+          "no pricing configured for this model"
+        ]
+      },
+      "estimated": {
+        "pinned": 17,
+        "recent": 232,
+        "summary": 0,
+        "tool_schemas": 34,
+        "total": 283
+      },
+      "kind": "request",
+      "latency": {
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "ttft_ms": 0
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "reported": {
+        "accounting": "cache_inclusive",
+        "billed": {
+          "cache_read": 128,
+          "cache_write": 0,
+          "fresh_input": 192,
+          "output": 20
+        },
+        "cache_read": 128,
+        "cache_write": 0,
+        "completion": 20,
+        "prompt": 320,
+        "reasoning": null,
+        "total": 340,
+        "total_input": 320,
+        "uncached_input": 192
+      },
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "started_at_ms": 0,
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "turn": 2
+    },
+    {
+      "call": 7,
+      "config_hash": "27d40e16e9d59337",
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "unknown": [
+          "no pricing configured for this model"
+        ]
+      },
+      "estimated": {
+        "pinned": 17,
+        "recent": 260,
+        "summary": 0,
+        "tool_schemas": 34,
+        "total": 311
+      },
+      "kind": "request",
+      "latency": {
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "ttft_ms": null
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "reported": {
+        "accounting": "cache_inclusive",
+        "billed": {
+          "cache_read": 0,
+          "cache_write": 0,
+          "fresh_input": 320,
+          "output": 12
+        },
+        "cache_read": 0,
+        "cache_write": 0,
+        "completion": 12,
+        "prompt": 320,
+        "reasoning": null,
+        "total": 332,
+        "total_input": 320,
+        "uncached_input": 320
+      },
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "started_at_ms": 0,
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "turn": 1
+    },
+    {
+      "call": 8,
+      "config_hash": "27d40e16e9d59337",
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "unknown": [
+          "no pricing configured for this model"
+        ]
+      },
+      "estimated": {
+        "pinned": 17,
+        "recent": 314,
+        "summary": 0,
+        "tool_schemas": 34,
+        "total": 365
+      },
+      "kind": "request",
+      "latency": {
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "ttft_ms": 0
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "reported": {
+        "accounting": "cache_inclusive",
+        "billed": {
+          "cache_read": 128,
+          "cache_write": 0,
+          "fresh_input": 232,
+          "output": 20
+        },
+        "cache_read": 128,
+        "cache_write": 0,
+        "completion": 20,
+        "prompt": 360,
+        "reasoning": null,
+        "total": 380,
+        "total_input": 360,
+        "uncached_input": 232
+      },
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "started_at_ms": 0,
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "turn": 2
+    },
+    {
+      "accounting": "cache_inclusive",
+      "calls": 8,
+      "config_hash": "27d40e16e9d59337",
+      "context": {
+        "pinned": 136,
+        "recent": 1312,
+        "summary": 0,
+        "tool_schemas": 272,
+        "total": 1720
+      },
+      "cost": {
+        "amount": null,
+        "currency": null,
+        "price": null,
+        "priced_calls": 0,
+        "unknown": [
+          "no pricing configured for this model"
+        ],
+        "unpriced_calls": 8
+      },
+      "first_request": {
+        "call": 1,
+        "cost": {
+          "amount": null,
+          "currency": null,
+          "unknown": [
+            "no pricing configured for this model"
+          ]
+        },
+        "estimated": {
+          "pinned": 17,
+          "recent": 14,
+          "summary": 0,
+          "tool_schemas": 34,
+          "total": 65
+        },
+        "latency": {
+          "compaction_ms": 0,
+          "context_build_ms": 0,
+          "model_ms": 0,
+          "tool_ms": 0,
+          "ttft_ms": null
+        },
+        "output": 12,
+        "total_input": 200,
+        "turn": 1,
+        "uncached_input": 200
+      },
+      "kind": "summary",
+      "latency_ms": {
+        "best_ttft_ms": 0,
+        "calls_without_ttft": 4,
+        "compaction_ms": 0,
+        "context_build_ms": 0,
+        "model_ms": 0,
+        "tool_ms": 0,
+        "total_ms": 0
+      },
+      "model": "baseline-model",
+      "provider": "baseline-provider",
+      "resumed": false,
+      "schema": "oli.ledger/1",
+      "session": "baseline",
+      "strategy": "linear-with-compact",
+      "strategy_version": 1,
+      "tokens": {
+        "cache_read": {
+          "reported_calls": 8,
+          "tokens": 512,
+          "unreported_calls": 0
+        },
+        "cache_write": {
+          "reported_calls": 8,
+          "tokens": 0,
+          "unreported_calls": 0
+        },
+        "fresh_input": {
+          "reported_calls": 8,
+          "tokens": 1728,
+          "unreported_calls": 0
+        },
+        "output": {
+          "reported_calls": 8,
+          "tokens": 128,
+          "unreported_calls": 0
+        },
+        "total_input": {
+          "reported_calls": 8,
+          "tokens": 2240,
+          "unreported_calls": 0
+        },
+        "uncached_input": {
+          "reported_calls": 8,
+          "tokens": 1728,
+          "unreported_calls": 0
+        }
+      },
+      "turns": 2
+    }
+  ],
+  "transcript": [
+    {
+      "meta": {
+        "config_hash": "27d40e16e9d59337",
+        "model": "baseline-model",
+        "provider": "baseline-provider",
+        "strategy": "linear-with-compact"
+      },
+      "op": "meta"
+    },
+    {
+      "msg": {
+        "content": "you are a coding agent",
+        "role": "system"
+      },
+      "op": "pin"
+    },
+    {
+      "msg": {
+        "content": "keep going",
+        "role": "user"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "Echo"
+            },
+            "id": "c1",
+            "type": "function"
+          }
+        ]
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "tool-output",
+        "role": "tool",
+        "tool_call_id": "c1"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "done",
+        "role": "assistant"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "keep going",
+        "role": "user"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "Echo"
+            },
+            "id": "c1",
+            "type": "function"
+          }
+        ]
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "tool-output",
+        "role": "tool",
+        "tool_call_id": "c1"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "done",
+        "role": "assistant"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "keep going",
+        "role": "user"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "Echo"
+            },
+            "id": "c1",
+            "type": "function"
+          }
+        ]
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "tool-output",
+        "role": "tool",
+        "tool_call_id": "c1"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "done",
+        "role": "assistant"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "keep going",
+        "role": "user"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "Echo"
+            },
+            "id": "c1",
+            "type": "function"
+          }
+        ]
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "tool-output",
+        "role": "tool",
+        "tool_call_id": "c1"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "done",
+        "role": "assistant"
+      },
+      "op": "record"
+    }
+  ]
+}

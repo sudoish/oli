@@ -42,6 +42,7 @@ live under `specs/`. This file is for agents *modifying the codebase*.
 | `config.rs` | layered TOML loader (global `~/.config/oli/config.toml` + project `.oli/config.toml` walked up from cwd) |
 | `diagnostics.rs` | operational warning ring buffer (surfaced via `/diagnostics`) |
 | `hooks/` | `PreToolUse` / `PostToolUse` / `Stop` event dispatch |
+| `ledger/` | per-request accounting: provider-neutral preflight estimate, context attribution, latency, dated `[[pricing]]`; writes `<session>.ledger.jsonl` beside the transcript |
 | `mcp/` | Model Context Protocol clients (stdio + SSE) |
 | `notes/` | cross-session note store (filesystem, TOML frontmatter) |
 | `plugins/` | Lua runtime (`mlua`), discovery dirs, hot-reload |

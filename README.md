@@ -223,6 +223,35 @@ supports_native_tool_calls      = true
 supports_streaming_tool_deltas  = true
 ```
 
+### Token pricing
+
+oli ships no rate table. A price compiled into a binary is wrong the
+moment rates change and reads as authoritative while it is, so an
+unpriced model reports an explicit unknown instead of a confident zero.
+Add `[[pricing]]` blocks to price your own:
+
+```toml
+[[pricing]]
+model                = "anthropic/claude-haiku-4.5"   # matched by prefix
+effective            = "2026-01-01"                   # YYYY-MM-DD
+currency             = "USD"
+input_per_mtok       = 1.0
+output_per_mtok      = 5.0
+cache_read_per_mtok  = 0.1
+cache_write_per_mtok = 1.25
+```
+
+The longest matching `model` prefix wins; among those, the latest
+`effective` date that has already arrived. Keep last year's card next to
+this year's — old runs stay explicable.
+
+`/cost` shows the running total. Per-request detail — the preflight
+estimate broken down by context category, what the provider reported,
+latency, and cost — is appended to `~/.config/oli/sessions/<id>.ledger.jsonl`
+beside the transcript, and `oli run --output json` carries the run's
+aggregate under `accounting`. Everything stays on disk; nothing is
+transmitted.
+
 ### Signing in with a ChatGPT subscription
 
 Instead of an OpenAI API key, oli can authenticate against a ChatGPT
@@ -525,6 +554,8 @@ src/
 │   ├── context.rs   #   System prompt + AGENTS.md/CLAUDE.md ingestion
 │   └── caps.rs      #   per-model capability table
 ├── providers/       # Provider trait + anthropic / openai_compat / fake
+├── ledger/          # per-request accounting: preflight estimate, context
+│                    #   attribution, latency, dated pricing
 ├── tools/           # built-ins: read, write, edit, bash, grep, glob, task,
 │                    #            notes, subprocess
 ├── policy/          # auto_allow / ask / bash_allowlist + persisted allow-list

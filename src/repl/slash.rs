@@ -256,8 +256,55 @@ impl SlashCommand for Cost {
                 lines.push(gaps);
             }
         }
+
+        lines.extend(accounting_lines(agent));
         SlashOutcome::Continue(Some(lines.join("\n")))
     }
+}
+
+/// The measured half of `/cost`: where the context went, where the time
+/// went, and what it cost. Silent until a request has actually been
+/// accounted for.
+fn accounting_lines(agent: &crate::agent::Agent) -> Vec<String> {
+    let s = agent.ledger.summary();
+    if s.calls == 0 {
+        return Vec::new();
+    }
+    let mut lines = vec![
+        format!(
+            "context (estimated): {} pinned + {} tool schemas + {} summary + {} recent = {} tokens",
+            s.context.pinned,
+            s.context.tool_schemas,
+            s.context.summary,
+            s.context.recent,
+            s.context.total
+        ),
+        format!(
+            "latency: {} ms model, {} ms tools, {} ms context build (of which {} ms compaction), first token {}",
+            s.latency_ms.model_ms,
+            s.latency_ms.tool_ms,
+            s.latency_ms.context_build_ms,
+            s.latency_ms.compaction_ms,
+            match s.latency_ms.best_ttft_ms {
+                Some(ms) => format!("{ms} ms"),
+                None => "unknown".into(),
+            }
+        ),
+        match s.cost.amount {
+            Some(amount) => format!(
+                "cost: {:.6} {} over {} of {} calls",
+                amount,
+                s.cost.currency.as_deref().unwrap_or(""),
+                s.cost.priced_calls,
+                s.calls
+            ),
+            None => format!("cost: unknown — {}", s.cost.unknown.join("; ")),
+        },
+    ];
+    if let Some(path) = agent.ledger.path() {
+        lines.push(format!("per-request detail: {}", path.display()));
+    }
+    lines
 }
 
 fn render_tokens(v: Option<u32>) -> String {
@@ -1498,6 +1545,63 @@ default_model = "alt-model"
                     msg.contains("cache read (2 of 2 calls did not report)"),
                     "{msg}"
                 );
+            }
+            _ => panic!("expected Continue(Some(_)), got {:?}", out),
+        }
+    }
+
+    #[tokio::test]
+    async fn cost_explains_the_context_latency_and_price_of_what_ran() {
+        use crate::ledger::{ContextEstimate, Latency};
+
+        let reg = SlashRegistry::default_set();
+        let mut agent = fresh_agent();
+        agent
+            .ledger
+            .record(
+                1,
+                ContextEstimate {
+                    pinned: 300,
+                    tool_schemas: 120,
+                    summary: 40,
+                    recent: 90,
+                    total: 550,
+                },
+                Some(crate::providers::Usage {
+                    prompt_tokens: Some(600),
+                    completion_tokens: Some(20),
+                    total_tokens: Some(620),
+                    ..crate::providers::Usage::default()
+                }),
+                Latency::default(),
+            )
+            .await;
+
+        let out = reg.dispatch("cost", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(msg)) => {
+                assert!(msg.contains("300 pinned"), "{msg}");
+                assert!(msg.contains("120 tool schemas"), "{msg}");
+                assert!(msg.contains("40 summary"), "{msg}");
+                assert!(msg.contains("= 550 tokens"), "{msg}");
+                // Nothing streamed and nothing is priced: both say so.
+                assert!(msg.contains("first token unknown"), "{msg}");
+                assert!(msg.contains("cost: unknown"), "{msg}");
+                assert!(!msg.contains("cost: 0"), "{msg}");
+            }
+            _ => panic!("expected Continue(Some(_)), got {:?}", out),
+        }
+    }
+
+    #[tokio::test]
+    async fn cost_stays_quiet_about_accounting_before_anything_has_run() {
+        let reg = SlashRegistry::default_set();
+        let mut agent = fresh_agent();
+        let out = reg.dispatch("cost", &mut agent).await.unwrap();
+        match out {
+            SlashOutcome::Continue(Some(msg)) => {
+                assert!(!msg.contains("context (estimated)"), "{msg}");
+                assert!(!msg.contains("cost:"), "{msg}");
             }
             _ => panic!("expected Continue(Some(_)), got {:?}", out),
         }
