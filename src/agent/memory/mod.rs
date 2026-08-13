@@ -1,9 +1,9 @@
 //! Memory trait and bundled implementations. See `specs/memory.md` for the
 //! full design rationale.
 //!
-//! Phase 1d ships the trait + the `LinearWithCompact` default. Future work
-//! adds alternative strategies (embedding-RAG, graph-backed, hierarchical
-//! summarization) as drop-in implementations of the same trait.
+//! `LinearWithCompact` is the default. `EmbeddingRagMemory` and the
+//! persisted session wrapper are drop-in alternatives behind the same
+//! trait; `[memory] kind` selects one.
 
 use async_trait::async_trait;
 use serde_json::Value;

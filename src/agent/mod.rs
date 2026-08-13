@@ -74,8 +74,7 @@ pub struct Agent {
     pub tools: Registry,
     pub model: String,
     /// Capabilities resolved from the model id at construction. Drives the
-    /// compaction target and (in step 5) whether the tool-call fallback
-    /// parser engages.
+    /// compaction target and whether the tool-call fallback parser engages.
     pub caps: ModelCaps,
     /// Active-context memory. Default is `LinearWithCompact`. Swap via
     /// `with_memory` to plug in alternative strategies (RAG, graph,
@@ -109,8 +108,8 @@ pub struct Agent {
     /// build new providers. Tests construct agents without a config.
     pub cfg: Option<Arc<Config>>,
     /// Lifecycle hook dispatcher. Empty by default; populated by the
-    /// binary at startup with built-in hooks (Phase 3) and by the
-    /// plugin runtime (Phase 3 step 4) with user-authored Lua hooks.
+    /// binary at startup with built-in hooks and by the plugin runtime
+    /// with user-authored Lua hooks.
     pub hooks: HookRegistry,
     /// Bound on the number of model turns per `run` invocation.
     /// `None` means unbounded — the default for top-level interactive
@@ -438,9 +437,9 @@ impl Agent {
     /// tool-call arguments via `StreamEvent::ToolArgsChunk`). Tool-call
     /// rounds are silent on the content side; only model text reaches
     /// `Content`.
-    /// Stop hooks may customize the
-    /// human-facing exhaustion message, but cannot turn exhaustion into a
-    /// completed outcome.
+    ///
+    /// Stop hooks may customize the human-facing exhaustion message, but
+    /// cannot turn exhaustion into a completed outcome.
     pub async fn run_streaming<F>(&mut self, prompt: &str, sink: &mut F) -> Result<RunOutcome>
     where
         F: FnMut(StreamEvent<'_>) + Send,
@@ -668,7 +667,7 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::providers::ChatResponse;
-    use crate::providers::fake::FakeProvider;
+    use crate::providers::fake::{FakeProvider, NeverCalled};
     use crate::tools::Tool;
     use async_trait::async_trait;
     use serde_json::json;
@@ -915,22 +914,16 @@ mod tests {
 
     #[tokio::test]
     async fn last_usage_is_captured_when_provider_supplies_it() {
-        struct UsageProvider;
-        #[async_trait]
-        impl Provider for UsageProvider {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                Ok(ChatResponse {
-                    message: assistant_text("done"),
-                    usage: Some(Usage {
-                        prompt_tokens: Some(12),
-                        completion_tokens: Some(5),
-                        total_tokens: Some(17),
-                        ..Usage::default()
-                    }),
-                })
-            }
-        }
-        let mut agent = Agent::new(Box::new(UsageProvider), Registry::new(), "m".into());
+        let provider = FakeProvider::constant(
+            assistant_text("done"),
+            Some(Usage {
+                prompt_tokens: Some(12),
+                completion_tokens: Some(5),
+                total_tokens: Some(17),
+                ..Usage::default()
+            }),
+        );
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
         agent.run("hi").await.unwrap();
         let u = agent.last_usage.expect("usage should be captured");
         assert_eq!(u.prompt_tokens, Some(12));
@@ -1278,22 +1271,16 @@ mod tests {
 
     #[tokio::test]
     async fn session_usage_accumulates_across_turns() {
-        struct FixedUsageProvider;
-        #[async_trait]
-        impl Provider for FixedUsageProvider {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                Ok(ChatResponse {
-                    message: assistant_text("ok"),
-                    usage: Some(Usage {
-                        prompt_tokens: Some(10),
-                        completion_tokens: Some(3),
-                        total_tokens: Some(13),
-                        ..Usage::default()
-                    }),
-                })
-            }
-        }
-        let mut agent = Agent::new(Box::new(FixedUsageProvider), Registry::new(), "m".into());
+        let provider = FakeProvider::constant(
+            assistant_text("ok"),
+            Some(Usage {
+                prompt_tokens: Some(10),
+                completion_tokens: Some(3),
+                total_tokens: Some(13),
+                ..Usage::default()
+            }),
+        );
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
         agent.run("a").await.unwrap();
         agent.run("b").await.unwrap();
         agent.run("c").await.unwrap();
@@ -1308,31 +1295,20 @@ mod tests {
 
     #[tokio::test]
     async fn a_call_the_provider_did_not_report_is_counted_never_summed_as_zero() {
-        struct SometimesUsageProvider {
-            seen: std::sync::atomic::AtomicUsize,
-        }
-        #[async_trait]
-        impl Provider for SometimesUsageProvider {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                let n = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(ChatResponse {
-                    message: assistant_text("ok"),
-                    usage: (n == 0).then(|| Usage {
-                        prompt_tokens: Some(10),
-                        completion_tokens: Some(3),
-                        total_tokens: Some(13),
-                        ..Usage::default()
-                    }),
-                })
-            }
-        }
-        let mut agent = Agent::new(
-            Box::new(SometimesUsageProvider {
-                seen: std::sync::atomic::AtomicUsize::new(0),
-            }),
-            Registry::new(),
-            "m".into(),
-        );
+        // First call reports, second stays silent.
+        let provider = FakeProvider::with_usage(vec![
+            (
+                assistant_text("ok"),
+                Some(Usage {
+                    prompt_tokens: Some(10),
+                    completion_tokens: Some(3),
+                    total_tokens: Some(13),
+                    ..Usage::default()
+                }),
+            ),
+            (assistant_text("ok"), None),
+        ]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
         agent.run("a").await.unwrap();
         agent.run("b").await.unwrap();
 
@@ -1386,30 +1362,21 @@ mod tests {
             }
         }
 
-        struct CompletionOnlyProvider;
-        #[async_trait]
-        impl Provider for CompletionOnlyProvider {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                Ok(ChatResponse {
-                    message: assistant_text("ok"),
-                    usage: Some(Usage {
-                        completion_tokens: Some(4),
-                        ..Usage::default()
-                    }),
-                })
-            }
-        }
+        let provider = FakeProvider::constant(
+            assistant_text("ok"),
+            Some(Usage {
+                completion_tokens: Some(4),
+                ..Usage::default()
+            }),
+        );
 
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let mut agent = Agent::new(
-            Box::new(CompletionOnlyProvider),
-            Registry::new(),
-            "m".into(),
-        )
-        .with_memory(Box::new(ObservingMemory {
-            inner: LinearWithCompact::new(),
-            observed: observed.clone(),
-        }));
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into()).with_memory(
+            Box::new(ObservingMemory {
+                inner: LinearWithCompact::new(),
+                observed: observed.clone(),
+            }),
+        );
         agent.run("a").await.unwrap();
         agent.run("b").await.unwrap();
 
@@ -1555,20 +1522,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_still_over_the_hard_limit_is_never_dispatched() {
-        struct ShouldNotCall;
-        #[async_trait]
-        impl Provider for ShouldNotCall {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                panic!("an over-hard-limit request must not reach the provider")
-            }
-        }
-
         let mut memory = LinearWithCompact::new();
         memory
             .record(json!({"role":"user","content":"x".repeat(2_000)}))
             .await
             .unwrap();
-        let mut agent = Agent::new(Box::new(ShouldNotCall), Registry::new(), "m".into())
+        let provider = NeverCalled("an over-hard-limit request must not reach the provider");
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
             .with_memory(Box::new(memory));
         agent.caps.ctx_window = 100;
         agent.caps.ctx_window_is_authoritative = true;
@@ -1613,22 +1573,16 @@ mod tests {
 
     #[tokio::test]
     async fn clear_resets_session_usage() {
-        struct FixedUsageProvider;
-        #[async_trait]
-        impl Provider for FixedUsageProvider {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                Ok(ChatResponse {
-                    message: assistant_text("ok"),
-                    usage: Some(Usage {
-                        prompt_tokens: Some(5),
-                        completion_tokens: Some(2),
-                        total_tokens: Some(7),
-                        ..Usage::default()
-                    }),
-                })
-            }
-        }
-        let mut agent = Agent::new(Box::new(FixedUsageProvider), Registry::new(), "m".into());
+        let provider = FakeProvider::constant(
+            assistant_text("ok"),
+            Some(Usage {
+                prompt_tokens: Some(5),
+                completion_tokens: Some(2),
+                total_tokens: Some(7),
+                ..Usage::default()
+            }),
+        );
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into());
         agent.run("hi").await.unwrap();
         assert_eq!(agent.session_usage.total_tokens.reported(), Some(7));
         agent.clear().await.unwrap();
@@ -1714,17 +1668,6 @@ mod tests {
 
     #[tokio::test]
     async fn undo_last_user_turn_after_compaction_targets_the_live_window() {
-        struct StubSummary;
-        #[async_trait]
-        impl Provider for StubSummary {
-            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
-                Ok(ChatResponse {
-                    message: assistant_text("S"),
-                    usage: None,
-                })
-            }
-        }
-
         let mut mem = LinearWithCompact::new();
         mem.pin(json!({"role":"system","content":"sys"}))
             .await
@@ -1735,7 +1678,7 @@ mod tests {
                 .await
                 .unwrap();
         }
-        let stub = StubSummary;
+        let stub = FakeProvider::constant(assistant_text("S"), None);
         mem.maybe_compact(CompactContext {
             provider: &stub,
             model: "m",

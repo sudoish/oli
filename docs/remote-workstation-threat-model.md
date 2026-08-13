@@ -33,7 +33,6 @@ flowchart LR
     O -.->|HTTPS provider protocol (remote providers only)| M
     O -->|OAuth authorization URL| B
     B -->|pasted localhost redirect URL or device approval| O
-    O -.->|OSC52 escape sequence through SSH| L
 ```
 
 The browser and oli may run on different hosts. `oli login --paste` carries the
@@ -53,7 +52,6 @@ the "Provider trust boundary" shown above.
 | oli to provider | Provider account, API key, or subscription token | HTTPS provider API | Provider |
 | Browser login | Provider user | OAuth authorization-code/PKCE or device flow | Provider |
 | oli session data | Remote Unix user | Local filesystem | Workstation permissions |
-| Clipboard return | Active terminal session | OSC52 inside SSH terminal output | Laptop terminal policy |
 
 oli does not integrate with Tailscale directly. Tailscale supplies private
 reachability, device identity, and network policy; oli continues to use ordinary
@@ -130,7 +128,5 @@ The implementation example is acceptable only when all of these hold:
    auth, and credentials are stored only on the workstation.
 4. Disconnecting the terminal does not move source or session state to the
    laptop; `--resume` continues the remote session.
-5. OSC52 copying is treated as an explicit data transfer to the laptop and is
-   verified or disabled according to terminal policy.
-6. The chosen provider and its data boundary are documented. A private
+5. The chosen provider and its data boundary are documented. A private
    workstation does not make a third-party model provider private.

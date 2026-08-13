@@ -3,24 +3,12 @@
 ///
 /// Returns the input unchanged if it's already within `max_bytes`.
 pub fn truncate(s: &str, max_bytes: usize) -> String {
-    if s.len() <= max_bytes {
-        return s.to_string();
-    }
-    let mut cut = max_bytes;
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let mut out = String::with_capacity(cut + 64);
-    out.push_str(&s[..cut]);
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(&format!(
-        "[... output truncated, {} of {} bytes shown ...]",
-        cut,
-        s.len()
-    ));
-    out
+    truncate_inner(s, max_bytes, |cut, total| {
+        format!(
+            "[... output truncated, {} of {} bytes shown ...]",
+            cut, total
+        )
+    })
 }
 
 /// Same as `truncate`, but also stashes the full body in the
@@ -34,21 +22,38 @@ pub fn truncate_with_cache(ctx: &crate::tools::ToolContext, s: &str, max_bytes: 
     if s.len() <= max_bytes {
         return s.to_string();
     }
-    let total = s.len();
+    // Cache before truncating: the marker has to name the id.
     let id = ctx.cache_full_result(s.to_string());
+    truncate_inner(s, max_bytes, |cut, total| {
+        format!(
+            "[... output truncated, {} of {} bytes shown — call ShowFull(id={}, offset={}) for more ...]",
+            cut, total, id, cut
+        )
+    })
+}
+
+/// Shared body: walk back to a char boundary, keep the prefix newline-
+/// terminated, and append whatever marker the caller builds from the
+/// shown/total byte counts.
+fn truncate_inner(
+    s: &str,
+    max_bytes: usize,
+    marker: impl FnOnce(usize, usize) -> String,
+) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
     let mut cut = max_bytes;
     while cut > 0 && !s.is_char_boundary(cut) {
         cut -= 1;
     }
-    let mut out = String::with_capacity(cut + 96);
+    let marker = marker(cut, s.len());
+    let mut out = String::with_capacity(cut + marker.len() + 1);
     out.push_str(&s[..cut]);
     if !out.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str(&format!(
-        "[... output truncated, {} of {} bytes shown — call ShowFull(id={}, offset={}) for more ...]",
-        cut, total, id, cut
-    ));
+    out.push_str(&marker);
     out
 }
 

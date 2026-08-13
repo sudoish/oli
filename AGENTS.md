@@ -43,7 +43,7 @@ live under `specs/`. This file is for agents *modifying the codebase*.
 | `diagnostics.rs` | operational warning ring buffer (surfaced via `/diagnostics`) |
 | `hooks/` | `PreToolUse` / `PostToolUse` / `Stop` event dispatch |
 | `ledger/` | per-request accounting: provider-neutral preflight estimate, context attribution, latency, dated `[[pricing]]`; writes `<session>.ledger.jsonl` beside the transcript |
-| `mcp/` | Model Context Protocol clients (stdio + SSE) |
+| `mcp/` | Model Context Protocol clients (stdio + streamable-http) |
 | `notes/` | cross-session note store (filesystem, TOML frontmatter) |
 | `plugins/` | Lua runtime (`mlua`), discovery dirs, hot-reload |
 | `policy/` | `auto_allow` / `ask` / `bash_allowlist` gating + persisted allow-list |

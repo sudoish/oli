@@ -5,9 +5,8 @@
 //! MCP-backed tool is indistinguishable from `Read` or a subprocess
 //! tool.
 //!
-//! Two transports in v1: stdio (default) and streamable-http. Only stdio
-//! lands in this commit — http is wired through the same `McpTransport`
-//! trait but its impl is deferred (see specs/mcp.md phase 5b).
+//! Two transports, both behind the same `McpTransport` trait: stdio
+//! (the default) and streamable-http.
 
 use std::sync::Arc;
 
