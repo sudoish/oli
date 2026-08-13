@@ -1,7 +1,7 @@
 //! Model-capability registry.
 //!
 //! The harness needs three things per model:
-//! - context window size (drives compaction target),
+//! - context window size (the hard limit from which a safe default target is derived),
 //! - whether the model emits tool calls in the structured `tool_calls`
 //!   field (otherwise the fallback parser scans `content` for them),
 //! - whether the streaming endpoint emits tool-call deltas incrementally
@@ -22,11 +22,33 @@ pub struct ModelCaps {
     pub supports_streaming_tool_deltas: bool,
 }
 
+/// The active request budget resolved for a model. `target_tokens` is
+/// the operating goal that controls compaction; `hard_limit_tokens` is
+/// the provider capability and remains visible for safety checks and
+/// telemetry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestBudget {
+    pub target_tokens: usize,
+    pub hard_limit_tokens: usize,
+}
+
 impl ModelCaps {
     /// Soft target for compaction — leaves headroom for the response and
     /// any in-flight tool round before the model truly hits its window.
     pub fn compact_target(&self) -> usize {
         self.ctx_window * 80 / 100
+    }
+
+    pub fn request_budget(&self, configured_target: Option<usize>) -> RequestBudget {
+        let default_target = self.compact_target();
+        let target_tokens = configured_target
+            .filter(|target| *target > 0)
+            .unwrap_or(default_target)
+            .min(default_target);
+        RequestBudget {
+            target_tokens,
+            hard_limit_tokens: self.ctx_window,
+        }
     }
 }
 
@@ -166,6 +188,20 @@ mod tests {
     fn unknown_model_yields_conservative_default() {
         let c = caps_for("totally-made-up:1b");
         assert_eq!(c, DEFAULT);
+    }
+
+    #[test]
+    fn request_budget_separates_a_lower_operating_target_from_the_hard_limit() {
+        let budget = DEFAULT.request_budget(Some(2_000));
+        assert_eq!(budget.target_tokens, 2_000);
+        assert_eq!(budget.hard_limit_tokens, 8_000);
+    }
+
+    #[test]
+    fn request_budget_never_expands_past_the_safe_default_target() {
+        let budget = DEFAULT.request_budget(Some(20_000));
+        assert_eq!(budget.target_tokens, 6_400);
+        assert_eq!(budget.hard_limit_tokens, 8_000);
     }
 
     #[test]

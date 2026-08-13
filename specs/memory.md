@@ -117,9 +117,17 @@ Today's behavior, behind the trait.
 
 - Internal state: `Vec<Value>` of raw messages + `Vec<Value>` of pinned.
 - `snapshot()` returns `pinned ++ messages` (clone).
-- `maybe_compact()` triggers when `current_tokens > target_tokens`:
-  collapses the oldest non-pinned span into one summary message via
-  `ctx.provider`.
+- `maybe_compact()` triggers when the preflight estimate of the request about
+  to be sent exceeds the active target. That estimate includes pinned context,
+  prior summaries, recent messages, and tool schemas; it never depends on the
+  previous provider response's optional usage counters.
+- The active target is a cost/latency budget distinct from the provider's hard
+  context limit. It defaults to 80% of that limit and can be lowered with
+  `[agent].context_target_tokens`.
+- Compaction prepares a complete semantic/tool-cycle prefix, asks
+  `ctx.provider` for a summary, validates non-empty output, and only then swaps
+  the prefix for the summary. Provider error or cancellation leaves the exact
+  original history and pinned constraints intact.
 - Zero new dependencies. Ships in Phase 1d.
 
 ## Alternative implementations — sketches, not commitments
@@ -237,10 +245,10 @@ agent.memory.pin(json!({"role": "system", "content": sys})).await;
 
 1. **Sync vs async `record`.** Linear doesn't need async; graph/embedding
    strategies do. Going async upfront avoids a breaking change later.
-2. **Token counting ownership.** Probably lives outside `Memory` —
-   token tracker reads `snapshot()` and supplies `current_tokens` to
-   `maybe_compact`. Avoids strategy-specific tokenizer assumptions
-   leaking into the trait.
+2. **Token counting ownership.** Lives outside `Memory`: the agent estimates
+   the fully materialized next request and supplies `next_request_tokens` to
+   `maybe_compact`. This avoids strategy-specific tokenizer assumptions
+   leaking into the trait and keeps provider usage advisory only.
 3. **`truncate` granularity.** Raw record count is what we have today and
    matches the REPL's snapshot-len pattern. A `/undo`-style command
    would want turn granularity (user + assistant + tool results = 1

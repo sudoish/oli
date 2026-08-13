@@ -5,7 +5,9 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::error::{AgentError, Result};
-use crate::ledger::{ContextEstimate, ContextRollup, RequestObservation, RunIdentity, RunSummary};
+use crate::ledger::{
+    ContextEstimate, ContextRollup, RequestObservation, RequestPurpose, RunIdentity, RunSummary,
+};
 
 pub const SCHEMA: &str = "oli.replay/1";
 const FULL_HISTORY_ARM: &str = "full-history";
@@ -348,6 +350,11 @@ fn validate_identity(expected: &RunIdentity, actual: &RunIdentity) -> Result<()>
 }
 
 fn is_materialized_request(requests: &[RequestObservation], index: usize) -> bool {
+    match requests[index].purpose {
+        Some(RequestPurpose::Agent) => return true,
+        Some(RequestPurpose::Compaction) => return false,
+        None => {}
+    }
     // A linear compaction call is recorded immediately before the real
     // model request on the same turn. The last call for that turn is the
     // context snapshot the agent actually consumed.

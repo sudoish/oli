@@ -20,7 +20,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 
-use crate::error::Result;
+use crate::error::{AgentError, Result};
 use crate::ledger::{ContextEstimate, Latency, as_ms, estimate::estimate_messages, now_ms};
 use crate::providers::ChatRequest;
 
@@ -119,7 +119,7 @@ impl Memory for LinearWithCompact {
     }
 
     async fn maybe_compact(&mut self, ctx: CompactContext<'_>) -> Result<Option<CompactionReport>> {
-        if ctx.current_tokens <= ctx.target_tokens {
+        if ctx.next_request_tokens <= ctx.target_tokens {
             return Ok(None);
         }
         if self.messages.len() < MIN_MESSAGES_TO_COMPACT {
@@ -129,17 +129,14 @@ impl Memory for LinearWithCompact {
         // Aim to drain roughly the older half, but snap forward to the
         // next user-message boundary so a tool_call assistant message and
         // its tool result never get split across the cut.
-        let half = self.messages.len() / 2;
-        let mut cut = half;
-        while cut < self.messages.len() && role_of(&self.messages[cut]) != Some("user") {
-            cut += 1;
-        }
-        if cut == 0 || cut >= self.messages.len() {
+        let Some(cut) = compaction_cut(&self.messages) else {
             return Ok(None);
-        }
+        };
 
-        let older: Vec<Value> = self.messages.drain(..cut).collect();
-        self.base += older.len();
+        // Prepare from clones. The live state is not changed until the
+        // provider succeeds and the candidate summary validates, so an
+        // error or cancellation leaves the exact original history intact.
+        let older = self.messages[..cut].to_vec();
 
         let transcript = render_for_summary(&older);
         let prior = self
@@ -175,6 +172,12 @@ impl Memory for LinearWithCompact {
         };
 
         let prompt_tokens = estimate_messages(&req.messages);
+        if prompt_tokens > ctx.hard_limit_tokens as u64 {
+            return Err(AgentError::Config(format!(
+                "compaction request estimate {prompt_tokens} exceeds hard context limit {}",
+                ctx.hard_limit_tokens
+            )));
+        }
         let estimated = ContextEstimate {
             recent: prompt_tokens,
             total: prompt_tokens,
@@ -190,12 +193,33 @@ impl Memory for LinearWithCompact {
             .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("")
-            .to_string();
+            .trim();
+        if summary_text.is_empty() {
+            return Err(AgentError::Provider(
+                "compaction returned an empty summary".into(),
+            ));
+        }
 
-        self.summary = Some(json!({
+        let candidate_summary = json!({
             "role": "system",
             "content": format!("[Earlier conversation summary]\n{}", summary_text),
-        }));
+        });
+        let replaced_tokens = estimate_messages(&older)
+            + self
+                .summary
+                .as_ref()
+                .map(|summary| estimate_messages(std::slice::from_ref(summary)))
+                .unwrap_or(0);
+        let candidate_tokens = estimate_messages(std::slice::from_ref(&candidate_summary));
+        if candidate_tokens >= replaced_tokens {
+            return Err(AgentError::Provider(format!(
+                "compaction summary did not reduce context ({candidate_tokens} >= {replaced_tokens} tokens)"
+            )));
+        }
+
+        self.messages.drain(..cut);
+        self.base += cut;
+        self.summary = Some(candidate_summary);
 
         Ok(Some(CompactionReport {
             started_at_ms,
@@ -211,6 +235,47 @@ impl Memory for LinearWithCompact {
 
 fn role_of(m: &Value) -> Option<&str> {
     m.get("role").and_then(|v| v.as_str())
+}
+
+fn compaction_cut(messages: &[Value]) -> Option<usize> {
+    let half = messages.len() / 2;
+    (half..messages.len()).find(|cut| {
+        *cut > 0
+            && *cut < messages.len()
+            && role_of(&messages[*cut]) == Some("user")
+            && tool_pairs_are_complete(&messages[..*cut])
+            && tool_pairs_are_complete(&messages[*cut..])
+    })
+}
+
+fn tool_pairs_are_complete(messages: &[Value]) -> bool {
+    use std::collections::HashSet;
+
+    let mut pending = HashSet::new();
+    for message in messages {
+        if role_of(message) == Some("user") && !pending.is_empty() {
+            return false;
+        }
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for call in calls {
+                let Some(id) = call.get("id").and_then(Value::as_str) else {
+                    return false;
+                };
+                if id.is_empty() || !pending.insert(id) {
+                    return false;
+                }
+            }
+        }
+        if role_of(message) == Some("tool") {
+            let Some(id) = message.get("tool_call_id").and_then(Value::as_str) else {
+                return false;
+            };
+            if !pending.remove(id) {
+                return false;
+            }
+        }
+    }
+    pending.is_empty()
 }
 
 fn render_for_summary(msgs: &[Value]) -> String {
@@ -332,7 +397,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn maybe_compact_skips_when_within_budget() {
+    async fn maybe_compact_skips_at_the_exact_budget_boundary() {
         struct ShouldNotCall;
         #[async_trait]
         impl Provider for ShouldNotCall {
@@ -352,8 +417,9 @@ mod tests {
         m.maybe_compact(CompactContext {
             provider: &provider,
             model: "x",
-            target_tokens: 10_000,
-            current_tokens: 100,
+            target_tokens: 100,
+            hard_limit_tokens: 20_000,
+            next_request_tokens: 100,
         })
         .await
         .unwrap();
@@ -388,7 +454,8 @@ mod tests {
                 provider: &provider,
                 model: "x",
                 target_tokens: 10,
-                current_tokens: 1_000,
+                hard_limit_tokens: 2_000,
+                next_request_tokens: 1_000,
             })
             .await
             .unwrap()
@@ -410,6 +477,197 @@ mod tests {
                     .unwrap_or(false)
         });
         assert!(has_summary, "summary should be in snapshot: {:?}", snap);
+    }
+
+    #[tokio::test]
+    async fn failed_compaction_leaves_the_original_history_untouched() {
+        struct FailingSummary;
+        #[async_trait]
+        impl Provider for FailingSummary {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Err(crate::error::AgentError::Provider("summary failed".into()))
+            }
+        }
+
+        let mut m = LinearWithCompact::new();
+        m.pin(json!({"role":"system","content":"pinned constraint"}))
+            .await
+            .unwrap();
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            m.record(json!({"role": role, "content": format!("msg{i}")}))
+                .await
+                .unwrap();
+        }
+        let before = m.snapshot().await;
+        let before_len = m.len();
+
+        let error = m
+            .maybe_compact(CompactContext {
+                provider: &FailingSummary,
+                model: "x",
+                target_tokens: 10,
+                hard_limit_tokens: 2_000,
+                next_request_tokens: 1_000,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("summary failed"));
+        assert_eq!(m.snapshot().await, before);
+        assert_eq!(m.len(), before_len);
+    }
+
+    #[tokio::test]
+    async fn empty_compaction_output_is_rejected_without_mutating_history() {
+        struct EmptySummary;
+        #[async_trait]
+        impl Provider for EmptySummary {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: json!({"role":"assistant","content":"   "}),
+                    usage: None,
+                })
+            }
+        }
+
+        let mut m = LinearWithCompact::new();
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            m.record(json!({"role": role, "content": format!("msg{i}")}))
+                .await
+                .unwrap();
+        }
+        let before = m.snapshot().await;
+
+        m.maybe_compact(CompactContext {
+            provider: &EmptySummary,
+            model: "x",
+            target_tokens: 10,
+            hard_limit_tokens: 2_000,
+            next_request_tokens: 1_000,
+        })
+        .await
+        .unwrap_err();
+
+        assert_eq!(m.snapshot().await, before);
+    }
+
+    #[tokio::test]
+    async fn a_summary_larger_than_the_history_it_replaces_is_rejected() {
+        struct BloatedSummary;
+        #[async_trait]
+        impl Provider for BloatedSummary {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: json!({"role":"assistant","content":"x".repeat(4_000)}),
+                    usage: None,
+                })
+            }
+        }
+
+        let mut m = LinearWithCompact::new();
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            m.record(json!({"role": role, "content": format!("msg{i}")}))
+                .await
+                .unwrap();
+        }
+        let before = m.snapshot().await;
+        let error = m
+            .maybe_compact(CompactContext {
+                provider: &BloatedSummary,
+                model: "x",
+                target_tokens: 10,
+                hard_limit_tokens: 10_000,
+                next_request_tokens: 1_000,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("did not reduce context"));
+        assert_eq!(m.snapshot().await, before);
+    }
+
+    #[tokio::test]
+    async fn cancelling_compaction_before_the_provider_returns_keeps_history_intact() {
+        struct NeverReturns;
+        #[async_trait]
+        impl Provider for NeverReturns {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                std::future::pending().await
+            }
+        }
+
+        let mut m = LinearWithCompact::new();
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            m.record(json!({"role": role, "content": format!("msg{i}")}))
+                .await
+                .unwrap();
+        }
+        let before = m.snapshot().await;
+        let provider = NeverReturns;
+        {
+            let future = m.maybe_compact(CompactContext {
+                provider: &provider,
+                model: "x",
+                target_tokens: 10,
+                hard_limit_tokens: 2_000,
+                next_request_tokens: 1_000,
+            });
+            tokio::pin!(future);
+            tokio::select! {
+                _ = &mut future => panic!("provider unexpectedly completed"),
+                _ = tokio::task::yield_now() => {}
+            }
+        }
+
+        assert_eq!(m.snapshot().await, before);
+    }
+
+    #[tokio::test]
+    async fn an_incomplete_tool_cycle_is_never_selected_for_compaction() {
+        struct ShouldNotCall;
+        #[async_trait]
+        impl Provider for ShouldNotCall {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                panic!("malformed tool history must not be summarized")
+            }
+        }
+
+        let mut m = LinearWithCompact::new();
+        m.record(json!({"role":"user","content":"u1"}))
+            .await
+            .unwrap();
+        m.record(json!({
+            "role":"assistant",
+            "tool_calls":[{"id":"missing","type":"function","function":{"name":"X","arguments":"{}"}}]
+        }))
+        .await
+        .unwrap();
+        m.record(json!({"role":"assistant","content":"continued"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"user","content":"u2"}))
+            .await
+            .unwrap();
+        m.record(json!({"role":"assistant","content":"a2"}))
+            .await
+            .unwrap();
+
+        let result = m
+            .maybe_compact(CompactContext {
+                provider: &ShouldNotCall,
+                model: "x",
+                target_tokens: 10,
+                hard_limit_tokens: 2_000,
+                next_request_tokens: 1_000,
+            })
+            .await
+            .unwrap();
+        assert!(result.is_none());
+        assert_eq!(m.messages.len(), 5);
     }
 
     #[tokio::test]
@@ -457,7 +715,8 @@ mod tests {
             provider: &provider,
             model: "x",
             target_tokens: 10,
-            current_tokens: 1_000,
+            hard_limit_tokens: 2_000,
+            next_request_tokens: 1_000,
         })
         .await
         .unwrap();
@@ -495,7 +754,8 @@ mod tests {
             provider: &provider,
             model: "x",
             target_tokens: 10,
-            current_tokens: 1_000,
+            hard_limit_tokens: 2_000,
+            next_request_tokens: 1_000,
         })
         .await
         .unwrap();
@@ -564,7 +824,8 @@ mod tests {
             provider: &provider,
             model: "x",
             target_tokens: 10,
-            current_tokens: 1_000,
+            hard_limit_tokens: 2_000,
+            next_request_tokens: 1_000,
         })
         .await
         .unwrap();
@@ -625,7 +886,8 @@ mod tests {
             provider: &provider,
             model: "x",
             target_tokens: 10_000,
-            current_tokens: 5,
+            hard_limit_tokens: 20_000,
+            next_request_tokens: 5,
         })
         .await
         .unwrap();

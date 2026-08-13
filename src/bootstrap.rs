@@ -177,7 +177,7 @@ pub async fn build_memory(
 /// it puts in the context. Recorded on every observation so two runs are
 /// only compared when they were built the same way.
 pub const MEMORY_STRATEGY: &str = "linear-with-compact";
-pub const MEMORY_STRATEGY_VERSION: u32 = 1;
+pub const MEMORY_STRATEGY_VERSION: u32 = 2;
 
 pub struct RunAccountingProfile {
     pub settings: serde_json::Value,
@@ -211,6 +211,7 @@ pub fn run_accounting_profile(
         "max_turns": max_turns,
         "policy_mode": format!("{:?}", cfg.policy.mode),
         "ctx_window": ctx_window,
+        "context_target_tokens": cfg.agent.context_target_tokens,
         "pricing": price,
     });
     let config_hash = ledger::config_hash(&settings);
@@ -256,6 +257,17 @@ mod accounting_tests {
 
         assert_ne!(before.config_hash, after.config_hash);
         assert_ne!(before.accounting, after.accounting);
+    }
+
+    #[test]
+    fn active_context_target_is_part_of_the_comparability_hash() {
+        let mut cfg = Config::env_default();
+        let before = run_accounting_profile(&cfg, "provider", "model-v1", 40);
+        cfg.agent.context_target_tokens = Some(2_000);
+        let after = run_accounting_profile(&cfg, "provider", "model-v1", 40);
+
+        assert_ne!(before.config_hash, after.config_hash);
+        assert_eq!(after.settings["context_target_tokens"], 2_000);
     }
 }
 

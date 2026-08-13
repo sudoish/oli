@@ -217,6 +217,11 @@ base_url      = "http://localhost:11434/v1"
 api_key       = "ollama"                  # required by spec, ignored by server
 default_model = "qwen3-coder:30b"
 
+[agent]
+# Optional cost/latency target. The model capability remains the hard limit.
+# Omit this to use 80% of the resolved context window.
+context_target_tokens = 120000
+
 [[caps]]
 prefix                          = "qwen3-coder"
 ctx_window                      = 256_000
@@ -253,7 +258,9 @@ beside the transcript, and `oli run --output json` carries the run's
 aggregate under `accounting`. Everything stays on disk; nothing is
 transmitted. Every request and summary carries a run id, so repeated
 resumes remain unambiguous inside the append-only file; normal and failed
-runs both end with a summary record.
+runs both end with a summary record. Compaction calls are explicitly labelled
+and include request tokens before/after, the active and hard limits, tokens
+saved per follow-up, latency, and projected calls to amortize the summary.
 
 `oli replay --fixture <path>` reads a synthetic or captured object containing
 the transcript and ledger arrays, reconstructs full-history request contexts,

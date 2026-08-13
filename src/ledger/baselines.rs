@@ -151,6 +151,7 @@ async fn run_in(
     script: Vec<(Value, Option<Usage>)>,
     prompts: &[&str],
     resumed: bool,
+    ctx_window: Option<usize>,
 ) -> Result<()> {
     let inner: Box<dyn Memory> = Box::new(crate::agent::LinearWithCompact::new());
     let mut persisted = PersistedMemory::open_at(dir.path(), SESSION, inner, true).await?;
@@ -172,6 +173,9 @@ async fn run_in(
     .with_ledger(ledger_for(dir, resumed))
     .pin_system_prompt("you are a coding agent")
     .await?;
+    if let Some(ctx_window) = ctx_window {
+        agent.caps.ctx_window = ctx_window;
+    }
     for p in prompts {
         agent.run(p).await?;
     }
@@ -249,6 +253,7 @@ async fn a_fresh_session_baseline_holds() {
         vec![(text("the answer"), usage(120, 18, 0))],
         &["what is the answer?"],
         false,
+        None,
     )
     .await
     .unwrap();
@@ -265,7 +270,7 @@ async fn a_long_session_baseline_holds() {
         script.push((text("done"), usage(240 + i * 40, 20, 128)));
         prompts.push("keep going");
     }
-    run_in(&dir, script, &prompts, false).await.unwrap();
+    run_in(&dir, script, &prompts, false, None).await.unwrap();
     let fixture = collect(&dir);
     let turns: Vec<u64> = fixture["ledger"]
         .as_array()
@@ -280,10 +285,10 @@ async fn a_long_session_baseline_holds() {
 
 #[tokio::test]
 async fn a_compacted_session_baseline_holds() {
-    // `baseline-model` is unknown to the capability table, so it takes
-    // the conservative 8k window and a 6.4k compaction target. Reporting
-    // more than that drives the next turn through a compaction pass,
-    // whose summary call consumes a scripted response of its own.
+    // Give this synthetic model a 150-token hard window and therefore a
+    // 120-token operating target. The fourth materialized request crosses
+    // that real preflight boundary, so its summary call consumes a scripted
+    // response of its own; provider-reported usage is deliberately irrelevant.
     let dir = tempfile::tempdir().unwrap();
     let script = vec![
         (text("one"), usage(1_000, 10, 0)),
@@ -292,7 +297,7 @@ async fn a_compacted_session_baseline_holds() {
         (text("a summary of the earlier turns"), None),
         (text("four"), usage(3_000, 10, 512)),
     ];
-    run_in(&dir, script, &["a", "b", "c", "d"], false)
+    run_in(&dir, script, &["a", "b", "c", "d"], false, Some(150))
         .await
         .unwrap();
     let fixture = collect(&dir);
@@ -320,6 +325,7 @@ async fn a_resumed_session_baseline_holds() {
         ],
         &["open the file", "now change it"],
         false,
+        None,
     )
     .await
     .unwrap();
@@ -328,6 +334,7 @@ async fn a_resumed_session_baseline_holds() {
         vec![(text("resumed answer"), usage(640, 20, 512))],
         &["carry on"],
         true,
+        None,
     )
     .await
     .unwrap();

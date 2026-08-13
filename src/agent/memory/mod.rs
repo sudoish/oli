@@ -118,17 +118,20 @@ impl ContextParts {
 pub struct CompactContext<'a> {
     pub provider: &'a dyn Provider,
     pub model: &'a str,
-    /// Soft target. Strategies should aim to keep `current_tokens` under
+    /// Soft target. Strategies should aim to keep `next_request_tokens` under
     /// this when they decide to compact.
     pub target_tokens: usize,
-    /// Live token count of the most recent snapshot, supplied by the
-    /// agent's token tracker.
-    pub current_tokens: usize,
+    /// Provider capability, kept distinct from the operating target.
+    pub hard_limit_tokens: usize,
+    /// Preflight estimate of the request about to be dispatched, including
+    /// pinned context, summaries, recent messages, and tool schemas.
+    pub next_request_tokens: usize,
 }
 
 /// Accounting returned when compaction itself dispatches a provider
 /// request. The agent records this as a first-class request so summary
 /// generation cannot disappear from token, cost, or latency totals.
+#[derive(Debug)]
 pub struct CompactionReport {
     pub started_at_ms: u64,
     pub estimated: ContextEstimate,

@@ -27,6 +27,7 @@
       },
       "model": "baseline-model",
       "provider": "baseline-provider",
+      "purpose": "agent",
       "reported": {
         "accounting": "cache_inclusive",
         "billed": {
@@ -49,7 +50,7 @@
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "turn": 1
     },
     {
@@ -79,6 +80,7 @@
       },
       "model": "baseline-model",
       "provider": "baseline-provider",
+      "purpose": "agent",
       "reported": {
         "accounting": "cache_inclusive",
         "billed": {
@@ -101,7 +103,7 @@
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "turn": 2
     },
     {
@@ -170,7 +172,7 @@
       "schema": "oli.ledger/1",
       "session": "baseline",
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "tokens": {
         "cache_read": {
           "reported_calls": 2,
@@ -232,6 +234,7 @@
       },
       "model": "baseline-model",
       "provider": "baseline-provider",
+      "purpose": "agent",
       "reported": {
         "accounting": "cache_inclusive",
         "billed": {
@@ -254,7 +257,7 @@
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "turn": 1
     },
     {
@@ -323,7 +326,7 @@
       "schema": "oli.ledger/1",
       "session": "baseline",
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "tokens": {
         "cache_read": {
           "reported_calls": 1,
