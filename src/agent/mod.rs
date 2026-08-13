@@ -1403,7 +1403,9 @@ mod tests {
         }
 
         let mut mem = LinearWithCompact::new();
-        mem.pin(json!({"role":"system","content":"sys"})).await.unwrap();
+        mem.pin(json!({"role":"system","content":"sys"}))
+            .await
+            .unwrap();
         for i in 0..6 {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
             mem.record(json!({"role": role, "content": format!("msg{}", i)}))
@@ -1421,8 +1423,8 @@ mod tests {
         .unwrap();
 
         let provider = FakeProvider::new(vec![]);
-        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
-            .with_memory(Box::new(mem));
+        let mut agent =
+            Agent::new(Box::new(provider), Registry::new(), "m".into()).with_memory(Box::new(mem));
 
         // Live window is msg4 (user) + msg5 (assistant); undo drops both
         // and leaves the summary intact.

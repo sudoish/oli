@@ -100,7 +100,8 @@ pub struct ContextParts {
 
 impl ContextParts {
     pub fn flatten(&self) -> Vec<Value> {
-        let mut out = Vec::with_capacity(self.pinned.len() + self.summary.len() + self.recent.len());
+        let mut out =
+            Vec::with_capacity(self.pinned.len() + self.summary.len() + self.recent.len());
         out.extend(self.pinned.iter().cloned());
         out.extend(self.summary.iter().cloned());
         out.extend(self.recent.iter().cloned());

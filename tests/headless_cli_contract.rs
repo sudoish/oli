@@ -394,15 +394,23 @@ fn a_run_explains_its_tokens_cost_and_latency_by_context_category() {
     let transcript_path = sandbox.sessions_dir().join(format!("{id}.jsonl"));
     let ledger_path = sandbox.sessions_dir().join(format!("{id}.ledger.jsonl"));
     let transcript_body = transcript(&transcript_path);
-    assert!(!transcript_body.contains("\"latency\""), "{transcript_body}");
-    assert!(transcript_body.contains(r#""op":"meta""#), "{transcript_body}");
+    assert!(
+        !transcript_body.contains("\"latency\""),
+        "{transcript_body}"
+    );
+    assert!(
+        transcript_body.contains(r#""op":"meta""#),
+        "{transcript_body}"
+    );
     let ledger_body = transcript(&ledger_path);
     let kinds: Vec<String> = ledger_body
         .lines()
-        .map(|l| serde_json::from_str::<Value>(l).unwrap()["kind"]
-            .as_str()
-            .unwrap()
-            .to_string())
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
         .collect();
     assert_eq!(kinds, vec!["request", "summary"]);
 

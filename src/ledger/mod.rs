@@ -846,8 +846,8 @@ mod tests {
     async fn records_land_in_the_sink_one_json_object_per_line() {
         let dir = tempfile::tempdir().unwrap();
         let path = ledger_path(dir.path(), "sess-1");
-        let mut ledger = Ledger::new(RunIdentity::default(), PromptAccounting::Unknown)
-            .with_sink(path.clone());
+        let mut ledger =
+            Ledger::new(RunIdentity::default(), PromptAccounting::Unknown).with_sink(path.clone());
         ledger
             .record(1, ContextEstimate::default(), None, Latency::default())
             .await;

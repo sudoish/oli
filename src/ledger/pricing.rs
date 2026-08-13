@@ -307,7 +307,10 @@ mod tests {
         // change the answer.
         let quiet = cost_of(&billed(10, 0, 0, 5), Some(&price));
         let expected = 10.0 * 3.0 / 1e6 + 5.0 * 15.0 / 1e6;
-        assert!((quiet.amount.unwrap() - expected).abs() < 1e-12, "{quiet:?}");
+        assert!(
+            (quiet.amount.unwrap() - expected).abs() < 1e-12,
+            "{quiet:?}"
+        );
 
         // The moment it's used, the gap matters.
         let loud = cost_of(&billed(10, 900, 0, 5), Some(&price));

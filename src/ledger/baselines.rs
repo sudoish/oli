@@ -158,11 +158,15 @@ async fn run_in(
         }))
         .await?;
 
-    let mut agent = Agent::new(Box::new(ScriptedProvider::new(script)), tools(), MODEL.into())
-        .with_memory(Box::new(persisted))
-        .with_ledger(ledger_for(dir, resumed))
-        .pin_system_prompt("you are a coding agent")
-        .await?;
+    let mut agent = Agent::new(
+        Box::new(ScriptedProvider::new(script)),
+        tools(),
+        MODEL.into(),
+    )
+    .with_memory(Box::new(persisted))
+    .with_ledger(ledger_for(dir, resumed))
+    .pin_system_prompt("you are a coding agent")
+    .await?;
     for p in prompts {
         agent.run(p).await?;
     }
@@ -226,8 +230,7 @@ fn assert_fixture(name: &str, actual: &Value) {
         )
     });
     assert_eq!(
-        rendered,
-        expected,
+        rendered, expected,
         "baseline {name} drifted. If the change is intended, regenerate \
          with OLI_UPDATE_FIXTURES=1 and review the diff."
     );
