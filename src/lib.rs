@@ -40,6 +40,7 @@ pub mod config;
 pub mod diagnostics;
 pub mod error;
 pub mod hooks;
+pub mod ledger;
 pub mod mcp;
 pub mod notes;
 pub mod plugins;

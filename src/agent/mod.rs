@@ -21,12 +21,14 @@
 //!   tools yes/no, streaming, etc.).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::error::Result;
 use crate::hooks::{HookRegistry, PreToolDecision};
+use crate::ledger::{Latency, Ledger, as_ms, estimate_context};
 use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
 use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage, UsageTotals};
 use crate::tools::{Registry, ToolContext};
@@ -87,6 +89,11 @@ pub struct Agent {
     /// so the user can spot a session that's drifting expensive. Calls
     /// a provider didn't report are counted, not summed as zero.
     pub session_usage: UsageTotals,
+    /// Per-request accounting for this run: preflight estimate, context
+    /// attribution, reported tokens, latency, cost. Detail stays local
+    /// (in memory, and on disk when a session sink is attached); only
+    /// `Ledger::summary` is shaped for export.
+    pub ledger: Ledger,
     /// Gate every tool call. Default is `ConfigPolicy::defaults()` (Read /
     /// Glob / Grep auto-allow, Edit / Write / Bash ask, common dev shell
     /// commands on the bash allowlist).
@@ -133,6 +140,7 @@ impl Agent {
             memory: Box::new(LinearWithCompact::new()),
             last_usage: None,
             session_usage: UsageTotals::default(),
+            ledger: Ledger::default(),
             policy: Box::new(ConfigPolicy::defaults()),
             approver: Box::new(AlwaysApprove),
             cfg: None,
@@ -155,6 +163,13 @@ impl Agent {
     /// Stash plugin metadata for later introspection by `/plugins`.
     pub fn with_plugin_manifest(mut self, manifest: Vec<crate::plugins::PluginManifest>) -> Self {
         self.plugin_manifest = manifest;
+        self
+    }
+
+    /// Attach a pre-built accounting ledger. Builder; the binary uses it
+    /// to bind a session's on-disk sink and the resolved rate card.
+    pub fn with_ledger(mut self, ledger: Ledger) -> Self {
+        self.ledger = ledger;
         self
     }
 
@@ -372,6 +387,7 @@ impl Agent {
             // load per server; on a turn where a server pushed an
             // update, we refetch its `tools/list` and swap registry
             // entries so the model can see the deltas on this turn.
+            let build_started = Instant::now();
             if !self.mcp_handles.is_empty() {
                 let deltas = crate::mcp::refresh_changed_tools(self.mcp_handles.as_ref()).await;
                 for d in deltas {
@@ -388,6 +404,7 @@ impl Agent {
                 .and_then(|u| u.prompt_tokens)
                 .map(|p| p as usize)
                 .unwrap_or(0);
+            let compact_started = Instant::now();
             self.memory
                 .maybe_compact(CompactContext {
                     provider: self.provider.as_ref(),
@@ -396,15 +413,39 @@ impl Agent {
                     current_tokens,
                 })
                 .await?;
+            let compaction_ms = as_ms(compact_started.elapsed());
 
+            let parts = self.memory.snapshot_parts().await;
+            let tool_schemas = self.tools.openai_schemas();
+            let estimated = estimate_context(&parts, &tool_schemas);
             let req = ChatRequest {
                 model: self.model.clone(),
-                messages: self.memory.snapshot().await,
-                tools: self.tools.openai_schemas(),
+                messages: parts.flatten(),
+                tools: tool_schemas,
+            };
+            let mut latency = Latency {
+                context_build_ms: as_ms(build_started.elapsed()),
+                compaction_ms,
+                ..Latency::default()
             };
 
-            let sink_dyn: StreamSink<'_> = sink;
-            let resp = self.provider.chat_stream(req, sink_dyn).await?;
+            let model_started = Instant::now();
+            // Time to first token is only observable from the stream,
+            // and only when the turn produces text at all — a pure
+            // tool-call round exposes nothing to time.
+            let mut ttft = None;
+            let resp = {
+                let mut timed = |ev: StreamEvent<'_>| {
+                    if ttft.is_none() && matches!(ev, StreamEvent::Content(_)) {
+                        ttft = Some(as_ms(model_started.elapsed()));
+                    }
+                    sink(ev);
+                };
+                let sink_dyn: StreamSink<'_> = &mut timed;
+                self.provider.chat_stream(req, sink_dyn).await?
+            };
+            latency.model_ms = as_ms(model_started.elapsed());
+            latency.ttft_ms = ttft;
             self.session_usage.add(resp.usage);
             if let Some(u) = resp.usage {
                 self.last_usage = Some(u);
@@ -434,6 +475,9 @@ impl Agent {
             self.memory.record(message).await?;
 
             if tool_calls.is_empty() {
+                self.ledger
+                    .record(turn as u32, estimated, resp.usage, latency)
+                    .await;
                 let content = resp
                     .message
                     .get("content")
@@ -444,6 +488,7 @@ impl Agent {
                 return Ok(RunOutcome::Completed(content));
             }
 
+            let tools_started = Instant::now();
             for call in &tool_calls {
                 let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = call
@@ -484,6 +529,10 @@ impl Agent {
                     }))
                     .await?;
             }
+            latency.tool_ms = as_ms(tools_started.elapsed());
+            self.ledger
+                .record(turn as u32, estimated, resp.usage, latency)
+                .await;
         }
     }
 }
