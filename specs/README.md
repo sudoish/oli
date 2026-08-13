@@ -18,7 +18,7 @@ will land alongside it as `specs/<topic>.md`.
 | [`specs/polish.md`](polish.md)      | The 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, packaging.                              |
 | [`specs/private-agent-roadmap.md`](private-agent-roadmap.md) | Product and content roadmap for private remote workstations, model and MCP service planes, and privacy-preserving operations. |
 | [`specs/memory.md`](memory.md)      | `Memory` trait design — pluggable strategies (linear+compact default, RAG, graph, hierarchical).                            |
-| [`specs/mcp.md`](mcp.md)            | MCP client design (phase 5). stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.          |
+| [`specs/mcp.md`](mcp.md)            | MCP client design. stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.                    |
 | [`docs/cheatsheet.md`](../docs/cheatsheet.md) | Every slash command, file path, and env var in one page.                                                          |
 | [`AGENTS.md`](../AGENTS.md)         | Module map and working discipline. The closest thing to a current-state doc.                                                |
 

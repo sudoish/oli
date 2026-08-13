@@ -63,7 +63,7 @@ of TOML.
 - **Extensible without recompiling.** Drop a `.lua` file in
   `~/.config/oli/plugins/` to register tools, slash commands, and
   hooks. Drop three lines of TOML to wire up an external binary as a
-  tool. Connect MCP servers over stdio or SSE.
+  tool. Connect MCP servers over stdio or streamable-http.
 - **Resumable and scriptable.** Every run is a JSONL transcript at
   `~/.config/oli/sessions/<id>.jsonl`. `oli run --conversation <id>` and
   `oli run --continue` replay it; `/sessions` browses the lot.
@@ -406,7 +406,7 @@ Five surfaces, increasing in how much they ask of you:
 | Surface | Touches | Requires |
 | --- | --- | --- |
 | **Subprocess tool** | `config.toml` | An executable that reads JSON on stdin, writes a result on stdout. Any language. |
-| **MCP server** | `config.toml` | An MCP-conformant server (stdio or SSE). |
+| **MCP server** | `config.toml` | An MCP-conformant server (stdio or streamable-http). |
 | **Lua plugin** | A single `.lua` file in a discovery dir | Lua. Hot-reloads. |
 | **Hook** | A Lua plugin OR an MCP-registered handler | Same as the surface that owns it. |
 | **Native code** | Edit `src/` and rebuild | Rust. |
@@ -504,7 +504,7 @@ A working Python example with a three-tier testing guide lives at
 
 ### MCP servers
 
-oli is a Model Context Protocol client (stdio + SSE). Add a server
+oli is a Model Context Protocol client (stdio + streamable-http). Add a server
 in config and its tools show up in `/tools` alongside the built-ins:
 
 ```toml
@@ -582,7 +582,7 @@ src/
 │                    #            notes, subprocess
 ├── policy/          # auto_allow / ask / bash_allowlist + persisted allow-list
 ├── plugins/         # Lua runtime (mlua), discovery dirs, hot-reload
-├── mcp/             # MCP clients (stdio + SSE)
+├── mcp/             # MCP clients (stdio + streamable-http)
 ├── hooks/           # PreToolUse / PostToolUse / Stop dispatch
 ├── repl/            # line-mode REPL + SlashRegistry + built-in slash commands
 ├── notes/           # cross-session note store (filesystem, TOML frontmatter)
@@ -609,4 +609,4 @@ hooks — one mechanism, two registration sources.
 | Write a plugin | [`examples/README.md`](examples/README.md) — 60-second tour + host API reference. |
 | Modify the code | [`AGENTS.md`](AGENTS.md) — module map, "where to add what" table, testing conventions, gotchas. |
 | Read the memory design | [`specs/memory.md`](specs/memory.md) — `Memory` trait + pluggable strategies (linear+compact, RAG, graph, hierarchical). |
-| Read the MCP design | [`specs/mcp.md`](specs/mcp.md) — stdio + SSE transports, refresh semantics. |
+| Read the MCP design | [`specs/mcp.md`](specs/mcp.md) — stdio + streamable-http transports, refresh semantics. |
