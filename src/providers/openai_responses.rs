@@ -806,8 +806,11 @@ fn usage_from_responses(usage: &Value) -> Option<Usage> {
         cache_read_tokens: usage
             .get("input_tokens_details")
             .and_then(|d| token_count(d, "cached_tokens")),
-        // The Responses API has no cache-write counter.
-        cache_write_tokens: None,
+        // Only GPT-5.6-class models report cache writes; earlier ones
+        // omit the key, which is unknown rather than zero.
+        cache_write_tokens: usage
+            .get("input_tokens_details")
+            .and_then(|d| token_count(d, "cache_write_tokens")),
         reasoning_tokens: usage
             .get("output_tokens_details")
             .and_then(|d| token_count(d, "reasoning_tokens")),
@@ -1256,7 +1259,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_token_details_populate_cache_read_and_reasoning() {
+    fn responses_token_details_populate_cache_read_write_and_reasoning() {
         let mut acc = ResponsesAcc::default();
         apply(
             &mut acc,
@@ -1264,7 +1267,7 @@ mod tests {
                 "type": "response.completed",
                 "response": {"usage": {
                     "input_tokens": 100,
-                    "input_tokens_details": {"cached_tokens": 80},
+                    "input_tokens_details": {"cached_tokens": 80, "cache_write_tokens": 20},
                     "output_tokens": 40,
                     "output_tokens_details": {"reasoning_tokens": 32},
                     "total_tokens": 140
@@ -1273,14 +1276,26 @@ mod tests {
         );
         let u = acc.finish().usage.unwrap();
         assert_eq!(u.cache_read_tokens, Some(80));
+        assert_eq!(u.cache_write_tokens, Some(20));
         assert_eq!(u.reasoning_tokens, Some(32));
-        assert_eq!(u.cache_write_tokens, None);
+    }
+
+    #[test]
+    fn a_wire_total_is_taken_as_given_even_when_it_differs_from_the_sum() {
+        let u = usage_from_responses(&json!({
+            "input_tokens": 3,
+            "output_tokens": 5,
+            "total_tokens": 100
+        }))
+        .unwrap();
+        assert_eq!(u.total_tokens, Some(100));
     }
 
     #[test]
     fn absent_responses_token_details_stay_unknown_rather_than_zero() {
         let u = usage_from_responses(&json!({"input_tokens": 3, "output_tokens": 5})).unwrap();
         assert_eq!(u.cache_read_tokens, None);
+        assert_eq!(u.cache_write_tokens, None);
         assert_eq!(u.reasoning_tokens, None);
     }
 

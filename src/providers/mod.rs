@@ -326,8 +326,11 @@ impl Usage {
             cache_read_tokens: v
                 .get("prompt_tokens_details")
                 .and_then(|d| token_count(d, "cached_tokens")),
-            // Chat Completions has no cache-write counter.
-            cache_write_tokens: None,
+            // Only GPT-5.6-class models report cache writes; earlier
+            // ones omit the key, which is unknown rather than zero.
+            cache_write_tokens: v
+                .get("prompt_tokens_details")
+                .and_then(|d| token_count(d, "cache_write_tokens")),
             reasoning_tokens: v
                 .get("completion_tokens_details")
                 .and_then(|d| token_count(d, "reasoning_tokens")),
@@ -347,7 +350,7 @@ impl Usage {
 }
 
 pub(crate) fn token_count(v: &Value, key: &str) -> Option<u32> {
-    v.get(key)?.as_u64().map(|n| n.min(u32::MAX as u64) as u32)
+    v.get(key)?.as_u64().map(|n| n as u32)
 }
 
 /// A total the wire omitted is the sum of its parts — but only once
@@ -362,18 +365,14 @@ pub(crate) fn derived_total(prompt: Option<u32>, completion: Option<u32>) -> Opt
 /// session it actually covers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TokenTotal {
-    pub tokens: u64,
-    pub reported_calls: u32,
+    tokens: Option<u64>,
     pub unreported_calls: u32,
 }
 
 impl TokenTotal {
     fn add(&mut self, value: Option<u32>) {
         match value {
-            Some(n) => {
-                self.tokens += u64::from(n);
-                self.reported_calls += 1;
-            }
+            Some(n) => *self.tokens.get_or_insert(0) += u64::from(n),
             None => self.unreported_calls += 1,
         }
     }
@@ -381,7 +380,7 @@ impl TokenTotal {
     /// `None` when no call reported this category: the sum of nothing
     /// is unknown, not zero.
     pub fn reported(&self) -> Option<u64> {
-        (self.reported_calls > 0).then_some(self.tokens)
+        self.tokens
     }
 }
 
@@ -451,18 +450,31 @@ mod usage_tests {
     }
 
     #[test]
-    fn openai_token_details_populate_cache_read_and_reasoning() {
+    fn openai_token_details_populate_cache_read_write_and_reasoning() {
         let u = Usage::from_value(&json!({
             "prompt_tokens": 100,
             "completion_tokens": 20,
             "total_tokens": 120,
-            "prompt_tokens_details": {"cached_tokens": 64},
+            "prompt_tokens_details": {"cached_tokens": 1920, "cache_write_tokens": 512},
             "completion_tokens_details": {"reasoning_tokens": 12}
         }))
         .unwrap();
-        assert_eq!(u.cache_read_tokens, Some(64));
+        assert_eq!(u.cache_read_tokens, Some(1920));
+        assert_eq!(u.cache_write_tokens, Some(512));
         assert_eq!(u.reasoning_tokens, Some(12));
-        // Chat Completions never reports a cache-write count.
+    }
+
+    #[test]
+    fn a_model_too_old_to_report_cache_writes_leaves_them_unknown() {
+        // Pre-GPT-5.6 models report cached_tokens and omit the write
+        // counter entirely — which is unknown, not zero.
+        let u = Usage::from_value(&json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 20,
+            "prompt_tokens_details": {"cached_tokens": 64}
+        }))
+        .unwrap();
+        assert_eq!(u.cache_read_tokens, Some(64));
         assert_eq!(u.cache_write_tokens, None);
     }
 
@@ -473,6 +485,19 @@ mod usage_tests {
 
         let half = Usage::from_value(&json!({"prompt_tokens": 3})).unwrap();
         assert_eq!(half.total_tokens, None);
+    }
+
+    #[test]
+    fn a_wire_total_is_taken_as_given_even_when_it_differs_from_the_sum() {
+        // The provider bills the total; deriving over the top of a
+        // reported one would substitute our arithmetic for its answer.
+        let u = Usage::from_value(&json!({
+            "prompt_tokens": 3,
+            "completion_tokens": 5,
+            "total_tokens": 100
+        }))
+        .unwrap();
+        assert_eq!(u.total_tokens, Some(100));
     }
 
     #[test]

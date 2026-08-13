@@ -348,8 +348,12 @@ fn anthropic_usage_from_value(v: &Value) -> Option<Usage> {
 fn merge_usage(slot: &mut Option<Usage>, fresh: Usage) {
     match slot {
         Some(u) => {
-            // message_delta carries the running output count; the input
-            // and cache counts only ever arrive on message_start.
+            // message_delta usage is cumulative for every field it
+            // carries — but with client-side tools the only field it
+            // carries is output_tokens, so the input and cache counts
+            // stand as message_start reported them. A stream that did
+            // resend them (server-tool turns do) would need the newer
+            // value to win here.
             if fresh.completion_tokens.is_some() {
                 u.completion_tokens = fresh.completion_tokens;
             }
@@ -775,6 +779,55 @@ mod tests {
         // lost on the way through.
         assert_eq!(u.cache_read_tokens, Some(900));
         assert_eq!(u.cache_write_tokens, Some(40));
+    }
+
+    #[test]
+    fn a_delta_reporting_zero_output_tokens_is_taken_as_reported() {
+        // Deltas are cumulative, so a zero here is a real count, not the
+        // absence of one. Anthropic doesn't emit it (message_start
+        // already carries output_tokens >= 1), but if it did, zero is
+        // what the wire said.
+        let mut slot = Some(Usage {
+            prompt_tokens: Some(100),
+            completion_tokens: Some(5),
+            total_tokens: Some(105),
+            ..Usage::default()
+        });
+        merge_usage(
+            &mut slot,
+            Usage {
+                completion_tokens: Some(0),
+                ..Usage::default()
+            },
+        );
+        let u = slot.unwrap();
+        assert_eq!(u.completion_tokens, Some(0));
+        assert_eq!(u.prompt_tokens, Some(100));
+        assert_eq!(u.total_tokens, Some(100));
+    }
+
+    #[test]
+    fn a_delta_repeating_the_input_count_does_not_displace_message_start() {
+        // Only server-tool turns resend input_tokens on a delta, which
+        // oli never asks for. Pinning the current behaviour so changing
+        // it stays a deliberate decision rather than an accident.
+        let mut slot = Some(Usage {
+            prompt_tokens: Some(2679),
+            completion_tokens: Some(1),
+            total_tokens: Some(2680),
+            ..Usage::default()
+        });
+        merge_usage(
+            &mut slot,
+            Usage {
+                prompt_tokens: Some(10682),
+                completion_tokens: Some(42),
+                ..Usage::default()
+            },
+        );
+        let u = slot.unwrap();
+        assert_eq!(u.prompt_tokens, Some(2679));
+        assert_eq!(u.completion_tokens, Some(42));
     }
 
     #[test]
