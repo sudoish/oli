@@ -60,6 +60,13 @@ pub struct Config {
     #[serde(default)]
     pub caps: Vec<crate::agent::caps::CapsOverride>,
 
+    /// Dated token rates, one `[[pricing]]` block per model prefix and
+    /// effective date. Empty by default: there is no rate that is right
+    /// for every account, and a wrong price reads as authoritative, so
+    /// an unpriced model costs an explicit unknown instead.
+    #[serde(default)]
+    pub pricing: Vec<crate::ledger::PriceEntry>,
+
     /// Top-level agent runtime knobs.
     #[serde(default)]
     pub agent: AgentConfig,
@@ -271,6 +278,7 @@ impl Config {
             policy: PolicyConfig::default(),
             tools: ToolsConfig::default(),
             caps: Vec::new(),
+            pricing: Vec::new(),
             agent: AgentConfig::default(),
             mcp: McpConfig::default(),
         }
@@ -713,6 +721,32 @@ base_url = "u"
 "#;
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.agent.max_turns, 40);
+    }
+
+    #[test]
+    fn pricing_blocks_parse_with_their_dates_and_optional_cache_rates() {
+        let cfg = Config::from_str(&format!(
+            "{SAMPLE}\n\
+             [[pricing]]\n\
+             model = \"anthropic/claude-haiku\"\n\
+             effective = \"2026-01-01\"\n\
+             input_per_mtok = 1.0\n\
+             output_per_mtok = 5.0\n\
+             cache_read_per_mtok = 0.1\n"
+        ))
+        .unwrap();
+        assert_eq!(cfg.pricing.len(), 1);
+        let p = &cfg.pricing[0];
+        assert_eq!(p.effective.as_deref(), Some("2026-01-01"));
+        // Currency defaults rather than forcing every block to say USD.
+        assert_eq!(p.currency, "USD");
+        assert_eq!(p.cache_write_per_mtok, None);
+    }
+
+    #[test]
+    fn a_config_with_no_pricing_section_prices_nothing() {
+        let cfg = Config::from_str(SAMPLE).unwrap();
+        assert!(cfg.pricing.is_empty());
     }
 
     #[test]

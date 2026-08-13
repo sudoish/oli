@@ -12,9 +12,13 @@ use std::sync::Arc;
 
 use oli::agent::context::SystemPromptBuilder;
 use oli::agent::{Agent, RunOutcome};
-use oli::bootstrap::{DefaultAgentSpawner, build_default_tools, build_memory, resolve_session_id};
+use oli::bootstrap::{
+    DefaultAgentSpawner, build_default_tools, build_memory, build_run_accounting,
+    resolve_session_id,
+};
 use oli::config::Config;
 use oli::error::Result;
+use oli::ledger::RunSummary;
 use oli::policy::{AlwaysDeny, ConfigPolicy, PolicyConfig, PolicyMode, ReadlineApprover};
 use oli::providers::{Provider as ProviderTrait, UsageTotals};
 use oli::tools::task::{SubagentSpawner, Task};
@@ -557,6 +561,10 @@ struct CompletedRun<'a> {
     provider: &'a str,
     model: &'a str,
     usage: Option<UsageOutput>,
+    /// Bounded end-of-run aggregates: estimated tokens by context
+    /// category, latency, and cost. Detail stays in the session's
+    /// ledger file on disk.
+    accounting: RunSummary,
 }
 
 #[derive(Serialize)]
@@ -568,6 +576,7 @@ struct IncompleteRun<'a> {
     provider: &'a str,
     model: &'a str,
     usage: Option<UsageOutput>,
+    accounting: RunSummary,
 }
 
 fn text_exhaustion_diagnostic(limit: usize, message: &str, conversation_id: &str) -> String {
@@ -672,7 +681,25 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
         .map(|(options, _)| (options.conversation.as_deref(), options.continue_session))
         .unwrap_or((None, false));
     let (session_id, is_fresh) = resolve_session_id(conversation, continue_session)?;
-    let (memory, replayed_reads, read_logger) = build_memory(Some(&session_id), is_fresh).await?;
+
+    let max_turns = headless
+        .as_ref()
+        .and_then(|(options, _)| options.max_turns)
+        .unwrap_or(cfg.agent.max_turns);
+
+    // Session identity goes in the transcript; measurements go to the
+    // ledger's own sibling file, never into the audit log.
+    let (session_meta, ledger) = build_run_accounting(
+        &cfg,
+        &output_provider,
+        &output_model,
+        &session_id,
+        is_fresh,
+        max_turns,
+    );
+    let ledger_path = ledger.path().map(|p| p.display().to_string());
+    let (memory, replayed_reads, read_logger) =
+        build_memory(Some(&session_id), is_fresh, Some(session_meta)).await?;
 
     let mut hooks = hooks::HookRegistry::new();
     for h in plugin_hooks {
@@ -685,11 +712,6 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
         hooks.register(repl::ProgressHook);
     }
 
-    let max_turns = headless
-        .as_ref()
-        .and_then(|(options, _)| options.max_turns)
-        .unwrap_or(cfg.agent.max_turns);
-
     let agent_base = Agent::new(provider, tools, model)
         .with_policy(policy)
         .with_config(cfg.clone(), provider_name)
@@ -697,6 +719,7 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
         .with_hooks(hooks)
         .with_plugin_manifest(plugin_manifest)
         .with_mcp_handles(mcp_handles.clone())
+        .with_ledger(ledger)
         .with_max_turns(max_turns);
 
     // Wire up read-set persistence: drained replay paths repopulate the
@@ -718,7 +741,9 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                 .with_approver(Box::new(AlwaysDeny))
                 .pin_system_prompt(system_prompt)
                 .await?;
-            let outcome = agent.run(&prompt).await?;
+            let outcome = agent.run(&prompt).await;
+            let accounting = agent.ledger.finish().await;
+            let outcome = outcome?;
             // No call reported anything at all — say nothing rather than
             // emit a shape full of nulls.
             let usage = agent
@@ -744,6 +769,7 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                                 provider: &output_provider,
                                 model: &output_model,
                                 usage,
+                                accounting,
                             };
                             println!("{}", serde_json::to_string(&result)?);
                         }
@@ -757,6 +783,9 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                         println!("{response}");
                     }
                     eprintln!("conversation: {session_id}");
+                    if let Some(path) = &ledger_path {
+                        eprintln!("accounting: {path}");
+                    }
                 }
                 OutputMode::Json => {
                     let result = CompletedRun {
@@ -766,6 +795,7 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
                         provider: &output_provider,
                         model: &output_model,
                         usage,
+                        accounting,
                     };
                     println!("{}", serde_json::to_string(&result)?);
                 }
@@ -860,12 +890,40 @@ mod tests {
                 total_tokens: Some(5),
                 ..Usage::default()
             }]))),
+            accounting: accounting(),
         };
         let value = serde_json::to_value(run).unwrap();
         assert_eq!(value["status"], "completed");
         assert_eq!(value["conversation_id"], "c1");
         assert_eq!(value["response"], "done");
         assert_eq!(value["usage"]["total_tokens"], 5);
+    }
+
+    fn accounting() -> RunSummary {
+        oli::ledger::Ledger::default().summary()
+    }
+
+    #[test]
+    fn a_completed_run_carries_bounded_accounting_aggregates_and_no_content() {
+        let value = serde_json::to_value(CompletedRun {
+            status: "completed",
+            conversation_id: "c1",
+            response: "done",
+            provider: "test",
+            model: "test-model",
+            usage: None,
+            accounting: accounting(),
+        })
+        .unwrap();
+        let a = &value["accounting"];
+        assert_eq!(a["kind"], "summary");
+        assert_eq!(a["schema"], oli::ledger::SCHEMA);
+        assert_eq!(a["calls"], 0);
+        // Totals and counts only: no prompts, no tool arguments, no
+        // paths, nothing the run actually said.
+        assert!(a["context"]["total"].is_number());
+        assert!(a["cost"]["amount"].is_null());
+        assert!(a["first_request"].is_null());
     }
 
     fn totals(calls: &[Usage]) -> UsageTotals {
@@ -923,6 +981,7 @@ mod tests {
             provider: "local",
             model: "model",
             usage: None,
+            accounting: accounting(),
         };
         let value = serde_json::to_value(run).unwrap();
         assert!(value["usage"].is_null());

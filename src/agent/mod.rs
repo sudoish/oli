@@ -21,12 +21,14 @@
 //!   tools yes/no, streaming, etc.).
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::error::Result;
 use crate::hooks::{HookRegistry, PreToolDecision};
+use crate::ledger::{Latency, Ledger, as_ms, estimate_context, now_ms};
 use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
 use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage, UsageTotals};
 use crate::tools::{Registry, ToolContext};
@@ -58,7 +60,7 @@ pub mod memory;
 pub mod tool_parse;
 
 pub use caps::{ModelCaps, caps_for, caps_for_with_overrides};
-pub use memory::{CompactContext, LinearWithCompact, Memory};
+pub use memory::{CompactContext, CompactionReport, LinearWithCompact, Memory};
 
 pub struct Agent {
     pub provider: Box<dyn Provider>,
@@ -87,6 +89,11 @@ pub struct Agent {
     /// so the user can spot a session that's drifting expensive. Calls
     /// a provider didn't report are counted, not summed as zero.
     pub session_usage: UsageTotals,
+    /// Per-request accounting for this run: preflight estimate, context
+    /// attribution, reported tokens, latency, cost. Detail stays local
+    /// (in memory, and on disk when a session sink is attached); only
+    /// `Ledger::summary` is shaped for export.
+    pub ledger: Ledger,
     /// Gate every tool call. Default is `ConfigPolicy::defaults()` (Read /
     /// Glob / Grep auto-allow, Edit / Write / Bash ask, common dev shell
     /// commands on the bash allowlist).
@@ -133,6 +140,7 @@ impl Agent {
             memory: Box::new(LinearWithCompact::new()),
             last_usage: None,
             session_usage: UsageTotals::default(),
+            ledger: Ledger::default(),
             policy: Box::new(ConfigPolicy::defaults()),
             approver: Box::new(AlwaysApprove),
             cfg: None,
@@ -155,6 +163,13 @@ impl Agent {
     /// Stash plugin metadata for later introspection by `/plugins`.
     pub fn with_plugin_manifest(mut self, manifest: Vec<crate::plugins::PluginManifest>) -> Self {
         self.plugin_manifest = manifest;
+        self
+    }
+
+    /// Attach a pre-built accounting ledger. Builder; the binary uses it
+    /// to bind a session's on-disk sink and the resolved rate card.
+    pub fn with_ledger(mut self, ledger: Ledger) -> Self {
+        self.ledger = ledger;
         self
     }
 
@@ -195,6 +210,27 @@ impl Agent {
             Some(cfg) => caps_for_with_overrides(model, &cfg.caps),
             None => caps_for(model),
         }
+    }
+
+    /// Re-resolve the ledger inputs that can change in a live REPL.
+    /// Call after swapping provider/model or installing a reloaded config.
+    pub fn refresh_ledger_accounting(&mut self) {
+        let Some(cfg) = self.cfg.clone() else {
+            return;
+        };
+        let profile = crate::bootstrap::run_accounting_profile(
+            cfg.as_ref(),
+            &self.provider_name,
+            &self.model,
+            self.max_turns.unwrap_or(0),
+        );
+        self.ledger.reconfigure(
+            self.provider_name.clone(),
+            self.model.clone(),
+            profile.config_hash,
+            profile.accounting,
+            profile.price,
+        );
     }
 
     /// Override the default policy. Pairs with `with_approver` for
@@ -247,6 +283,8 @@ impl Agent {
         self.ctx = ToolContext::new();
         self.last_usage = None;
         self.session_usage = UsageTotals::default();
+        // The ledger is not reset: it records what the process actually
+        // spent, and dropping history doesn't refund it.
         Ok(())
     }
 
@@ -266,49 +304,26 @@ impl Agent {
     /// Pinned content (the system prompt) and the rolling
     /// summary are preserved.
     pub async fn undo_last_user_turn(&mut self) -> Option<String> {
-        let snap = self.memory.snapshot().await;
-        let pinned = self.memory.pinned().await;
-        let pin_count = pinned.len();
-        // Find the index of the last user message in the
-        // snapshot. The snapshot includes pinned + (optional
-        // summary) + live records; we need to translate the
-        // snapshot index back to a logical record position.
-        let last_user_snap = snap
+        // Only the `recent` part maps onto logical record positions:
+        // pinned content and the rolling summary were never `record`ed.
+        let parts = self.memory.snapshot_parts().await;
+        let (offset, _) = parts
+            .recent
             .iter()
             .enumerate()
             .rev()
-            .find(|(_, m)| m.get("role").and_then(|v| v.as_str()) == Some("user"))
-            .map(|(i, _)| i);
-        let snap_idx = last_user_snap?;
-        // Skip if the match is in the pinned prefix.
-        if snap_idx < pin_count {
-            return None;
-        }
-        let body = snap
-            .get(snap_idx)
-            .and_then(|m| m.get("content"))
+            .find(|(_, m)| m.get("role").and_then(|v| v.as_str()) == Some("user"))?;
+        let body = parts.recent[offset]
+            .get("content")
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        // Number of pre-user records (relative to pinned + summary):
-        // snap_idx - pin_count, then subtract any leading summary
-        // entry (LinearWithCompact emits one between pinned and
-        // live). We don't have a direct "is_summary" check, so
-        // approximate: the summary is a system-role message
-        // emitted by `LinearWithCompact::maybe_compact`. If the
-        // first non-pinned snap entry has role==system AND we
-        // *might* have run compact, treat it as a summary slot.
-        let mut record_idx = snap_idx - pin_count;
-        if let Some(first_post_pin) = snap.get(pin_count) {
-            if first_post_pin.get("role").and_then(|v| v.as_str()) == Some("system")
-                && record_idx > 0
-            {
-                record_idx -= 1;
-            }
-        }
+        // `recent` is the tail of the record sequence, so its first
+        // element sits at `len() - recent.len()`.
+        let base = self.memory.len().checked_sub(parts.recent.len())?;
         // Truncate before the user message — i.e. drop the user
         // message itself and everything after it.
-        self.memory.truncate(record_idx).await.ok()?;
+        self.memory.truncate(base + offset).await.ok()?;
         Some(body)
     }
 
@@ -317,14 +332,36 @@ impl Agent {
     /// returns — strategies that decide there's nothing to compact (too
     /// few messages) report success without changing state.
     pub async fn force_compact(&mut self) -> Result<()> {
-        self.memory
+        let report = self
+            .memory
             .maybe_compact(CompactContext {
                 provider: self.provider.as_ref(),
                 model: &self.model,
                 target_tokens: 0,
                 current_tokens: usize::MAX,
             })
-            .await
+            .await?;
+        if let Some(report) = report {
+            let turn = self.ledger.summary().turns.saturating_add(1);
+            self.record_compaction(turn, report).await;
+        }
+        Ok(())
+    }
+
+    async fn record_compaction(&mut self, turn: u32, report: CompactionReport) {
+        self.session_usage.add(report.usage);
+        if let Some(usage) = report.usage {
+            self.last_usage = Some(usage);
+        }
+        self.ledger
+            .record_started(
+                report.started_at_ms,
+                turn,
+                report.estimated,
+                report.usage,
+                report.latency,
+            )
+            .await;
     }
 
     /// Run a single tool call through the policy gate, then through the
@@ -376,10 +413,11 @@ impl Agent {
             .record(json!({ "role": "user", "content": prompt }))
             .await?;
 
-        let mut turn = 0usize;
+        let first_turn = self.ledger.next_turn();
+        let mut invocation_turn = 0usize;
         loop {
             if let Some(cap) = self.max_turns {
-                if turn >= cap {
+                if invocation_turn >= cap {
                     let msg = format!("(max_turns reached: {})", cap);
                     let msg = self.hooks.dispatch_stop(msg).await;
                     return Ok(RunOutcome::MaxTurnsExhausted {
@@ -388,8 +426,10 @@ impl Agent {
                     });
                 }
             }
-            turn += 1;
+            let turn = first_turn.saturating_add(invocation_turn as u32);
+            invocation_turn += 1;
 
+            let build_started = Instant::now();
             // Sync MCP tools that have notified `tools/list_changed`
             // since the last turn. Cost on a quiet turn is one atomic
             // load per server; on a turn where a server pushed an
@@ -411,7 +451,9 @@ impl Agent {
                 .and_then(|u| u.prompt_tokens)
                 .map(|p| p as usize)
                 .unwrap_or(0);
-            self.memory
+            let compact_started = Instant::now();
+            let compaction = self
+                .memory
                 .maybe_compact(CompactContext {
                     provider: self.provider.as_ref(),
                     model: &self.model,
@@ -419,15 +461,43 @@ impl Agent {
                     current_tokens,
                 })
                 .await?;
+            let compaction_ms = as_ms(compact_started.elapsed());
+            if let Some(report) = compaction {
+                self.record_compaction(turn, report).await;
+            }
 
+            let parts = self.memory.snapshot_parts().await;
+            let tool_schemas = self.tools.openai_schemas();
+            let estimated = estimate_context(&parts, &tool_schemas);
             let req = ChatRequest {
                 model: self.model.clone(),
-                messages: self.memory.snapshot().await,
-                tools: self.tools.openai_schemas(),
+                messages: parts.flatten(),
+                tools: tool_schemas,
+            };
+            let mut latency = Latency {
+                context_build_ms: as_ms(build_started.elapsed()),
+                compaction_ms,
+                ..Latency::default()
             };
 
-            let sink_dyn: StreamSink<'_> = sink;
-            let resp = self.provider.chat_stream(req, sink_dyn).await?;
+            let request_started_at_ms = now_ms();
+            let model_started = Instant::now();
+            // Time to first token is only observable from the stream,
+            // and only when the turn produces text at all — a pure
+            // tool-call round exposes nothing to time.
+            let mut ttft = None;
+            let resp = {
+                let mut timed = |ev: StreamEvent<'_>| {
+                    if ttft.is_none() && matches!(ev, StreamEvent::Content(_)) {
+                        ttft = Some(as_ms(model_started.elapsed()));
+                    }
+                    sink(ev);
+                };
+                let sink_dyn: StreamSink<'_> = &mut timed;
+                self.provider.chat_stream(req, sink_dyn).await?
+            };
+            latency.model_ms = as_ms(model_started.elapsed());
+            latency.ttft_ms = ttft;
             self.session_usage.add(resp.usage);
             if let Some(u) = resp.usage {
                 self.last_usage = Some(u);
@@ -457,6 +527,9 @@ impl Agent {
             self.memory.record(message).await?;
 
             if tool_calls.is_empty() {
+                self.ledger
+                    .record_started(request_started_at_ms, turn, estimated, resp.usage, latency)
+                    .await;
                 let content = resp
                     .message
                     .get("content")
@@ -467,6 +540,7 @@ impl Agent {
                 return Ok(RunOutcome::Completed(content));
             }
 
+            let tools_started = Instant::now();
             for call in &tool_calls {
                 let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let name = call
@@ -507,6 +581,10 @@ impl Agent {
                     }))
                     .await?;
             }
+            latency.tool_ms = as_ms(tools_started.elapsed());
+            self.ledger
+                .record_started(request_started_at_ms, turn, estimated, resp.usage, latency)
+                .await;
         }
     }
 }
@@ -1224,9 +1302,12 @@ mod tests {
             async fn clear(&mut self) -> Result<()> {
                 self.inner.clear().await
             }
-            async fn maybe_compact(&mut self, ctx: CompactContext<'_>) -> Result<()> {
+            async fn maybe_compact(
+                &mut self,
+                ctx: CompactContext<'_>,
+            ) -> Result<Option<memory::CompactionReport>> {
                 self.observed.lock().unwrap().push(ctx.current_tokens);
-                Ok(())
+                Ok(None)
             }
         }
 
@@ -1336,6 +1417,74 @@ mod tests {
         assert_eq!(post.len(), 3); // sys + u1 + a1
         assert_eq!(post[1]["content"], "first");
         assert_eq!(post[2]["content"], "a1");
+    }
+
+    #[tokio::test]
+    async fn undo_last_user_turn_keeps_a_live_system_record_it_used_to_swallow() {
+        // The old role-sniffing approximation treated any system message
+        // sitting first after the pinned prefix as a rolling summary and
+        // shifted the truncate target one record too far back.
+        let provider = FakeProvider::new(vec![assistant_text("done")]);
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
+            .pin_system_prompt("sys")
+            .await
+            .unwrap();
+        agent
+            .memory
+            .record(json!({"role":"system","content":"a live system note"}))
+            .await
+            .unwrap();
+        agent.run("hello").await.unwrap();
+
+        assert_eq!(agent.undo_last_user_turn().await.as_deref(), Some("hello"));
+        let post = agent.memory.snapshot().await;
+        assert_eq!(post.len(), 2);
+        assert_eq!(post[1]["content"], "a live system note");
+    }
+
+    #[tokio::test]
+    async fn undo_last_user_turn_after_compaction_targets_the_live_window() {
+        struct StubSummary;
+        #[async_trait]
+        impl Provider for StubSummary {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: assistant_text("S"),
+                    usage: None,
+                })
+            }
+        }
+
+        let mut mem = LinearWithCompact::new();
+        mem.pin(json!({"role":"system","content":"sys"}))
+            .await
+            .unwrap();
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            mem.record(json!({"role": role, "content": format!("msg{}", i)}))
+                .await
+                .unwrap();
+        }
+        let stub = StubSummary;
+        mem.maybe_compact(CompactContext {
+            provider: &stub,
+            model: "m",
+            target_tokens: 10,
+            current_tokens: 1_000,
+        })
+        .await
+        .unwrap();
+
+        let provider = FakeProvider::new(vec![]);
+        let mut agent =
+            Agent::new(Box::new(provider), Registry::new(), "m".into()).with_memory(Box::new(mem));
+
+        // Live window is msg4 (user) + msg5 (assistant); undo drops both
+        // and leaves the summary intact.
+        assert_eq!(agent.undo_last_user_turn().await.as_deref(), Some("msg4"));
+        let parts = agent.memory.snapshot_parts().await;
+        assert_eq!(parts.summary.len(), 1);
+        assert!(parts.recent.is_empty());
     }
 
     #[tokio::test]

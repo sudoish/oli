@@ -45,7 +45,7 @@ pub async fn run(
 
     println!("oli ready. /help for commands, Ctrl-D to exit.");
 
-    loop {
+    let result = loop {
         let line = match read_line(editor).await {
             (Ok(l), ed) => {
                 editor = ed;
@@ -59,10 +59,10 @@ pub async fn run(
             (Err(ReadlineError::Eof), _) => {
                 // Ctrl-D — clean exit.
                 println!();
-                return Ok(());
+                break Ok(());
             }
             (Err(e), _) => {
-                return Err(AgentError::Provider(format!("rustyline: {e}")));
+                break Err(AgentError::Provider(format!("rustyline: {e}")));
             }
         };
 
@@ -84,7 +84,7 @@ pub async fn run(
             match registry.dispatch(rest, &mut agent).await {
                 Some(SlashOutcome::Continue(Some(msg))) => println!("{msg}"),
                 Some(SlashOutcome::Continue(None)) => {}
-                Some(SlashOutcome::Exit) => return Ok(()),
+                Some(SlashOutcome::Exit) => break Ok(()),
                 Some(SlashOutcome::Rebuild {
                     removed_names,
                     added_slashes,
@@ -107,7 +107,10 @@ pub async fn run(
         }
 
         run_turn(&mut agent, trimmed).await;
-    }
+    };
+
+    agent.ledger.finish().await;
+    result
 }
 
 /// Run one model turn with streaming output and Ctrl-C cancellation.

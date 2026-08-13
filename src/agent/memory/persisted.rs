@@ -13,6 +13,11 @@
 //! - `record` — `msg` field carries the recorded message
 //! - `clear` — no payload
 //! - `truncate` — `n` field carries the new logical length
+//! - `meta` — `meta` field names the model, provider and settings the
+//!   session ran under. Session identity, not conversation state:
+//!   replay stashes it for callers and applies nothing to memory.
+//!   Written whenever it differs from the last one on file, so
+//!   resuming under a different model is visible rather than implied.
 //!
 //! Compaction is *not* logged. The original records are still present
 //! in the transcript; replay reapplies them to a fresh inner memory and
@@ -31,7 +36,7 @@ use tokio::sync::Mutex;
 use crate::error::{AgentError, Result};
 use crate::tools::context::ReadLogger;
 
-use super::{CompactContext, Memory};
+use super::{CompactContext, ContextParts, Memory};
 
 pub struct PersistedMemory {
     inner: Box<dyn Memory>,
@@ -48,6 +53,8 @@ pub struct PersistedMemory {
     /// Drained by the binary at startup into the live `ToolContext` so
     /// `Edit`'s read-first invariant survives a resumed conversation.
     replayed_reads: Vec<PathBuf>,
+    /// Last `meta` record seen on this transcript, replayed or written.
+    meta: Option<Value>,
 }
 
 impl PersistedMemory {
@@ -76,8 +83,9 @@ impl PersistedMemory {
         let path = dir.join(format!("{}.jsonl", id));
 
         let mut replayed_reads = Vec::new();
+        let mut meta = None;
         if path.exists() {
-            replay_into(&path, inner.as_mut(), &mut replayed_reads).await?;
+            replay_into(&path, inner.as_mut(), &mut replayed_reads, &mut meta).await?;
         } else if !allow_create {
             return Err(AgentError::Config(format!(
                 "conversation {} does not exist (transcript missing)",
@@ -97,7 +105,25 @@ impl PersistedMemory {
             path,
             id: id.to_string(),
             replayed_reads,
+            meta,
         })
+    }
+
+    /// Record the model, provider and settings this session is running
+    /// under. A no-op when the transcript already ends on the same
+    /// values, so resuming an unchanged session doesn't grow the file.
+    pub async fn write_meta(&mut self, meta: Value) -> Result<()> {
+        if self.meta.as_ref() == Some(&meta) {
+            return Ok(());
+        }
+        self.append(json!({"op": "meta", "meta": &meta})).await?;
+        self.meta = Some(meta);
+        Ok(())
+    }
+
+    /// The session's most recent `meta` record, if it has one.
+    pub fn meta(&self) -> Option<&Value> {
+        self.meta.as_ref()
     }
 
     /// Session id this struct is bound to. Public so the REPL or
@@ -177,6 +203,10 @@ impl Memory for PersistedMemory {
         self.inner.snapshot().await
     }
 
+    async fn snapshot_parts(&self) -> ContextParts {
+        self.inner.snapshot_parts().await
+    }
+
     async fn pin(&mut self, message: Value) -> Result<()> {
         self.append(json!({"op": "pin", "msg": &message})).await?;
         self.inner.pin(message).await
@@ -200,7 +230,10 @@ impl Memory for PersistedMemory {
         self.inner.clear().await
     }
 
-    async fn maybe_compact(&mut self, ctx: CompactContext<'_>) -> Result<()> {
+    async fn maybe_compact(
+        &mut self,
+        ctx: CompactContext<'_>,
+    ) -> Result<Option<super::CompactionReport>> {
         // Compaction is internal restructuring: it doesn't change the
         // logical record sequence the transcript captures. Replay will
         // see the originals and let a future session decide whether to
@@ -209,7 +242,12 @@ impl Memory for PersistedMemory {
     }
 }
 
-async fn replay_into(path: &Path, mem: &mut dyn Memory, reads: &mut Vec<PathBuf>) -> Result<()> {
+async fn replay_into(
+    path: &Path,
+    mem: &mut dyn Memory,
+    reads: &mut Vec<PathBuf>,
+    meta: &mut Option<Value>,
+) -> Result<()> {
     let body = tokio::fs::read_to_string(path).await?;
     for line in body.lines() {
         if line.trim().is_empty() {
@@ -245,6 +283,11 @@ async fn replay_into(path: &Path, mem: &mut dyn Memory, reads: &mut Vec<PathBuf>
             "read" => {
                 if let Some(p) = v.get("path").and_then(|x| x.as_str()) {
                     reads.push(PathBuf::from(p));
+                }
+            }
+            "meta" => {
+                if let Some(m) = v.get("meta").cloned() {
+                    *meta = Some(m);
                 }
             }
             _ => {}
@@ -297,6 +340,15 @@ pub fn list_sessions_in(dir: &Path) -> Vec<SessionEntry> {
     for entry in read.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        // The accounting sink sits beside the transcript it measures and
+        // shares its extension; it is not itself a session.
+        if path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|n| n.ends_with(crate::ledger::LEDGER_SUFFIX))
+        {
             continue;
         }
         let id = match path.file_stem().and_then(|s| s.to_str()) {
@@ -437,6 +489,99 @@ mod tests {
         assert_eq!(snap.len(), 2);
         assert_eq!(snap[0]["role"], "system");
         assert_eq!(snap[1]["content"], "y");
+    }
+
+    #[tokio::test]
+    async fn a_meta_record_round_trips_through_replay_without_touching_memory() {
+        let dir = tempdir().unwrap();
+        let meta = json!({"model": "m", "provider": "p", "config_hash": "abc"});
+        {
+            let mut m = PersistedMemory::open_at(dir.path(), "meta", fresh_inner(), true)
+                .await
+                .unwrap();
+            m.write_meta(meta.clone()).await.unwrap();
+            m.record(json!({"role":"user","content":"a"}))
+                .await
+                .unwrap();
+        }
+        let m = PersistedMemory::open_at(dir.path(), "meta", fresh_inner(), false)
+            .await
+            .unwrap();
+        assert_eq!(m.meta(), Some(&meta));
+        // Session identity is not conversation state.
+        assert_eq!(m.len(), 1);
+        assert_eq!(m.snapshot().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_transcript_without_a_meta_record_still_replays() {
+        // Every transcript written before the op existed looks like
+        // this. Replay must not require one.
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("old.jsonl"),
+            "{\"op\":\"record\",\"msg\":{\"role\":\"user\",\"content\":\"a\"}}\n",
+        )
+        .unwrap();
+        let m = PersistedMemory::open_at(dir.path(), "old", fresh_inner(), false)
+            .await
+            .unwrap();
+        assert_eq!(m.meta(), None);
+        assert_eq!(m.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_op_this_binary_does_not_know_is_skipped_rather_than_fatal() {
+        // The same fallthrough that lets an older binary read a
+        // transcript containing `meta`.
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("fut.jsonl"),
+            "{\"op\":\"from-the-future\",\"payload\":{}}\n\
+             {\"op\":\"record\",\"msg\":{\"role\":\"user\",\"content\":\"a\"}}\n",
+        )
+        .unwrap();
+        let m = PersistedMemory::open_at(dir.path(), "fut", fresh_inner(), false)
+            .await
+            .unwrap();
+        assert_eq!(m.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_unchanged_meta_is_not_appended_again_on_resume() {
+        let dir = tempdir().unwrap();
+        let meta = json!({"model": "m"});
+        {
+            let mut m = PersistedMemory::open_at(dir.path(), "same", fresh_inner(), true)
+                .await
+                .unwrap();
+            m.write_meta(meta.clone()).await.unwrap();
+        }
+        {
+            let mut m = PersistedMemory::open_at(dir.path(), "same", fresh_inner(), false)
+                .await
+                .unwrap();
+            m.write_meta(meta.clone()).await.unwrap();
+            m.write_meta(json!({"model": "other"})).await.unwrap();
+        }
+        let body = tokio::fs::read_to_string(dir.path().join("same.jsonl"))
+            .await
+            .unwrap();
+        let metas: Vec<&str> = body.lines().filter(|l| l.contains("\"meta\"")).collect();
+        assert_eq!(metas.len(), 2, "{body}");
+        assert!(metas[1].contains("other"));
+    }
+
+    #[test]
+    fn the_ledger_sink_beside_a_transcript_is_not_listed_as_a_session() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("alpha.jsonl"), "").unwrap();
+        std::fs::write(dir.path().join("alpha.ledger.jsonl"), "").unwrap();
+        let ids: Vec<String> = list_sessions_in(dir.path())
+            .into_iter()
+            .map(|e| e.id)
+            .collect();
+        assert_eq!(ids, vec!["alpha".to_string()]);
     }
 
     #[tokio::test]

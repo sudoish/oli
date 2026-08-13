@@ -340,6 +340,112 @@ fn json_run_and_resume_keep_stdout_machine_clean_and_reuse_id() {
 }
 
 #[test]
+fn a_run_explains_its_tokens_cost_and_latency_by_context_category() {
+    let server = TestServer::start();
+    server.push_assistant("first answer");
+    server.push_assistant("second answer");
+    let sandbox = Sandbox::new(&server);
+
+    let mut first = sandbox.command();
+    first.args(["run", "--prompt", "first", "--output", "json"]);
+    let first = run_oli(first);
+    assert!(first.status.success(), "stderr: {}", first.stderr);
+    let first_json: Value = serde_json::from_str(&first.stdout).unwrap();
+    let id = first_json["conversation_id"].as_str().unwrap().to_string();
+
+    // Every acceptance figure is on the summary, not derived by the
+    // consumer.
+    let a = &first_json["accounting"];
+    assert_eq!(a["kind"], "summary");
+    assert_eq!(a["session"], id.as_str());
+    assert_eq!(a["provider"], "test");
+    assert_eq!(a["model"], "test-model");
+    assert_eq!(a["strategy"], "linear-with-compact");
+    assert!(a["config_hash"].as_str().is_some_and(|h| h.len() == 16));
+    assert_eq!(a["resumed"], false);
+    assert_eq!(a["calls"], 1);
+    // OpenAI-shaped providers fold cache reads into the prompt count.
+    assert_eq!(a["accounting"], "cache_inclusive");
+    // Context attribution: the categories sum to the estimated whole.
+    let c = &a["context"];
+    let parts = c["pinned"].as_u64().unwrap()
+        + c["tool_schemas"].as_u64().unwrap()
+        + c["summary"].as_u64().unwrap()
+        + c["recent"].as_u64().unwrap();
+    assert_eq!(parts, c["total"].as_u64().unwrap());
+    assert!(c["pinned"].as_u64().unwrap() > 0);
+    assert!(c["tool_schemas"].as_u64().unwrap() > 0);
+    assert_eq!(c["summary"], 0);
+    // No pricing configured, so cost is an explicit unknown with a
+    // reason rather than a confident zero.
+    assert!(a["cost"]["amount"].is_null());
+    assert_eq!(a["cost"]["unpriced_calls"], 1);
+    assert!(
+        a["cost"]["unknown"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("no pricing configured")),
+        "{a}"
+    );
+    assert!(a["latency_ms"]["total_ms"].is_number());
+
+    // Measurements live beside the transcript, never inside it.
+    let transcript_path = sandbox.sessions_dir().join(format!("{id}.jsonl"));
+    let ledger_path = sandbox.sessions_dir().join(format!("{id}.ledger.jsonl"));
+    let transcript_body = transcript(&transcript_path);
+    assert!(
+        !transcript_body.contains("\"latency\""),
+        "{transcript_body}"
+    );
+    assert!(
+        transcript_body.contains(r#""op":"meta""#),
+        "{transcript_body}"
+    );
+    let ledger_body = transcript(&ledger_path);
+    let kinds: Vec<String> = ledger_body
+        .lines()
+        .map(|l| {
+            serde_json::from_str::<Value>(l).unwrap()["kind"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(kinds, vec!["request", "summary"]);
+
+    // Resuming: the first request of the resumed run is singled out, so
+    // what picking the conversation back up cost is visible.
+    let mut second = sandbox.command();
+    second.args([
+        "run",
+        "--conversation",
+        &id,
+        "--prompt",
+        "second",
+        "--output",
+        "json",
+    ]);
+    let second = run_oli(second);
+    assert!(second.status.success(), "stderr: {}", second.stderr);
+    let second_json: Value = serde_json::from_str(&second.stdout).unwrap();
+    let resumed = &second_json["accounting"];
+    assert_eq!(resumed["resumed"], true);
+    let first_request = &resumed["first_request"];
+    assert_eq!(first_request["call"], 1);
+    assert!(
+        first_request["estimated"]["recent"].as_u64().unwrap()
+            > a["context"]["recent"].as_u64().unwrap(),
+        "a resumed first request carries the replayed history: {resumed}"
+    );
+    assert!(first_request["cost"]["amount"].is_null());
+
+    // The ledger appends; it does not restart per run.
+    let ledger_body = transcript(&ledger_path);
+    assert_eq!(ledger_body.lines().count(), 4);
+}
+
+#[test]
 fn strict_mode_denies_approval_requests_without_blocking_or_stdout_noise() {
     let server = TestServer::start();
     server.push_tool_call(
@@ -399,6 +505,17 @@ fn provider_failure_writes_only_stderr_and_exits_nonzero() {
     assert_eq!(out.stdout, "");
     assert!(out.stderr.contains("provider error"), "{}", out.stderr);
     assert!(out.stderr.contains("boom from provider"), "{}", out.stderr);
+
+    let ledger = std::fs::read_dir(sandbox.sessions_dir())
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| path.to_string_lossy().ends_with(".ledger.jsonl"))
+        .expect("failed runs still create a terminated ledger");
+    let records: Vec<Value> = transcript(&ledger)
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.last().unwrap()["kind"], "summary");
 }
 
 #[test]
