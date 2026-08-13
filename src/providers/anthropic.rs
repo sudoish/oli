@@ -23,7 +23,9 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 
 use crate::error::{AgentError, Result};
-use crate::providers::{ChatRequest, ChatResponse, Provider, StreamEvent, StreamSink, Usage};
+use crate::providers::{
+    ChatRequest, ChatResponse, Provider, StreamEvent, StreamSink, Usage, derived_total, token_count,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -328,29 +330,41 @@ fn parse_models_response(bytes: &[u8]) -> Result<Vec<String>> {
 }
 
 fn anthropic_usage_from_value(v: &Value) -> Option<Usage> {
-    let input = v.get("input_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-    let output = v.get("output_tokens").and_then(|x| x.as_u64()).unwrap_or(0);
-    if input == 0 && output == 0 {
-        return None;
-    }
-    Some(Usage {
-        prompt_tokens: input as u32,
-        completion_tokens: output as u32,
-        total_tokens: (input + output) as u32,
-    })
+    let input = token_count(v, "input_tokens");
+    let output = token_count(v, "output_tokens");
+    let usage = Usage {
+        prompt_tokens: input,
+        completion_tokens: output,
+        total_tokens: derived_total(input, output),
+        cache_read_tokens: token_count(v, "cache_read_input_tokens"),
+        cache_write_tokens: token_count(v, "cache_creation_input_tokens"),
+        // Extended thinking is billed inside output_tokens and never
+        // broken out.
+        reasoning_tokens: None,
+    };
+    usage.reports_anything().then_some(usage)
 }
 
 fn merge_usage(slot: &mut Option<Usage>, fresh: Usage) {
     match slot {
         Some(u) => {
-            // message_delta usage carries only output deltas; keep the
-            // larger prompt count from message_start.
-            if fresh.completion_tokens > 0 {
+            // message_delta carries the running output count; the input
+            // and cache counts only ever arrive on message_start.
+            if fresh.completion_tokens.is_some() {
                 u.completion_tokens = fresh.completion_tokens;
             }
-            u.total_tokens = u.prompt_tokens + u.completion_tokens;
+            fill_if_unknown(&mut u.prompt_tokens, fresh.prompt_tokens);
+            fill_if_unknown(&mut u.cache_read_tokens, fresh.cache_read_tokens);
+            fill_if_unknown(&mut u.cache_write_tokens, fresh.cache_write_tokens);
+            u.total_tokens = derived_total(u.prompt_tokens, u.completion_tokens);
         }
         None => *slot = Some(fresh),
+    }
+}
+
+fn fill_if_unknown(slot: &mut Option<u32>, fresh: Option<u32>) {
+    if slot.is_none() {
+        *slot = fresh;
     }
 }
 
@@ -675,9 +689,109 @@ mod tests {
             serde_json::from_str(calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(args["file_path"], "x");
         let u = usage.unwrap();
-        assert_eq!(u.prompt_tokens, 10);
-        assert_eq!(u.completion_tokens, 4);
-        assert_eq!(u.total_tokens, 14);
+        assert_eq!(u.prompt_tokens, Some(10));
+        assert_eq!(u.completion_tokens, Some(4));
+        assert_eq!(u.total_tokens, Some(14));
+    }
+
+    #[test]
+    fn cache_read_and_write_counts_survive_the_response_conversion() {
+        let resp = json!({
+            "content": [{"type":"text","text":"hi"}],
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 4,
+                "cache_read_input_tokens": 2048,
+                "cache_creation_input_tokens": 512
+            }
+        });
+        let (_, usage) = anthropic_to_openai_response(&resp);
+        let u = usage.unwrap();
+        assert_eq!(u.cache_read_tokens, Some(2048));
+        assert_eq!(u.cache_write_tokens, Some(512));
+    }
+
+    #[test]
+    fn absent_cache_fields_stay_unknown_rather_than_zero() {
+        let usage =
+            anthropic_usage_from_value(&json!({"input_tokens": 12, "output_tokens": 4})).unwrap();
+        assert_eq!(usage.cache_read_tokens, None);
+        assert_eq!(usage.cache_write_tokens, None);
+        // Extended thinking is billed inside output_tokens.
+        assert_eq!(usage.reasoning_tokens, None);
+    }
+
+    #[test]
+    fn a_response_with_no_usage_block_reports_no_usage() {
+        let (_, usage) = anthropic_to_openai_response(&json!({
+            "content": [{"type":"text","text":"hi"}]
+        }));
+        assert_eq!(usage, None);
+        assert_eq!(anthropic_usage_from_value(&json!({})), None);
+    }
+
+    #[test]
+    fn a_cache_only_usage_block_is_still_usage() {
+        // A fully-cached prompt can report zero fresh input tokens; the
+        // cache counts are the whole story and must not be dropped.
+        let usage = anthropic_usage_from_value(&json!({
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "cache_read_input_tokens": 4096
+        }))
+        .unwrap();
+        assert_eq!(usage.prompt_tokens, Some(0));
+        assert_eq!(usage.cache_read_tokens, Some(4096));
+    }
+
+    #[test]
+    fn streaming_usage_merges_message_start_input_with_message_delta_output() {
+        let mut acc = StreamAcc::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+        handle_stream_event(
+            "message_start",
+            &json!({"message": {"usage": {
+                "input_tokens": 100,
+                "output_tokens": 1,
+                "cache_read_input_tokens": 900,
+                "cache_creation_input_tokens": 40
+            }}}),
+            &mut acc,
+            &mut sink,
+        );
+        handle_stream_event(
+            "message_delta",
+            &json!({"usage": {"output_tokens": 25}}),
+            &mut acc,
+            &mut sink,
+        );
+
+        let (_, usage) = acc.finalize();
+        let u = usage.unwrap();
+        assert_eq!(u.prompt_tokens, Some(100));
+        assert_eq!(u.completion_tokens, Some(25));
+        assert_eq!(u.total_tokens, Some(125));
+        // The delta never repeats the cache counts; they must not be
+        // lost on the way through.
+        assert_eq!(u.cache_read_tokens, Some(900));
+        assert_eq!(u.cache_write_tokens, Some(40));
+    }
+
+    #[test]
+    fn streaming_usage_from_a_delta_alone_leaves_the_prompt_count_unknown() {
+        let mut acc = StreamAcc::default();
+        let mut sink = |_: StreamEvent<'_>| {};
+        handle_stream_event(
+            "message_delta",
+            &json!({"usage": {"output_tokens": 7}}),
+            &mut acc,
+            &mut sink,
+        );
+        let (_, usage) = acc.finalize();
+        let u = usage.unwrap();
+        assert_eq!(u.prompt_tokens, None);
+        assert_eq!(u.completion_tokens, Some(7));
+        assert_eq!(u.total_tokens, None);
     }
 
     #[test]
