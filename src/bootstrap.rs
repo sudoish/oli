@@ -259,11 +259,7 @@ mod accounting_tests {
     }
 }
 
-/// Session identity plus the accounting ledger for one run.
-///
-/// The `meta` value is what lands in the transcript's `meta` op; the
-/// ledger writes measurements to a sibling file and never to the
-/// transcript.
+/// Keep session identity in transcript metadata and measurements in a sibling ledger.
 pub fn build_run_accounting(
     cfg: &Config,
     provider_name: &str,

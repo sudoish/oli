@@ -195,6 +195,9 @@ pub struct RequestObservation {
     pub estimated: ContextEstimate,
     pub reported: ReportedTokens,
     pub latency: Latency,
+    /// Rate card active when this request was dispatched.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub price: Option<ResolvedPrice>,
     pub cost: CostEstimate,
 }
 
@@ -290,6 +293,11 @@ pub struct CostRollup {
     pub unpriced_calls: u32,
     /// Deduped reasons a call could not be priced.
     pub unknown: Vec<String>,
+    /// Every distinct rate card used in this run, in first-use order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prices: Vec<ResolvedPrice>,
+    /// Compatibility view for consumers expecting one card. Populated
+    /// only when the whole run used exactly one distinct card.
     pub price: Option<ResolvedPrice>,
 }
 
@@ -453,7 +461,8 @@ impl Ledger {
         latency: Latency,
     ) {
         let reported = ReportedTokens::new(usage, self.accounting);
-        let cost = pricing::cost_of(&reported.billed, self.price.as_ref());
+        let price = self.price.clone();
+        let cost = pricing::cost_of(&reported.billed, price.as_ref());
         let obs = RequestObservation {
             kind: "request".into(),
             schema: SCHEMA.into(),
@@ -470,6 +479,7 @@ impl Ledger {
             estimated,
             reported,
             latency,
+            price,
             cost,
         };
         self.append(&obs).await;
@@ -481,11 +491,9 @@ impl Ledger {
         let mut tokens = TokenRollup::default();
         let mut context = ContextRollup::default();
         let mut latency = LatencyRollup::default();
-        let mut cost = CostRollup {
-            currency: self.price.as_ref().map(|p| p.currency.clone()),
-            price: self.price.clone(),
-            ..CostRollup::default()
-        };
+        let mut cost = CostRollup::default();
+        let mut priced_amount = 0.0;
+        let mut currencies: Vec<String> = Vec::new();
         let mut turns = 0;
 
         for o in &self.observations {
@@ -517,14 +525,40 @@ impl Ledger {
 
             match o.cost.amount {
                 Some(a) => {
-                    cost.amount = Some(cost.amount.unwrap_or(0.0) + a);
+                    priced_amount += a;
                     cost.priced_calls += 1;
                 }
                 None => cost.unpriced_calls += 1,
             }
+            if let Some(currency) = &o.cost.currency {
+                if !currencies.contains(currency) {
+                    currencies.push(currency.clone());
+                }
+            }
+            if let Some(price) = &o.price {
+                if !cost.prices.contains(price) {
+                    cost.prices.push(price.clone());
+                }
+            }
             for reason in &o.cost.unknown {
                 if !cost.unknown.contains(reason) {
                     cost.unknown.push(reason.clone());
+                }
+            }
+        }
+        cost.price = (cost.prices.len() == 1).then(|| cost.prices[0].clone());
+        match currencies.as_slice() {
+            [currency] => {
+                cost.currency = Some(currency.clone());
+                if cost.priced_calls > 0 {
+                    cost.amount = Some(priced_amount);
+                }
+            }
+            [] => {}
+            _ => {
+                let reason = "multiple currencies used across run".to_string();
+                if !cost.unknown.contains(&reason) {
+                    cost.unknown.push(reason);
                 }
             }
         }
@@ -968,6 +1002,64 @@ mod tests {
         assert_eq!(
             observations[1].reported.accounting,
             PromptAccounting::CacheInclusive
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_never_adds_amounts_from_different_currencies() {
+        let price = |currency: &str, input: f64| ResolvedPrice {
+            matched: "model".into(),
+            effective: None,
+            currency: currency.into(),
+            input_per_mtok: input,
+            output_per_mtok: 1.0,
+            cache_read_per_mtok: Some(1.0),
+            cache_write_per_mtok: Some(1.0),
+        };
+        let mut ledger = Ledger::new(RunIdentity::default(), PromptAccounting::CacheExclusive)
+            .with_price(Some(price("USD", 1.0)));
+        ledger
+            .record(
+                1,
+                ContextEstimate::default(),
+                Some(usage(10, 5, Some(0), Some(0))),
+                Latency::default(),
+            )
+            .await;
+        ledger.reconfigure(
+            "p".into(),
+            "model".into(),
+            "new".into(),
+            PromptAccounting::CacheExclusive,
+            Some(price("EUR", 2.0)),
+        );
+        ledger
+            .record(
+                2,
+                ContextEstimate::default(),
+                Some(usage(10, 5, Some(0), Some(0))),
+                Latency::default(),
+            )
+            .await;
+
+        assert_eq!(
+            ledger.observations()[0].price.as_ref().unwrap().currency,
+            "USD"
+        );
+        assert_eq!(
+            ledger.observations()[1].price.as_ref().unwrap().currency,
+            "EUR"
+        );
+        let summary = ledger.summary();
+        assert_eq!(summary.cost.prices.len(), 2);
+        assert_eq!(summary.cost.price, None);
+        assert_eq!(summary.cost.currency, None);
+        assert_eq!(summary.cost.amount, None);
+        assert!(
+            summary
+                .cost
+                .unknown
+                .contains(&"multiple currencies used across run".to_string())
         );
     }
 
