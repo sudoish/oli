@@ -175,6 +175,58 @@ pub struct Latency {
     pub tool_ms: u64,
 }
 
+/// Why a provider request was dispatched. Older ledger-v1 records omit
+/// this field; replay retains a narrow legacy classifier for those rows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestPurpose {
+    #[default]
+    Agent,
+    Compaction,
+}
+
+/// Budget effect of one successful compaction. These values make the
+/// compaction cost and its projected payback inspectable without prompt
+/// contents leaving the machine.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompactionMetrics {
+    pub request_tokens_before: u64,
+    pub request_tokens_after: u64,
+    pub target_tokens: u64,
+    pub hard_limit_tokens: u64,
+    pub tokens_saved_per_followup: u64,
+    /// Estimated provider calls needed to earn back the compaction call.
+    /// `None` means the compaction did not reduce the next request.
+    pub estimated_amortization_calls: Option<u32>,
+}
+
+impl CompactionMetrics {
+    pub fn new(
+        before: ContextEstimate,
+        after: ContextEstimate,
+        target_tokens: usize,
+        hard_limit_tokens: usize,
+        compaction_estimated: ContextEstimate,
+        usage: Option<Usage>,
+    ) -> Self {
+        let saved = before.total.saturating_sub(after.total);
+        let compaction_tokens = usage
+            .and_then(|value| value.total_tokens)
+            .map(u64::from)
+            .unwrap_or(compaction_estimated.total);
+        let estimated_amortization_calls =
+            (saved > 0).then(|| compaction_tokens.div_ceil(saved).min(u64::from(u32::MAX)) as u32);
+        Self {
+            request_tokens_before: before.total,
+            request_tokens_after: after.total,
+            target_tokens: target_tokens as u64,
+            hard_limit_tokens: hard_limit_tokens as u64,
+            tokens_saved_per_followup: saved,
+            estimated_amortization_calls,
+        }
+    }
+}
+
 /// One provider call, accounted end to end.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct RequestObservation {
@@ -192,6 +244,10 @@ pub struct RequestObservation {
     pub strategy_version: u32,
     pub config_hash: String,
     pub started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<RequestPurpose>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compaction: Option<CompactionMetrics>,
     pub estimated: ContextEstimate,
     pub reported: ReportedTokens,
     pub latency: Latency,
@@ -351,6 +407,11 @@ pub struct Ledger {
     observations: Vec<RequestObservation>,
 }
 
+enum ObservationKind {
+    Agent,
+    Compaction(CompactionMetrics),
+}
+
 impl Default for Ledger {
     fn default() -> Self {
         Self {
@@ -460,6 +521,50 @@ impl Ledger {
         usage: Option<Usage>,
         latency: Latency,
     ) {
+        self.record_started_with(
+            started_at_ms,
+            turn,
+            ObservationKind::Agent,
+            estimated,
+            usage,
+            latency,
+        )
+        .await;
+    }
+
+    pub async fn record_compaction_started(
+        &mut self,
+        started_at_ms: u64,
+        turn: u32,
+        metrics: CompactionMetrics,
+        estimated: ContextEstimate,
+        usage: Option<Usage>,
+        latency: Latency,
+    ) {
+        self.record_started_with(
+            started_at_ms,
+            turn,
+            ObservationKind::Compaction(metrics),
+            estimated,
+            usage,
+            latency,
+        )
+        .await;
+    }
+
+    async fn record_started_with(
+        &mut self,
+        started_at_ms: u64,
+        turn: u32,
+        kind: ObservationKind,
+        estimated: ContextEstimate,
+        usage: Option<Usage>,
+        latency: Latency,
+    ) {
+        let (purpose, compaction) = match kind {
+            ObservationKind::Agent => (RequestPurpose::Agent, None),
+            ObservationKind::Compaction(metrics) => (RequestPurpose::Compaction, Some(metrics)),
+        };
         let reported = ReportedTokens::new(usage, self.accounting);
         let price = self.price.clone();
         let cost = pricing::cost_of(&reported.billed, price.as_ref());
@@ -476,6 +581,8 @@ impl Ledger {
             strategy_version: self.identity.strategy_version,
             config_hash: self.identity.config_hash.clone(),
             started_at_ms,
+            purpose: Some(purpose),
+            compaction,
             estimated,
             reported,
             latency,
@@ -962,6 +1069,52 @@ mod tests {
             )
             .await;
         assert_eq!(ledger.observations()[0].started_at_ms, 123_456);
+        assert_eq!(
+            ledger.observations()[0].purpose,
+            Some(RequestPurpose::Agent)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_compaction_call_records_its_purpose_budget_effect_and_payback() {
+        let mut ledger = Ledger::new(RunIdentity::default(), PromptAccounting::Unknown);
+        let before = ContextEstimate {
+            recent: 1_000,
+            total: 1_000,
+            ..ContextEstimate::default()
+        };
+        let after = ContextEstimate {
+            summary: 100,
+            recent: 300,
+            total: 400,
+            ..ContextEstimate::default()
+        };
+        let compaction = ContextEstimate {
+            recent: 700,
+            total: 700,
+            ..ContextEstimate::default()
+        };
+        let metrics = CompactionMetrics::new(before, after, 500, 2_000, compaction, None);
+        ledger
+            .record_compaction_started(
+                7,
+                1,
+                metrics,
+                compaction,
+                None,
+                Latency {
+                    model_ms: 11,
+                    ..Latency::default()
+                },
+            )
+            .await;
+
+        let observation = &ledger.observations()[0];
+        assert_eq!(observation.purpose, Some(RequestPurpose::Compaction));
+        assert_eq!(observation.compaction, Some(metrics));
+        assert_eq!(metrics.tokens_saved_per_followup, 600);
+        assert_eq!(metrics.estimated_amortization_calls, Some(2));
+        assert_eq!(observation.latency.model_ms, 11);
     }
 
     #[tokio::test]

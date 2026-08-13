@@ -28,10 +28,12 @@ use serde_json::{Value, json};
 use crate::config::Config;
 use crate::error::Result;
 use crate::hooks::{HookRegistry, PreToolDecision};
-use crate::ledger::{Latency, Ledger, as_ms, estimate_context, now_ms};
+use crate::ledger::{CompactionMetrics, Latency, Ledger, as_ms, estimate_context, now_ms};
 use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
 use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage, UsageTotals};
 use crate::tools::{Registry, ToolContext};
+
+const MAX_COMPACTION_PASSES: usize = 8;
 
 /// Typed terminal state for one agent invocation. Callers that need to
 /// distinguish a model completion from a safety-boundary stop can inspect
@@ -59,7 +61,7 @@ pub mod context;
 pub mod memory;
 pub mod tool_parse;
 
-pub use caps::{ModelCaps, caps_for, caps_for_with_overrides};
+pub use caps::{ModelCaps, RequestBudget, caps_for, caps_for_with_overrides};
 pub use memory::{CompactContext, CompactionReport, LinearWithCompact, Memory};
 
 pub struct Agent {
@@ -81,8 +83,8 @@ pub struct Agent {
     pub memory: Box<dyn Memory>,
     /// Most recent per-call token accounting reported by the provider.
     /// Populated after every chat round (streaming and non-streaming).
-    /// Drives `Memory::maybe_compact` decisions and powers the
-    /// last-call line of the `/cost` slash command.
+    /// Powers the last-call line of the `/cost` slash command; compaction
+    /// uses a fresh estimate of the request about to be sent instead.
     pub last_usage: Option<Usage>,
     /// Running total of every per-call usage since session start (or
     /// the last `clear`). `/cost` renders this alongside `last_usage`
@@ -212,6 +214,16 @@ impl Agent {
         }
     }
 
+    /// Resolve the active operating target independently from the
+    /// provider's hard context capability.
+    pub fn request_budget(&self) -> RequestBudget {
+        let configured = self
+            .cfg
+            .as_ref()
+            .and_then(|cfg| cfg.agent.context_target_tokens);
+        self.caps.request_budget(configured)
+    }
+
     /// Re-resolve the ledger inputs that can change in a live REPL.
     /// Call after swapping provider/model or installing a reloaded config.
     pub fn refresh_ledger_accounting(&mut self) {
@@ -332,31 +344,55 @@ impl Agent {
     /// returns — strategies that decide there's nothing to compact (too
     /// few messages) report success without changing state.
     pub async fn force_compact(&mut self) -> Result<()> {
+        let parts = self.memory.snapshot_parts().await;
+        let tool_schemas = self.tools.openai_schemas();
+        let before = estimate_context(&parts, &tool_schemas);
+        let budget = self.request_budget();
+        let compaction_hard_limit = budget
+            .hard_limit_is_authoritative
+            .then_some(budget.hard_limit_tokens)
+            .unwrap_or(usize::MAX);
         let report = self
             .memory
             .maybe_compact(CompactContext {
                 provider: self.provider.as_ref(),
                 model: &self.model,
                 target_tokens: 0,
-                current_tokens: usize::MAX,
+                hard_limit_tokens: compaction_hard_limit,
+                next_request_tokens: usize::try_from(before.total).unwrap_or(usize::MAX),
             })
             .await?;
         if let Some(report) = report {
+            let after = estimate_context(&self.memory.snapshot_parts().await, &tool_schemas);
+            let metrics = CompactionMetrics::new(
+                before,
+                after,
+                0,
+                budget.hard_limit_tokens,
+                report.estimated,
+                report.usage,
+            );
             let turn = self.ledger.summary().turns.saturating_add(1);
-            self.record_compaction(turn, report).await;
+            self.record_compaction(turn, report, metrics).await;
         }
         Ok(())
     }
 
-    async fn record_compaction(&mut self, turn: u32, report: CompactionReport) {
+    async fn record_compaction(
+        &mut self,
+        turn: u32,
+        report: CompactionReport,
+        metrics: CompactionMetrics,
+    ) {
         self.session_usage.add(report.usage);
         if let Some(usage) = report.usage {
             self.last_usage = Some(usage);
         }
         self.ledger
-            .record_started(
+            .record_compaction_started(
                 report.started_at_ms,
                 turn,
+                metrics,
                 report.estimated,
                 report.usage,
                 report.latency,
@@ -446,29 +482,68 @@ impl Agent {
                     }
                 }
             }
-            let current_tokens = self
-                .last_usage
-                .and_then(|u| u.prompt_tokens)
-                .map(|p| p as usize)
-                .unwrap_or(0);
+            // Materialize and estimate the request that is about to be
+            // sent. Provider usage describes an earlier request and may
+            // be absent, so it must never control this decision.
+            let tool_schemas = self.tools.openai_schemas();
+            let mut parts = self.memory.snapshot_parts().await;
+            let mut estimated = estimate_context(&parts, &tool_schemas);
+            let budget = self.request_budget();
+            let compaction_hard_limit = budget
+                .hard_limit_is_authoritative
+                .then_some(budget.hard_limit_tokens)
+                .unwrap_or(usize::MAX);
             let compact_started = Instant::now();
-            let compaction = self
-                .memory
-                .maybe_compact(CompactContext {
-                    provider: self.provider.as_ref(),
-                    model: &self.model,
-                    target_tokens: self.caps.compact_target(),
-                    current_tokens,
-                })
-                .await?;
+            for _ in 0..MAX_COMPACTION_PASSES {
+                let compaction = match self
+                    .memory
+                    .maybe_compact(CompactContext {
+                        provider: self.provider.as_ref(),
+                        model: &self.model,
+                        target_tokens: budget.target_tokens,
+                        hard_limit_tokens: compaction_hard_limit,
+                        next_request_tokens: usize::try_from(estimated.total).unwrap_or(usize::MAX),
+                    })
+                    .await
+                {
+                    Ok(report) => report,
+                    Err(error) => {
+                        crate::log_warn!(
+                            "compaction failed; retaining the unchanged request context: {error}"
+                        );
+                        break;
+                    }
+                };
+                let Some(report) = compaction else {
+                    break;
+                };
+                parts = self.memory.snapshot_parts().await;
+                let after = estimate_context(&parts, &tool_schemas);
+                let metrics = CompactionMetrics::new(
+                    estimated,
+                    after,
+                    budget.target_tokens,
+                    budget.hard_limit_tokens,
+                    report.estimated,
+                    report.usage,
+                );
+                self.record_compaction(turn, report, metrics).await;
+                if after.total >= estimated.total || after.total <= budget.target_tokens as u64 {
+                    estimated = after;
+                    break;
+                }
+                estimated = after;
+            }
             let compaction_ms = as_ms(compact_started.elapsed());
-            if let Some(report) = compaction {
-                self.record_compaction(turn, report).await;
+            if budget.hard_limit_is_authoritative
+                && estimated.total > budget.hard_limit_tokens as u64
+            {
+                return Err(crate::error::AgentError::Config(format!(
+                    "materialized request estimate {} exceeds hard context limit {} after compaction",
+                    estimated.total, budget.hard_limit_tokens
+                )));
             }
 
-            let parts = self.memory.snapshot_parts().await;
-            let tool_schemas = self.tools.openai_schemas();
-            let estimated = estimate_context(&parts, &tool_schemas);
             let req = ChatRequest {
                 model: self.model.clone(),
                 messages: parts.flatten(),
@@ -1273,10 +1348,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unknown_prompt_count_leaves_compaction_at_zero_tokens() {
-        // The compaction trigger has always treated "no usage" as zero
-        // tokens used. An unreported prompt count must land in the same
-        // place, not somewhere new.
+    async fn compaction_observes_the_next_request_even_without_reported_prompt_usage() {
+        // Preflight is independent from provider usage. The second
+        // materialization includes the first completed turn and must be
+        // larger even though the provider never reports prompt tokens.
         use std::sync::{Arc, Mutex};
         struct ObservingMemory {
             inner: LinearWithCompact,
@@ -1306,7 +1381,7 @@ mod tests {
                 &mut self,
                 ctx: CompactContext<'_>,
             ) -> Result<Option<memory::CompactionReport>> {
-                self.observed.lock().unwrap().push(ctx.current_tokens);
+                self.observed.lock().unwrap().push(ctx.next_request_tokens);
                 Ok(None)
             }
         }
@@ -1338,7 +1413,202 @@ mod tests {
         agent.run("a").await.unwrap();
         agent.run("b").await.unwrap();
 
-        assert_eq!(*observed.lock().unwrap(), vec![0, 0]);
+        let observed = observed.lock().unwrap();
+        assert_eq!(observed.len(), 2);
+        assert!(observed[0] > 0);
+        assert!(observed[1] > observed[0]);
+    }
+
+    #[tokio::test]
+    async fn a_loaded_history_is_compacted_before_its_first_resumed_request() {
+        use std::sync::{Arc, Mutex};
+
+        struct SummaryThenAnswer {
+            requests: Arc<Mutex<Vec<ChatRequest>>>,
+        }
+        #[async_trait]
+        impl Provider for SummaryThenAnswer {
+            async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+                let compacting = request.messages.first().is_some_and(|message| {
+                    message["content"]
+                        .as_str()
+                        .is_some_and(|content| content.contains("compact conversation histories"))
+                });
+                self.requests.lock().unwrap().push(request);
+                Ok(ChatResponse {
+                    message: if compacting {
+                        assistant_text("decisions and constraints preserved")
+                    } else {
+                        assistant_text("resumed")
+                    },
+                    usage: None,
+                })
+            }
+        }
+
+        let mut memory = LinearWithCompact::new();
+        memory
+            .pin(json!({"role":"system","content":"never delete this constraint"}))
+            .await
+            .unwrap();
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            memory
+                .record(json!({"role":role,"content":format!("{i}:{}", "x".repeat(160))}))
+                .await
+                .unwrap();
+        }
+
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut agent = Agent::new(
+            Box::new(SummaryThenAnswer {
+                requests: requests.clone(),
+            }),
+            Registry::new(),
+            "m".into(),
+        )
+        .with_memory(Box::new(memory));
+        agent.caps.ctx_window = 400;
+
+        let outcome = agent.run("continue").await.unwrap();
+        assert_eq!(outcome, RunOutcome::Completed("resumed".into()));
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "compaction must precede the resumed call"
+        );
+        assert!(requests[1].messages.iter().any(|message| {
+            message["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("Earlier conversation summary"))
+        }));
+        assert_eq!(
+            requests[1].messages[0]["content"],
+            "never delete this constraint"
+        );
+        let observations = agent.ledger.observations();
+        assert_eq!(
+            observations[0].purpose,
+            Some(crate::ledger::RequestPurpose::Compaction)
+        );
+        let metrics = observations[0].compaction.expect("compaction metrics");
+        assert!(metrics.request_tokens_after < metrics.request_tokens_before);
+        assert_eq!(metrics.hard_limit_tokens, 400);
+    }
+
+    #[tokio::test]
+    async fn compactor_failure_falls_back_to_the_unchanged_request() {
+        use std::sync::{Arc, Mutex};
+
+        struct FailingSummaryThenAnswer {
+            requests: Arc<Mutex<Vec<ChatRequest>>>,
+        }
+        #[async_trait]
+        impl Provider for FailingSummaryThenAnswer {
+            async fn chat(&self, request: ChatRequest) -> Result<ChatResponse> {
+                let compacting = request.messages.first().is_some_and(|message| {
+                    message["content"]
+                        .as_str()
+                        .is_some_and(|content| content.contains("compact conversation histories"))
+                });
+                self.requests.lock().unwrap().push(request);
+                if compacting {
+                    return Err(crate::error::AgentError::Provider("offline".into()));
+                }
+                Ok(ChatResponse {
+                    message: assistant_text("fallback worked"),
+                    usage: None,
+                })
+            }
+        }
+
+        let mut memory = LinearWithCompact::new();
+        for i in 0..6 {
+            let role = if i % 2 == 0 { "user" } else { "assistant" };
+            memory
+                .record(json!({"role":role,"content":format!("{i}:{}", "x".repeat(160))}))
+                .await
+                .unwrap();
+        }
+        let before = memory.snapshot().await;
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let mut cfg = Config::env_default();
+        cfg.agent.context_target_tokens = Some(200);
+        let mut agent = Agent::new(
+            Box::new(FailingSummaryThenAnswer {
+                requests: requests.clone(),
+            }),
+            Registry::new(),
+            "m".into(),
+        )
+        .with_memory(Box::new(memory))
+        .with_config(Arc::new(cfg), "test");
+
+        let outcome = agent.run("continue").await.unwrap();
+        assert_eq!(outcome, RunOutcome::Completed("fallback worked".into()));
+        let sent = requests.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(&sent[1].messages[..before.len()], before.as_slice());
+        assert_eq!(agent.ledger.observations().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_request_still_over_the_hard_limit_is_never_dispatched() {
+        struct ShouldNotCall;
+        #[async_trait]
+        impl Provider for ShouldNotCall {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                panic!("an over-hard-limit request must not reach the provider")
+            }
+        }
+
+        let mut memory = LinearWithCompact::new();
+        memory
+            .record(json!({"role":"user","content":"x".repeat(2_000)}))
+            .await
+            .unwrap();
+        let mut agent = Agent::new(Box::new(ShouldNotCall), Registry::new(), "m".into())
+            .with_memory(Box::new(memory));
+        agent.caps.ctx_window = 100;
+        agent.caps.ctx_window_is_authoritative = true;
+
+        let error = agent.run("continue").await.unwrap_err();
+        assert!(error.to_string().contains("exceeds hard context limit 100"));
+        assert!(agent.ledger.observations().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_models_fallback_window_never_becomes_a_local_hard_rejection() {
+        struct Completes;
+        #[async_trait]
+        impl Provider for Completes {
+            async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+                Ok(ChatResponse {
+                    message: assistant_text("provider accepted it"),
+                    usage: None,
+                })
+            }
+        }
+
+        let mut memory = LinearWithCompact::new();
+        memory
+            .record(json!({"role":"user","content":"x".repeat(40_000)}))
+            .await
+            .unwrap();
+        let mut agent = Agent::new(
+            Box::new(Completes),
+            Registry::new(),
+            "custom-model-with-unknown-window".into(),
+        )
+        .with_memory(Box::new(memory));
+        assert!(!agent.caps.ctx_window_is_authoritative);
+
+        let outcome = agent.run("continue").await.unwrap();
+        assert_eq!(
+            outcome,
+            RunOutcome::Completed("provider accepted it".into())
+        );
     }
 
     #[tokio::test]
@@ -1470,7 +1740,8 @@ mod tests {
             provider: &stub,
             model: "m",
             target_tokens: 10,
-            current_tokens: 1_000,
+            hard_limit_tokens: 2_000,
+            next_request_tokens: 1_000,
         })
         .await
         .unwrap();

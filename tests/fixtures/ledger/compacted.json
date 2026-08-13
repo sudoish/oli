@@ -27,6 +27,7 @@
       },
       "model": "baseline-model",
       "provider": "baseline-provider",
+      "purpose": "agent",
       "reported": {
         "accounting": "cache_inclusive",
         "billed": {
@@ -49,7 +50,7 @@
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "turn": 1
     },
     {
@@ -79,6 +80,7 @@
       },
       "model": "baseline-model",
       "provider": "baseline-provider",
+      "purpose": "agent",
       "reported": {
         "accounting": "cache_inclusive",
         "billed": {
@@ -101,7 +103,7 @@
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "turn": 2
     },
     {
@@ -131,6 +133,7 @@
       },
       "model": "baseline-model",
       "provider": "baseline-provider",
+      "purpose": "agent",
       "reported": {
         "accounting": "cache_inclusive",
         "billed": {
@@ -153,11 +156,19 @@
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "turn": 3
     },
     {
       "call": 4,
+      "compaction": {
+        "estimated_amortization_calls": 5,
+        "hard_limit_tokens": 150,
+        "request_tokens_after": 116,
+        "request_tokens_before": 139,
+        "target_tokens": 120,
+        "tokens_saved_per_followup": 23
+      },
       "config_hash": "27d40e16e9d59337",
       "cost": {
         "amount": null,
@@ -183,6 +194,7 @@
       },
       "model": "baseline-model",
       "provider": "baseline-provider",
+      "purpose": "compaction",
       "reported": {
         "accounting": "cache_inclusive",
         "billed": {
@@ -205,7 +217,7 @@
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "turn": 4
     },
     {
@@ -235,6 +247,7 @@
       },
       "model": "baseline-model",
       "provider": "baseline-provider",
+      "purpose": "agent",
       "reported": {
         "accounting": "cache_inclusive",
         "billed": {
@@ -257,7 +270,7 @@
       "session": "baseline",
       "started_at_ms": 0,
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "turn": 4
     },
     {
@@ -326,7 +339,7 @@
       "schema": "oli.ledger/1",
       "session": "baseline",
       "strategy": "linear-with-compact",
-      "strategy_version": 1,
+      "strategy_version": 2,
       "tokens": {
         "cache_read": {
           "reported_calls": 4,

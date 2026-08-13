@@ -108,6 +108,7 @@ pub fn render_toml(provider: WizardProvider, api_key: &str) -> String {
     ));
     out.push_str("\n[agent]\n");
     out.push_str("max_turns = 40\n");
+    out.push_str("# context_target_tokens = 120000\n");
     out.push_str("\n[policy]\n");
     out.push_str("mode = \"auto\"\n");
     out

@@ -85,6 +85,12 @@ pub struct AgentConfig {
     /// during Phase 3 smoke) can't spin forever. Default 40.
     #[serde(default = "AgentConfig::default_max_turns")]
     pub max_turns: usize,
+
+    /// Optional operating target for the materialized request context.
+    /// This is a cost/latency budget, not the provider's hard context
+    /// window. Values above the model's default 80% target are clamped.
+    #[serde(default)]
+    pub context_target_tokens: Option<usize>,
 }
 
 impl AgentConfig {
@@ -97,6 +103,7 @@ impl Default for AgentConfig {
     fn default() -> Self {
         Self {
             max_turns: Self::default_max_turns(),
+            context_target_tokens: None,
         }
     }
 }
@@ -709,6 +716,20 @@ max_turns = 99
 "#;
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.agent.max_turns, 99);
+    }
+
+    #[test]
+    fn agent_config_parses_a_separate_active_context_target() {
+        let toml = r#"
+default_provider = "x"
+[providers.x]
+kind = "openai-compat"
+base_url = "u"
+[agent]
+context_target_tokens = 12000
+"#;
+        let cfg = Config::from_str(toml).unwrap();
+        assert_eq!(cfg.agent.context_target_tokens, Some(12_000));
     }
 
     #[test]

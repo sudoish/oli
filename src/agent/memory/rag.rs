@@ -542,7 +542,8 @@ mod tests {
             provider: &provider,
             model: "x",
             target_tokens: 10,
-            current_tokens: 1_000_000,
+            hard_limit_tokens: 2_000_000,
+            next_request_tokens: 1_000_000,
         })
         .await
         .unwrap();

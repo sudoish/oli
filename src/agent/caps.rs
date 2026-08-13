@@ -1,7 +1,7 @@
 //! Model-capability registry.
 //!
 //! The harness needs three things per model:
-//! - context window size (drives compaction target),
+//! - context window size (the hard limit from which a safe default target is derived),
 //! - whether the model emits tool calls in the structured `tool_calls`
 //!   field (otherwise the fallback parser scans `content` for them),
 //! - whether the streaming endpoint emits tool-call deltas incrementally
@@ -18,8 +18,23 @@ use serde::Deserialize;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ModelCaps {
     pub ctx_window: usize,
+    /// False only for the conservative unknown-model fallback. A guessed
+    /// window may drive compaction but must not reject an otherwise valid
+    /// provider request locally.
+    pub ctx_window_is_authoritative: bool,
     pub supports_native_tool_calls: bool,
     pub supports_streaming_tool_deltas: bool,
+}
+
+/// The active request budget resolved for a model. `target_tokens` is
+/// the operating goal that controls compaction; `hard_limit_tokens` is
+/// the provider capability and remains visible for safety checks and
+/// telemetry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestBudget {
+    pub target_tokens: usize,
+    pub hard_limit_tokens: usize,
+    pub hard_limit_is_authoritative: bool,
 }
 
 impl ModelCaps {
@@ -28,10 +43,24 @@ impl ModelCaps {
     pub fn compact_target(&self) -> usize {
         self.ctx_window * 80 / 100
     }
+
+    pub fn request_budget(&self, configured_target: Option<usize>) -> RequestBudget {
+        let default_target = self.compact_target();
+        let target_tokens = configured_target
+            .filter(|target| *target > 0)
+            .unwrap_or(default_target)
+            .min(default_target);
+        RequestBudget {
+            target_tokens,
+            hard_limit_tokens: self.ctx_window,
+            hard_limit_is_authoritative: self.ctx_window_is_authoritative,
+        }
+    }
 }
 
 const DEFAULT: ModelCaps = ModelCaps {
     ctx_window: 8_000,
+    ctx_window_is_authoritative: false,
     supports_native_tool_calls: false,
     supports_streaming_tool_deltas: false,
 };
@@ -44,6 +73,7 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         "qwen2.5-coder",
         ModelCaps {
             ctx_window: 32_000,
+            ctx_window_is_authoritative: true,
             // Smoke test confirmed qwen2.5-coder:7b emits tool calls as
             // raw JSON in `content`, not in `tool_calls`. Capability
             // turned off so the fallback parser engages.
@@ -55,6 +85,7 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         "llama3.2",
         ModelCaps {
             ctx_window: 128_000,
+            ctx_window_is_authoritative: true,
             supports_native_tool_calls: true,
             supports_streaming_tool_deltas: true,
         },
@@ -63,6 +94,7 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         "llama3.1",
         ModelCaps {
             ctx_window: 128_000,
+            ctx_window_is_authoritative: true,
             supports_native_tool_calls: true,
             supports_streaming_tool_deltas: true,
         },
@@ -71,6 +103,7 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         "llama3",
         ModelCaps {
             ctx_window: 8_000,
+            ctx_window_is_authoritative: true,
             // Ollama refuses requests with `tools` against this model
             // (smoke-tested). Treat as no native support; user should
             // pick a different local model for tool use.
@@ -83,6 +116,7 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         "anthropic/claude",
         ModelCaps {
             ctx_window: 200_000,
+            ctx_window_is_authoritative: true,
             supports_native_tool_calls: true,
             supports_streaming_tool_deltas: true,
         },
@@ -91,6 +125,7 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         "claude-",
         ModelCaps {
             ctx_window: 200_000,
+            ctx_window_is_authoritative: true,
             supports_native_tool_calls: true,
             supports_streaming_tool_deltas: true,
         },
@@ -99,6 +134,7 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         "gpt-4",
         ModelCaps {
             ctx_window: 128_000,
+            ctx_window_is_authoritative: true,
             supports_native_tool_calls: true,
             supports_streaming_tool_deltas: true,
         },
@@ -107,6 +143,7 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         "gpt-",
         ModelCaps {
             ctx_window: 16_000,
+            ctx_window_is_authoritative: true,
             supports_native_tool_calls: true,
             supports_streaming_tool_deltas: true,
         },
@@ -139,6 +176,7 @@ impl CapsOverride {
     pub fn to_caps(&self) -> ModelCaps {
         ModelCaps {
             ctx_window: self.ctx_window,
+            ctx_window_is_authoritative: true,
             supports_native_tool_calls: self.supports_native_tool_calls,
             supports_streaming_tool_deltas: self.supports_streaming_tool_deltas,
         }
@@ -166,6 +204,21 @@ mod tests {
     fn unknown_model_yields_conservative_default() {
         let c = caps_for("totally-made-up:1b");
         assert_eq!(c, DEFAULT);
+    }
+
+    #[test]
+    fn request_budget_separates_a_lower_operating_target_from_the_hard_limit() {
+        let budget = DEFAULT.request_budget(Some(2_000));
+        assert_eq!(budget.target_tokens, 2_000);
+        assert_eq!(budget.hard_limit_tokens, 8_000);
+        assert!(!budget.hard_limit_is_authoritative);
+    }
+
+    #[test]
+    fn request_budget_never_expands_past_the_safe_default_target() {
+        let budget = DEFAULT.request_budget(Some(20_000));
+        assert_eq!(budget.target_tokens, 6_400);
+        assert_eq!(budget.hard_limit_tokens, 8_000);
     }
 
     #[test]
