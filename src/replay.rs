@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 use crate::error::{AgentError, Result};
 use crate::ledger::{
     ContextEstimate, ContextRollup, CostEstimate, CostRollup, LatencyRollup, RequestObservation,
-    RequestPurpose, ResolvedPrice, Rollup, RunIdentity, RunSummary, TokenRollup,
+    RequestPurpose, ResolvedPrice, RunIdentity, RunSummary, TokenRollup,
 };
 
 pub const SCHEMA: &str = "oli.replay/2";
@@ -221,12 +221,9 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
                 _ => None,
             },
             cost: cost_delta(&candidate, &control),
-            latency_ms: match (candidate.latency_ms, control.latency_ms) {
-                (Some(candidate), Some(control)) => {
-                    Some(delta(candidate.total_ms, control.total_ms))
-                }
-                _ => None,
-            },
+            // The counterfactual arm was never dispatched, so there is no
+            // latency to compare against.
+            latency_ms: None,
         };
         comparisons.push(RunComparison {
             session: captured.identity.session,
@@ -519,30 +516,14 @@ fn rollup(estimates: &[ContextEstimate]) -> ContextRollup {
 fn reported_rollup(observations: &[RequestObservation]) -> TokenRollup {
     let mut out = TokenRollup::default();
     for observation in observations {
-        add_rollup(
-            &mut out.fresh_input,
-            observation.reported.billed.fresh_input,
-        );
-        add_rollup(&mut out.cache_read, observation.reported.billed.cache_read);
-        add_rollup(
-            &mut out.cache_write,
-            observation.reported.billed.cache_write,
-        );
-        add_rollup(&mut out.output, observation.reported.billed.output);
-        add_rollup(&mut out.uncached_input, observation.reported.uncached_input);
-        add_rollup(&mut out.total_input, observation.reported.total_input);
+        out.fresh_input.add(observation.reported.billed.fresh_input);
+        out.cache_read.add(observation.reported.billed.cache_read);
+        out.cache_write.add(observation.reported.billed.cache_write);
+        out.output.add(observation.reported.billed.output);
+        out.uncached_input.add(observation.reported.uncached_input);
+        out.total_input.add(observation.reported.total_input);
     }
     out
-}
-
-fn add_rollup(rollup: &mut Rollup, tokens: Option<u64>) {
-    match tokens {
-        Some(tokens) => {
-            rollup.tokens = Some(rollup.tokens.unwrap_or(0) + tokens);
-            rollup.reported_calls += 1;
-        }
-        None => rollup.unreported_calls += 1,
-    }
 }
 
 fn latency_rollup(observations: &[RequestObservation], total_ms: u64) -> LatencyRollup {
