@@ -4,7 +4,10 @@
 /// Returns the input unchanged if it's already within `max_bytes`.
 pub fn truncate(s: &str, max_bytes: usize) -> String {
     truncate_inner(s, max_bytes, |cut, total| {
-        format!("[... output truncated, {} of {} bytes shown ...]", cut, total)
+        format!(
+            "[... output truncated, {} of {} bytes shown ...]",
+            cut, total
+        )
     })
 }
 
@@ -32,7 +35,11 @@ pub fn truncate_with_cache(ctx: &crate::tools::ToolContext, s: &str, max_bytes: 
 /// Shared body: walk back to a char boundary, keep the prefix newline-
 /// terminated, and append whatever marker the caller builds from the
 /// shown/total byte counts.
-fn truncate_inner(s: &str, max_bytes: usize, marker: impl FnOnce(usize, usize) -> String) -> String {
+fn truncate_inner(
+    s: &str,
+    max_bytes: usize,
+    marker: impl FnOnce(usize, usize) -> String,
+) -> String {
     if s.len() <= max_bytes {
         return s.to_string();
     }

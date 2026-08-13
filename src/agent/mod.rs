@@ -1371,11 +1371,12 @@ mod tests {
         );
 
         let observed = Arc::new(Mutex::new(Vec::new()));
-        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into())
-            .with_memory(Box::new(ObservingMemory {
+        let mut agent = Agent::new(Box::new(provider), Registry::new(), "m".into()).with_memory(
+            Box::new(ObservingMemory {
                 inner: LinearWithCompact::new(),
                 observed: observed.clone(),
-            }));
+            }),
+        );
         agent.run("a").await.unwrap();
         agent.run("b").await.unwrap();
 
