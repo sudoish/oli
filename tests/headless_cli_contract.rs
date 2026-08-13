@@ -265,6 +265,40 @@ fn transcript(path: &Path) -> String {
 }
 
 #[test]
+fn replay_is_provider_free_machine_readable_and_does_not_create_runtime_state() {
+    let home = tempfile::tempdir().unwrap();
+    let cwd = tempfile::tempdir().unwrap();
+    let xdg = tempfile::tempdir().unwrap();
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/ledger/compacted.json");
+    let before = std::fs::read(&fixture).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_oli"))
+        .current_dir(cwd.path())
+        .env("HOME", home.path())
+        .env("XDG_CONFIG_HOME", xdg.path())
+        .args(["replay", "--fixture", fixture.to_str().unwrap()])
+        .output()
+        .unwrap();
+
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stderr, b"");
+    let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(report["schema"], "oli.replay/1");
+    assert_eq!(report["runs"][0]["arms"][0]["strategy"], "full-history");
+    assert_eq!(
+        report["runs"][0]["arms"][1]["strategy"],
+        "linear-with-compact"
+    );
+    assert!(!xdg.path().join("oli").exists());
+    assert!(!home.path().join(".config/oli").exists());
+    assert_eq!(std::fs::read(fixture).unwrap(), before);
+}
+
+#[test]
 fn fresh_text_run_prints_only_answer_and_persists_conversation() {
     let server = TestServer::start();
     server.push_assistant("fresh answer");
