@@ -1,5 +1,7 @@
 //! Deterministic, provider-free replay of captured transcript and ledger fixtures.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -10,7 +12,7 @@ use crate::ledger::{
     RequestPurpose, ResolvedPrice, RunIdentity, RunSummary, TokenRollup,
 };
 
-pub const SCHEMA: &str = "oli.replay/2";
+pub const SCHEMA: &str = "oli.replay/3";
 const FULL_HISTORY_ARM: &str = "full-history";
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -54,6 +56,24 @@ pub struct ArmReport {
     pub latency_ms: Option<LatencyRollup>,
     pub first_request: Option<ContextEstimate>,
     pub materialization_misses: u32,
+    pub task_outcome: Option<TaskOutcome>,
+    pub tool_calls: Option<u32>,
+    pub repeated_reads: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TaskOutcome {
+    pub status: TaskOutcomeStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskOutcomeStatus {
+    Passed,
+    Failed,
+    Incomplete,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -70,14 +90,20 @@ pub struct EstimateDelta {
     pub first_request: Option<i64>,
     pub cost: Option<f64>,
     pub latency_ms: Option<i64>,
+    pub tool_calls: Option<i64>,
+    pub repeated_reads: Option<i64>,
 }
 
 pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
-    let fixture: CapturedFixture = serde_json::from_slice(bytes)?;
+    let CapturedFixture {
+        transcript,
+        ledger,
+        outcomes,
+    } = serde_json::from_slice(bytes)?;
     let mut runs: Vec<CapturedRun> = Vec::new();
     let mut request_order = Vec::new();
 
-    for record in fixture.ledger {
+    for record in ledger {
         match record.get("kind").and_then(Value::as_str) {
             Some("request") => {
                 let observation: RequestObservation = serde_json::from_value(record)?;
@@ -114,7 +140,8 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
             "replay fixture contains no ledger runs".into(),
         ));
     }
-    validate_transcript_meta(&fixture.transcript, &runs)?;
+    validate_transcript_meta(&transcript, &runs)?;
+    let outcomes = outcomes_by_run(outcomes, &runs)?;
 
     let materialized: Vec<(usize, usize)> = request_order
         .into_iter()
@@ -124,15 +151,22 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
         .iter()
         .map(|(run, request)| runs[*run].requests[*request].estimated.tool_schemas)
         .collect();
-    let replay = materialize_full_history(&fixture.transcript, &tool_schemas);
+    let replay = materialize_full_history(&transcript, &tool_schemas);
     let mut replayed_by_run: Vec<Vec<Option<ContextEstimate>>> =
         runs.iter().map(|_| Vec::new()).collect();
-    for ((run, _), estimate) in materialized.iter().zip(replay.estimates) {
+    let mut activity_by_run = vec![ActivityRollup::default(); runs.len()];
+    for (((run, _), estimate), activity) in materialized
+        .iter()
+        .zip(replay.estimates)
+        .zip(replay.activities)
+    {
         replayed_by_run[*run].push(estimate);
+        activity_by_run[*run].add(activity);
     }
 
     let mut comparisons = Vec::with_capacity(runs.len());
     for (run_index, captured) in runs.into_iter().enumerate() {
+        let activity = activity_by_run[run_index];
         let materialized_requests: Vec<&RequestObservation> = captured
             .requests
             .iter()
@@ -181,6 +215,9 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
             latency_ms: None,
             first_request: full_estimates.first().and_then(|estimate| *estimate),
             materialization_misses: control_misses,
+            task_outcome: None,
+            tool_calls: None,
+            repeated_reads: None,
         };
         let candidate = ArmReport {
             arm: candidate_arm.clone(),
@@ -212,6 +249,9 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
                 .iter()
                 .filter(|observation| observation.estimated.summary > 0)
                 .count() as u32,
+            task_outcome: outcomes[run_index].clone(),
+            tool_calls: activity.tool_calls,
+            repeated_reads: activity.repeated_reads,
         };
         let candidate_minus_control = EstimateDelta {
             total: (control.materialization_misses == 0)
@@ -226,6 +266,8 @@ pub fn compare_bytes(bytes: &[u8]) -> Result<ReplayReport> {
             // The counterfactual arm was never dispatched, so there is no
             // latency to compare against.
             latency_ms: None,
+            tool_calls: None,
+            repeated_reads: None,
         };
         comparisons.push(RunComparison {
             session: captured.identity.session,
@@ -259,6 +301,15 @@ pub fn compare_path(path: &std::path::Path) -> Result<ReplayReport> {
 struct CapturedFixture {
     transcript: Vec<Value>,
     ledger: Vec<Value>,
+    #[serde(default)]
+    outcomes: Vec<CapturedOutcome>,
+}
+
+#[derive(Deserialize)]
+struct CapturedOutcome {
+    run: String,
+    #[serde(flatten)]
+    outcome: TaskOutcome,
 }
 
 struct CapturedRun {
@@ -267,6 +318,29 @@ struct CapturedRun {
     resumed: Option<bool>,
     terminated: bool,
     latency_total_ms: Option<u64>,
+}
+
+fn outcomes_by_run(
+    outcomes: Vec<CapturedOutcome>,
+    runs: &[CapturedRun],
+) -> Result<Vec<Option<TaskOutcome>>> {
+    let mut by_run = vec![None; runs.len()];
+    for captured in outcomes {
+        let Some(index) = runs.iter().position(|run| run.identity.run == captured.run) else {
+            return Err(AgentError::Config(format!(
+                "replay outcome names unknown run {}",
+                captured.run
+            )));
+        };
+        if by_run[index].is_some() {
+            return Err(AgentError::Config(format!(
+                "duplicate outcome for replay run {}",
+                captured.run
+            )));
+        }
+        by_run[index] = Some(captured.outcome);
+    }
+    Ok(by_run)
 }
 
 fn run_index(runs: &mut Vec<CapturedRun>, identity: RunIdentity) -> Result<usize> {
@@ -419,15 +493,55 @@ fn is_legacy_linear_compaction(observation: &RequestObservation) -> bool {
 
 struct MaterializedReplay {
     estimates: Vec<Option<ContextEstimate>>,
+    activities: Vec<RequestActivity>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct RequestActivity {
+    tool_calls: Option<u32>,
+    repeated_reads: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ActivityRollup {
+    tool_calls: Option<u32>,
+    repeated_reads: Option<u32>,
+}
+
+impl Default for ActivityRollup {
+    fn default() -> Self {
+        Self {
+            tool_calls: Some(0),
+            repeated_reads: Some(0),
+        }
+    }
+}
+
+impl ActivityRollup {
+    fn add(&mut self, activity: RequestActivity) {
+        self.tool_calls = match (self.tool_calls, activity.tool_calls) {
+            (Some(total), Some(value)) => Some(total.saturating_add(value)),
+            _ => None,
+        };
+        self.repeated_reads = match (self.repeated_reads, activity.repeated_reads) {
+            (Some(total), Some(value)) => Some(total.saturating_add(value)),
+            _ => None,
+        };
+    }
 }
 
 fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> MaterializedReplay {
     let mut pinned = Vec::new();
     let mut recent = Vec::new();
     let mut estimates = vec![None; tool_schemas.len()];
+    let mut activities = vec![RequestActivity::default(); tool_schemas.len()];
     let mut next_request = 0;
+    let mut next_activity = 0;
     let mut uncertain = false;
     let mut assistant_records: Vec<(usize, usize)> = Vec::new();
+    let mut active_activity = None;
+    let mut seen_reads = HashSet::new();
+    let mut read_history_known = true;
 
     for event in transcript {
         match event.get("op").and_then(Value::as_str) {
@@ -440,23 +554,41 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
             }
             Some("record") => {
                 if let Some(message) = event.get("msg") {
-                    if message.get("role").and_then(Value::as_str) == Some("assistant")
-                        && next_request < tool_schemas.len()
-                    {
-                        if !uncertain {
-                            let pinned_tokens = crate::ledger::estimate::estimate_messages(&pinned);
-                            let recent_tokens = crate::ledger::estimate::estimate_messages(&recent);
-                            let tool_tokens = tool_schemas[next_request];
-                            estimates[next_request] = Some(ContextEstimate {
-                                pinned: pinned_tokens,
-                                tool_schemas: tool_tokens,
-                                summary: 0,
-                                recent: recent_tokens,
-                                total: pinned_tokens + tool_tokens + recent_tokens,
-                            });
+                    if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                        if next_request < tool_schemas.len() {
+                            if !uncertain {
+                                let pinned_tokens =
+                                    crate::ledger::estimate::estimate_messages(&pinned);
+                                let recent_tokens =
+                                    crate::ledger::estimate::estimate_messages(&recent);
+                                let tool_tokens = tool_schemas[next_request];
+                                estimates[next_request] = Some(ContextEstimate {
+                                    pinned: pinned_tokens,
+                                    tool_schemas: tool_tokens,
+                                    summary: 0,
+                                    recent: recent_tokens,
+                                    total: pinned_tokens + tool_tokens + recent_tokens,
+                                });
+                            }
+                            assistant_records.push((recent.len(), next_request));
+                            next_request += 1;
                         }
-                        assistant_records.push((recent.len(), next_request));
-                        next_request += 1;
+                        if next_activity < activities.len() {
+                            activities[next_activity] = RequestActivity {
+                                tool_calls: match message.get("tool_calls") {
+                                    None | Some(Value::Null) => Some(0),
+                                    Some(Value::Array(calls)) => {
+                                        Some(u32::try_from(calls.len()).unwrap_or(u32::MAX))
+                                    }
+                                    Some(_) => None,
+                                },
+                                repeated_reads: read_history_known.then_some(0),
+                            };
+                            active_activity = Some(next_activity);
+                            next_activity += 1;
+                        } else {
+                            active_activity = None;
+                        }
                     }
                     recent.push(message.clone());
                 } else {
@@ -469,6 +601,9 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
                     .and_then(Value::as_u64)
                     .and_then(|len| usize::try_from(len).ok())
                 {
+                    let removed_active_assistant = assistant_records
+                        .iter()
+                        .any(|(message_index, _)| *message_index >= len);
                     let removed_requests: Vec<usize> = assistant_records
                         .iter()
                         .filter(|(message_index, _)| *message_index >= len)
@@ -486,6 +621,9 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
                         // assigning the rolled-back context to a later call.
                         uncertain = true;
                     }
+                    if removed_active_assistant {
+                        active_activity = None;
+                    }
                     recent.truncate(len);
                 } else {
                     uncertain = true;
@@ -494,13 +632,44 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
             Some("clear") => {
                 recent.clear();
                 assistant_records.clear();
+                active_activity = None;
+                seen_reads.clear();
+                read_history_known = true;
             }
-            Some("meta" | "read") => {}
-            Some(_) | None => uncertain = true,
+            Some("read") => match event.get("path").and_then(Value::as_str) {
+                Some(path) if read_history_known => {
+                    if !seen_reads.insert(path.to_owned())
+                        && let Some(activity_index) = active_activity
+                    {
+                        let activity = &mut activities[activity_index];
+                        activity.repeated_reads =
+                            activity.repeated_reads.map(|count| count.saturating_add(1));
+                    }
+                }
+                _ => {
+                    if let Some(activity_index) = active_activity {
+                        activities[activity_index].repeated_reads = None;
+                    }
+                    read_history_known = false;
+                    seen_reads.clear();
+                }
+            },
+            Some("meta") => {}
+            Some(_) | None => {
+                uncertain = true;
+                read_history_known = false;
+                seen_reads.clear();
+                if let Some(activity_index) = active_activity {
+                    activities[activity_index].repeated_reads = None;
+                }
+            }
         }
     }
 
-    MaterializedReplay { estimates }
+    MaterializedReplay {
+        estimates,
+        activities,
+    }
 }
 
 fn rollup(estimates: &[ContextEstimate]) -> ContextRollup {
@@ -848,11 +1017,23 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .retain(|record| record["kind"] != "summary");
+        value["outcomes"] = json!([{
+            "run": "baseline-run-1",
+            "status": "incomplete",
+            "reason": "capture ended before the run summary"
+        }]);
 
         let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
         assert_eq!(report.runs.len(), 1);
         assert!(!report.runs[0].terminated);
         assert_eq!(report.runs[0].arms[1].requests, 1);
+        assert_eq!(
+            report.runs[0].arms[1].task_outcome,
+            Some(TaskOutcome {
+                status: TaskOutcomeStatus::Incomplete,
+                reason: Some("capture ended before the run summary".into()),
+            })
+        );
     }
 
     #[test]
@@ -873,6 +1054,11 @@ mod tests {
         let fixture = serde_json::to_vec(&json!({
             "transcript": [{"op": "record", "msg": {"role": "user", "content": "fail"}}],
             "ledger": [summary],
+            "outcomes": [{
+                "run": "failed-run",
+                "status": "failed",
+                "reason": "provider failed before producing a response"
+            }],
         }))
         .unwrap();
 
@@ -882,6 +1068,13 @@ mod tests {
         assert!(report.runs[0].terminated);
         assert_eq!(report.runs[0].arms[0].requests, 0);
         assert_eq!(report.runs[0].arms[1].requests, 0);
+        assert_eq!(
+            report.runs[0].arms[1].task_outcome,
+            Some(TaskOutcome {
+                status: TaskOutcomeStatus::Failed,
+                reason: Some("provider failed before producing a response".into()),
+            })
+        );
     }
 
     #[test]
@@ -1005,5 +1198,154 @@ mod tests {
         let first = serde_json::to_vec(&compare_bytes(&bytes).unwrap()).unwrap();
         let second = serde_json::to_vec(&compare_bytes(&bytes).unwrap()).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn recorded_behavior_stays_distinct_from_the_counterfactual_control() {
+        let report = compare_bytes(&fixture("long")).unwrap();
+        let run = &report.runs[0];
+        let control = &run.arms[0];
+        let candidate = &run.arms[1];
+
+        assert_eq!(control.task_outcome, None);
+        assert_eq!(control.tool_calls, None);
+        assert_eq!(control.repeated_reads, None);
+        assert_eq!(
+            candidate.task_outcome,
+            Some(TaskOutcome {
+                status: TaskOutcomeStatus::Passed,
+                reason: Some("scripted baseline acceptance checks passed".into()),
+            })
+        );
+        assert_eq!(candidate.tool_calls, Some(4));
+        assert_eq!(candidate.repeated_reads, Some(3));
+        assert_eq!(run.comparisons[0].candidate_minus_control.tool_calls, None);
+        assert_eq!(
+            run.comparisons[0].candidate_minus_control.repeated_reads,
+            None
+        );
+    }
+
+    #[test]
+    fn a_missing_evaluator_outcome_stays_unknown_instead_of_becoming_a_pass() {
+        let mut value: Value = serde_json::from_slice(&fixture("fresh")).unwrap();
+        value.as_object_mut().unwrap().remove("outcomes");
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+
+        assert_eq!(report.runs[0].arms[0].task_outcome, None);
+        assert_eq!(report.runs[0].arms[1].task_outcome, None);
+    }
+
+    #[test]
+    fn evaluator_outcomes_must_name_a_captured_run_once() {
+        let mut value: Value = serde_json::from_slice(&fixture("fresh")).unwrap();
+        value["outcomes"] = json!([
+            {"run": "baseline-run-1", "status": "passed"},
+            {"run": "baseline-run-1", "status": "failed"}
+        ]);
+
+        let error = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("duplicate outcome"), "{error}");
+
+        value["outcomes"] = json!([{"run": "missing-run", "status": "failed"}]);
+        let error = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap_err();
+        assert!(error.to_string().contains("unknown run"), "{error}");
+    }
+
+    #[test]
+    fn an_unknown_read_does_not_erase_a_known_tool_call_count() {
+        let mut value: Value = serde_json::from_slice(&fixture("long")).unwrap();
+        let read = value["transcript"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|event| event["op"] == "read")
+            .unwrap();
+        read.as_object_mut().unwrap().remove("path");
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let candidate = &report.runs[0].arms[1];
+        assert_eq!(candidate.tool_calls, Some(4));
+        assert_eq!(candidate.repeated_reads, None);
+    }
+
+    #[test]
+    fn unknown_transcript_operations_invalidate_read_history_until_clear() {
+        let mut value: Value = serde_json::from_slice(&fixture("long")).unwrap();
+        let transcript = value["transcript"].as_array_mut().unwrap();
+        let first_read = transcript
+            .iter()
+            .position(|event| event["op"] == "read")
+            .unwrap();
+        transcript.insert(first_read + 1, json!({"op": "future-state-op"}));
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(report.runs[0].arms[1].tool_calls, Some(4));
+        assert_eq!(report.runs[0].arms[1].repeated_reads, None);
+    }
+
+    #[test]
+    fn truncated_assistants_keep_activity_tied_to_completed_requests() {
+        let mut value: Value = serde_json::from_slice(&fixture("fresh")).unwrap();
+        let transcript = value["transcript"].as_array_mut().unwrap();
+        transcript[3] = json!({
+            "op": "record",
+            "msg": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "cancelled-call",
+                    "type": "function",
+                    "function": {"name": "Echo", "arguments": "{}"}
+                }]
+            }
+        });
+        transcript.extend([
+            json!({"op": "read", "path": "/fixture/evidence.txt"}),
+            json!({
+                "op": "record",
+                "msg": {"role": "tool", "tool_call_id": "cancelled-call", "content": "output"}
+            }),
+            json!({"op": "truncate", "n": 0}),
+            json!({"op": "record", "msg": {"role": "user", "content": "retry"}}),
+            json!({"op": "record", "msg": {"role": "assistant", "content": "done"}}),
+        ]);
+
+        let ledger = value["ledger"].as_array_mut().unwrap();
+        let mut retry = ledger
+            .iter()
+            .find(|record| record["kind"] == "request")
+            .unwrap()
+            .clone();
+        retry["turn"] = json!(2);
+        let summary = ledger
+            .iter()
+            .position(|record| record["kind"] == "summary")
+            .unwrap();
+        ledger.insert(summary, retry);
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let candidate = &report.runs[0].arms[1];
+        assert_eq!(candidate.requests, 2);
+        assert_eq!(candidate.tool_calls, Some(1));
+        assert_eq!(candidate.repeated_reads, Some(0));
+    }
+
+    #[test]
+    fn a_known_clear_restores_read_history_after_an_unknown_operation() {
+        let replay = materialize_full_history(
+            &[
+                json!({"op": "record", "msg": {"role": "assistant", "content": "first"}}),
+                json!({"op": "future-state-op"}),
+                json!({"op": "clear"}),
+                json!({"op": "record", "msg": {"role": "assistant", "content": "second"}}),
+                json!({"op": "read", "path": "/fixture/evidence.txt"}),
+                json!({"op": "read", "path": "/fixture/evidence.txt"}),
+            ],
+            &[0, 0],
+        );
+
+        assert_eq!(replay.activities[0].repeated_reads, None);
+        assert_eq!(replay.activities[1].repeated_reads, Some(1));
     }
 }

@@ -67,7 +67,9 @@ impl Provider for ScriptedProvider {
     }
 }
 
-struct Echo;
+struct Echo {
+    evidence: std::path::PathBuf,
+}
 
 #[async_trait]
 impl Tool for Echo {
@@ -80,7 +82,8 @@ impl Tool for Echo {
     fn parameters(&self) -> Value {
         json!({"type": "object", "properties": {}})
     }
-    async fn run(&self, _args: Value, _ctx: &ToolContext) -> Result<String> {
+    async fn run(&self, _args: Value, ctx: &ToolContext) -> Result<String> {
+        ctx.mark_read(&self.evidence).await?;
         Ok("tool-output".into())
     }
 }
@@ -138,9 +141,9 @@ fn ledger_for(dir: &TempDir, resumed: bool) -> Ledger {
         .resumed(resumed)
 }
 
-fn tools() -> Registry {
+fn tools(evidence: std::path::PathBuf) -> Registry {
     let mut r = Registry::new();
-    r.register(Echo);
+    r.register(Echo { evidence });
     r
 }
 
@@ -163,16 +166,20 @@ async fn run_in(
             "config_hash": identity(resumed).config_hash,
         }))
         .await?;
+    let read_logger = persisted.read_logger();
+    let evidence = dir.path().join("evidence.txt");
+    std::fs::write(&evidence, "fixture evidence")?;
 
     let mut agent = Agent::new(
         Box::new(ScriptedProvider::new(script)),
-        tools(),
+        tools(evidence),
         MODEL.into(),
     )
     .with_memory(Box::new(persisted))
     .with_ledger(ledger_for(dir, resumed))
     .pin_system_prompt("you are a coding agent")
     .await?;
+    agent.tool_context().set_read_logger(read_logger).await;
     if let Some(ctx_window) = ctx_window {
         agent.caps.ctx_window = ctx_window;
     }
@@ -192,9 +199,23 @@ fn collect(dir: &TempDir) -> Value {
             .map(|l| serde_json::from_str(l).unwrap())
             .collect()
     };
+    let transcript = read(dir.path().join(format!("{SESSION}.jsonl")));
+    let ledger = read(ledger_path(dir.path(), SESSION));
+    let outcomes: Vec<Value> = ledger
+        .iter()
+        .filter(|record| record["kind"] == "summary")
+        .map(|summary| {
+            json!({
+                "run": summary["run"],
+                "status": "passed",
+                "reason": "scripted baseline acceptance checks passed",
+            })
+        })
+        .collect();
     let mut out = json!({
-        "transcript": read(dir.path().join(format!("{SESSION}.jsonl"))),
-        "ledger": read(ledger_path(dir.path(), SESSION)),
+        "transcript": transcript,
+        "ledger": ledger,
+        "outcomes": outcomes,
     });
     normalize(&mut out);
     out
@@ -206,7 +227,9 @@ fn normalize(v: &mut Value) {
     match v {
         Value::Object(map) => {
             for (k, value) in map.iter_mut() {
-                if (k.ends_with("_ms") || k == "started_at_ms") && value.is_number() {
+                if k == "path" && value.is_string() {
+                    *value = json!("/fixture/evidence.txt");
+                } else if (k.ends_with("_ms") || k == "started_at_ms") && value.is_number() {
                     *value = json!(0);
                 } else {
                     normalize(value);
