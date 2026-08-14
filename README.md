@@ -263,11 +263,14 @@ and include request tokens before/after, the active and hard limits, tokens
 saved per follow-up, latency, and projected calls to amortize the summary.
 
 `oli replay --fixture <path>` reads a synthetic or captured object containing
-the transcript and ledger arrays, reconstructs full-history request contexts,
-and compares them with the recorded linear strategy. It emits deterministic
-JSON only: provider, model, configuration hash, strategy/version/arm, estimated
-context categories, turns, strategy-internal calls, and explicit materialization
-misses.
+the transcript and ledger arrays plus optional evaluator outcomes, reconstructs
+full-history request contexts, and compares them with the recorded linear
+strategy. It emits deterministic JSON only: provider, model, configuration
+hash, strategy/version/arm, estimated and reported tokens, modeled and measured
+cost, latency, task outcome, turns, tool calls, repeated reads, and explicit
+materialization misses. Task outcome stays unknown unless the fixture supplies
+an evaluator result; repeated reads count duplicate persisted paths since the
+last session clear.
 The command does not load provider configuration, issue network requests, or
 write session/worktree state. A SHA-256 fixture digest ties every report back to
 the exact immutable input. Summary-bearing linear snapshots remain comparable

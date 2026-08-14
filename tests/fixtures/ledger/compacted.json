@@ -375,6 +375,13 @@
       "turns": 4
     }
   ],
+  "outcomes": [
+    {
+      "reason": "scripted baseline acceptance checks passed",
+      "run": "baseline-run-1",
+      "status": "passed"
+    }
+  ],
   "transcript": [
     {
       "meta": {

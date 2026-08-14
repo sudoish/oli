@@ -526,6 +526,13 @@
       "turns": 8
     }
   ],
+  "outcomes": [
+    {
+      "reason": "scripted baseline acceptance checks passed",
+      "run": "baseline-run-1",
+      "status": "passed"
+    }
+  ],
   "transcript": [
     {
       "meta": {
@@ -568,43 +575,8 @@
       "op": "record"
     },
     {
-      "msg": {
-        "content": "tool-output",
-        "role": "tool",
-        "tool_call_id": "c1"
-      },
-      "op": "record"
-    },
-    {
-      "msg": {
-        "content": "done",
-        "role": "assistant"
-      },
-      "op": "record"
-    },
-    {
-      "msg": {
-        "content": "keep going",
-        "role": "user"
-      },
-      "op": "record"
-    },
-    {
-      "msg": {
-        "content": null,
-        "role": "assistant",
-        "tool_calls": [
-          {
-            "function": {
-              "arguments": "{}",
-              "name": "Echo"
-            },
-            "id": "c1",
-            "type": "function"
-          }
-        ]
-      },
-      "op": "record"
+      "op": "read",
+      "path": "/fixture/evidence.txt"
     },
     {
       "msg": {
@@ -646,6 +618,10 @@
       "op": "record"
     },
     {
+      "op": "read",
+      "path": "/fixture/evidence.txt"
+    },
+    {
       "msg": {
         "content": "tool-output",
         "role": "tool",
@@ -683,6 +659,53 @@
         ]
       },
       "op": "record"
+    },
+    {
+      "op": "read",
+      "path": "/fixture/evidence.txt"
+    },
+    {
+      "msg": {
+        "content": "tool-output",
+        "role": "tool",
+        "tool_call_id": "c1"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "done",
+        "role": "assistant"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": "keep going",
+        "role": "user"
+      },
+      "op": "record"
+    },
+    {
+      "msg": {
+        "content": null,
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "function": {
+              "arguments": "{}",
+              "name": "Echo"
+            },
+            "id": "c1",
+            "type": "function"
+          }
+        ]
+      },
+      "op": "record"
+    },
+    {
+      "op": "read",
+      "path": "/fixture/evidence.txt"
     },
     {
       "msg": {

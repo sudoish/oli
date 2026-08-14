@@ -86,7 +86,7 @@ enum Cmd {
 
     /// Compare captured memory strategies without contacting a provider.
     Replay {
-        /// Immutable JSON fixture containing `transcript` and `ledger` arrays.
+        /// Immutable JSON fixture with transcript, ledger, and optional outcomes.
         #[arg(long)]
         fixture: std::path::PathBuf,
     },

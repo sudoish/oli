@@ -287,7 +287,7 @@ fn replay_is_provider_free_machine_readable_and_does_not_create_runtime_state() 
     );
     assert_eq!(output.stderr, b"");
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
-    assert_eq!(report["schema"], "oli.replay/2");
+    assert_eq!(report["schema"], "oli.replay/3");
     assert_eq!(report["runs"][0]["arms"][0]["strategy"], "full-history");
     assert_eq!(
         report["runs"][0]["arms"][1]["strategy"],
