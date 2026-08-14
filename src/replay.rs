@@ -536,10 +536,12 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
     let mut estimates = vec![None; tool_schemas.len()];
     let mut activities = vec![RequestActivity::default(); tool_schemas.len()];
     let mut next_request = 0;
+    let mut next_activity = 0;
     let mut uncertain = false;
     let mut assistant_records: Vec<(usize, usize)> = Vec::new();
-    let mut active_request = None;
+    let mut active_activity = None;
     let mut seen_reads = HashSet::new();
+    let mut read_history_known = true;
 
     for event in transcript {
         match event.get("op").and_then(Value::as_str) {
@@ -552,34 +554,41 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
             }
             Some("record") => {
                 if let Some(message) = event.get("msg") {
-                    if message.get("role").and_then(Value::as_str) == Some("assistant")
-                        && next_request < tool_schemas.len()
-                    {
-                        if !uncertain {
-                            let pinned_tokens = crate::ledger::estimate::estimate_messages(&pinned);
-                            let recent_tokens = crate::ledger::estimate::estimate_messages(&recent);
-                            let tool_tokens = tool_schemas[next_request];
-                            estimates[next_request] = Some(ContextEstimate {
-                                pinned: pinned_tokens,
-                                tool_schemas: tool_tokens,
-                                summary: 0,
-                                recent: recent_tokens,
-                                total: pinned_tokens + tool_tokens + recent_tokens,
-                            });
+                    if message.get("role").and_then(Value::as_str) == Some("assistant") {
+                        if next_request < tool_schemas.len() {
+                            if !uncertain {
+                                let pinned_tokens =
+                                    crate::ledger::estimate::estimate_messages(&pinned);
+                                let recent_tokens =
+                                    crate::ledger::estimate::estimate_messages(&recent);
+                                let tool_tokens = tool_schemas[next_request];
+                                estimates[next_request] = Some(ContextEstimate {
+                                    pinned: pinned_tokens,
+                                    tool_schemas: tool_tokens,
+                                    summary: 0,
+                                    recent: recent_tokens,
+                                    total: pinned_tokens + tool_tokens + recent_tokens,
+                                });
+                            }
+                            assistant_records.push((recent.len(), next_request));
+                            next_request += 1;
                         }
-                        activities[next_request] = RequestActivity {
-                            tool_calls: match message.get("tool_calls") {
-                                None | Some(Value::Null) => Some(0),
-                                Some(Value::Array(calls)) => {
-                                    Some(u32::try_from(calls.len()).unwrap_or(u32::MAX))
-                                }
-                                Some(_) => None,
-                            },
-                            repeated_reads: Some(0),
-                        };
-                        active_request = Some(next_request);
-                        assistant_records.push((recent.len(), next_request));
-                        next_request += 1;
+                        if next_activity < activities.len() {
+                            activities[next_activity] = RequestActivity {
+                                tool_calls: match message.get("tool_calls") {
+                                    None | Some(Value::Null) => Some(0),
+                                    Some(Value::Array(calls)) => {
+                                        Some(u32::try_from(calls.len()).unwrap_or(u32::MAX))
+                                    }
+                                    Some(_) => None,
+                                },
+                                repeated_reads: read_history_known.then_some(0),
+                            };
+                            active_activity = Some(next_activity);
+                            next_activity += 1;
+                        } else {
+                            active_activity = None;
+                        }
                     }
                     recent.push(message.clone());
                 } else {
@@ -592,6 +601,9 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
                     .and_then(Value::as_u64)
                     .and_then(|len| usize::try_from(len).ok())
                 {
+                    let removed_active_assistant = assistant_records
+                        .iter()
+                        .any(|(message_index, _)| *message_index >= len);
                     let removed_requests: Vec<usize> = assistant_records
                         .iter()
                         .filter(|(message_index, _)| *message_index >= len)
@@ -609,6 +621,9 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
                         // assigning the rolled-back context to a later call.
                         uncertain = true;
                     }
+                    if removed_active_assistant {
+                        active_activity = None;
+                    }
                     recent.truncate(len);
                 } else {
                     uncertain = true;
@@ -617,22 +632,37 @@ fn materialize_full_history(transcript: &[Value], tool_schemas: &[u64]) -> Mater
             Some("clear") => {
                 recent.clear();
                 assistant_records.clear();
-                active_request = None;
+                active_activity = None;
                 seen_reads.clear();
+                read_history_known = true;
             }
-            Some("read") => match (active_request, event.get("path").and_then(Value::as_str)) {
-                (Some(request), Some(path)) => {
-                    if !seen_reads.insert(path.to_owned()) {
-                        let activity = &mut activities[request];
+            Some("read") => match event.get("path").and_then(Value::as_str) {
+                Some(path) if read_history_known => {
+                    if !seen_reads.insert(path.to_owned())
+                        && let Some(activity_index) = active_activity
+                    {
+                        let activity = &mut activities[activity_index];
                         activity.repeated_reads =
                             activity.repeated_reads.map(|count| count.saturating_add(1));
                     }
                 }
-                (Some(request), None) => activities[request].repeated_reads = None,
-                (None, _) => {}
+                _ => {
+                    if let Some(activity_index) = active_activity {
+                        activities[activity_index].repeated_reads = None;
+                    }
+                    read_history_known = false;
+                    seen_reads.clear();
+                }
             },
             Some("meta") => {}
-            Some(_) | None => uncertain = true,
+            Some(_) | None => {
+                uncertain = true;
+                read_history_known = false;
+                seen_reads.clear();
+                if let Some(activity_index) = active_activity {
+                    activities[activity_index].repeated_reads = None;
+                }
+            }
         }
     }
 
@@ -1237,5 +1267,85 @@ mod tests {
         let candidate = &report.runs[0].arms[1];
         assert_eq!(candidate.tool_calls, Some(4));
         assert_eq!(candidate.repeated_reads, None);
+    }
+
+    #[test]
+    fn unknown_transcript_operations_invalidate_read_history_until_clear() {
+        let mut value: Value = serde_json::from_slice(&fixture("long")).unwrap();
+        let transcript = value["transcript"].as_array_mut().unwrap();
+        let first_read = transcript
+            .iter()
+            .position(|event| event["op"] == "read")
+            .unwrap();
+        transcript.insert(first_read + 1, json!({"op": "future-state-op"}));
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(report.runs[0].arms[1].tool_calls, Some(4));
+        assert_eq!(report.runs[0].arms[1].repeated_reads, None);
+    }
+
+    #[test]
+    fn truncated_assistants_keep_activity_tied_to_completed_requests() {
+        let mut value: Value = serde_json::from_slice(&fixture("fresh")).unwrap();
+        let transcript = value["transcript"].as_array_mut().unwrap();
+        transcript[3] = json!({
+            "op": "record",
+            "msg": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": "cancelled-call",
+                    "type": "function",
+                    "function": {"name": "Echo", "arguments": "{}"}
+                }]
+            }
+        });
+        transcript.extend([
+            json!({"op": "read", "path": "/fixture/evidence.txt"}),
+            json!({
+                "op": "record",
+                "msg": {"role": "tool", "tool_call_id": "cancelled-call", "content": "output"}
+            }),
+            json!({"op": "truncate", "n": 0}),
+            json!({"op": "record", "msg": {"role": "user", "content": "retry"}}),
+            json!({"op": "record", "msg": {"role": "assistant", "content": "done"}}),
+        ]);
+
+        let ledger = value["ledger"].as_array_mut().unwrap();
+        let mut retry = ledger
+            .iter()
+            .find(|record| record["kind"] == "request")
+            .unwrap()
+            .clone();
+        retry["turn"] = json!(2);
+        let summary = ledger
+            .iter()
+            .position(|record| record["kind"] == "summary")
+            .unwrap();
+        ledger.insert(summary, retry);
+
+        let report = compare_bytes(&serde_json::to_vec(&value).unwrap()).unwrap();
+        let candidate = &report.runs[0].arms[1];
+        assert_eq!(candidate.requests, 2);
+        assert_eq!(candidate.tool_calls, Some(1));
+        assert_eq!(candidate.repeated_reads, Some(0));
+    }
+
+    #[test]
+    fn a_known_clear_restores_read_history_after_an_unknown_operation() {
+        let replay = materialize_full_history(
+            &[
+                json!({"op": "record", "msg": {"role": "assistant", "content": "first"}}),
+                json!({"op": "future-state-op"}),
+                json!({"op": "clear"}),
+                json!({"op": "record", "msg": {"role": "assistant", "content": "second"}}),
+                json!({"op": "read", "path": "/fixture/evidence.txt"}),
+                json!({"op": "read", "path": "/fixture/evidence.txt"}),
+            ],
+            &[0, 0],
+        );
+
+        assert_eq!(replay.activities[0].repeated_reads, None);
+        assert_eq!(replay.activities[1].repeated_reads, Some(1));
     }
 }
