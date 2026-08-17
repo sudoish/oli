@@ -131,6 +131,18 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         },
     ),
     (
+        "gpt-5",
+        ModelCaps {
+            // Max input tokens, which is what `ctx_window` budgets — the
+            // GPT-5 family's 400k total window includes completion room
+            // we must not spend on the request.
+            ctx_window: 272_000,
+            ctx_window_is_authoritative: true,
+            supports_native_tool_calls: true,
+            supports_streaming_tool_deltas: true,
+        },
+    ),
+    (
         "gpt-4",
         ModelCaps {
             ctx_window: 128_000,
@@ -140,10 +152,25 @@ const ENTRIES: &[(&str, ModelCaps)] = &[
         },
     ),
     (
-        "gpt-",
+        "gpt-3.5",
         ModelCaps {
             ctx_window: 16_000,
             ctx_window_is_authoritative: true,
+            supports_native_tool_calls: true,
+            supports_streaming_tool_deltas: true,
+        },
+    ),
+    (
+        // Catch-all for GPT names we don't know yet. Deliberately not
+        // authoritative: a guessed window may drive compaction early,
+        // but must never hard-fail a request the provider would accept.
+        // A future `gpt-6` reaching this entry gets conservative
+        // compaction, not the fatal ctx-limit error a stale 16k
+        // authoritative guess used to produce.
+        "gpt-",
+        ModelCaps {
+            ctx_window: 16_000,
+            ctx_window_is_authoritative: false,
             supports_native_tool_calls: true,
             supports_streaming_tool_deltas: true,
         },
@@ -249,6 +276,27 @@ mod tests {
     fn gpt_4_specific_overrides_gpt_general() {
         assert_eq!(caps_for("gpt-4o").ctx_window, 128_000);
         assert_eq!(caps_for("gpt-3.5-turbo").ctx_window, 16_000);
+    }
+
+    #[test]
+    fn gpt_5_family_gets_its_real_window_not_the_legacy_16k_floor() {
+        // Regression: "gpt-5.5" does not start with "gpt-4", so it used
+        // to fall through to a 16k *authoritative* catch-all and abort
+        // long sessions with "exceeds hard context limit 16000".
+        for slug in ["gpt-5.5", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.4-mini"] {
+            let c = caps_for(slug);
+            assert_eq!(c.ctx_window, 272_000, "{slug}");
+            assert!(c.supports_native_tool_calls, "{slug}");
+        }
+    }
+
+    #[test]
+    fn an_unrecognized_gpt_name_guesses_a_window_without_claiming_authority() {
+        // The guess still drives compaction, but a non-authoritative
+        // window can't reject a request the provider would have taken.
+        let c = caps_for("gpt-9-unreleased");
+        assert_eq!(c.ctx_window, 16_000);
+        assert!(!c.ctx_window_is_authoritative);
     }
 
     #[test]
