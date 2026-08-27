@@ -54,7 +54,7 @@ pub fn apply_to_file(path: &Path, name: &str, url: &str) -> Result<()> {
     }
     if !original.is_empty() {
         let backup = path.with_extension("toml.bak");
-        std::fs::write(&backup, original).map_err(|error| {
+        std::fs::copy(path, &backup).map_err(|error| {
             AgentError::Config(format!("cannot write {}: {error}", backup.display()))
         })?;
     }
@@ -104,5 +104,24 @@ deny = ["delete_*"]
         let twice = apply(&once, "linear", "https://mcp.linear.app/mcp").unwrap();
         assert_eq!(once, twice);
         assert!(twice.contains(r#"deny = ["delete_*"]"#));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn backup_preserves_private_config_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "default_provider = \"openrouter\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        apply_to_file(&path, "linear", "https://mcp.linear.app/mcp").unwrap();
+
+        let backup = path.with_extension("toml.bak");
+        assert_eq!(
+            std::fs::metadata(backup).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

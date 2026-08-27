@@ -540,7 +540,8 @@ oli mcp add linear https://mcp.linear.app/mcp --read-only --paste
 
 Manage an existing connection with `oli mcp status [name]`,
 `oli mcp login <name>`, and `oli mcp logout <name>`. OAuth credentials live
-under `~/.config/oli/mcp-auth/` in owner-only files and refresh automatically.
+under `$XDG_CONFIG_HOME/oli/mcp-auth/` (by default
+`~/.config/oli/mcp-auth/`) in owner-only files and refresh automatically.
 API-key and service-account servers remain supported through an
 `Authorization = "Bearer ${TOKEN}"` entry in `headers`.
 

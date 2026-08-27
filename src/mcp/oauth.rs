@@ -140,7 +140,7 @@ impl McpOAuthStore {
             )));
         }
         drop(file);
-        std::fs::rename(&tmp, &path).map_err(|error| {
+        replace_file(&tmp, &path).map_err(|error| {
             let _ = std::fs::remove_file(&tmp);
             AgentError::Auth(format!("cannot replace {}: {error}", path.display()))
         })
@@ -171,36 +171,57 @@ pub fn default_store_dir() -> Option<PathBuf> {
 #[derive(Clone)]
 pub struct McpOAuthSession {
     server_name: String,
+    resource: String,
     store: McpOAuthStore,
     http: reqwest::Client,
 }
 
 impl McpOAuthSession {
-    pub fn new(server_name: impl Into<String>) -> Result<Self> {
+    pub fn new(server_name: impl Into<String>, resource: impl Into<String>) -> Result<Self> {
         Ok(Self {
             server_name: server_name.into(),
+            resource: resource.into(),
             store: McpOAuthStore::default_location()?,
             http: reqwest::Client::new(),
         })
     }
 
     #[cfg(test)]
-    pub fn with_store(server_name: impl Into<String>, store: McpOAuthStore) -> Self {
+    pub fn with_store(
+        server_name: impl Into<String>,
+        resource: impl Into<String>,
+        store: McpOAuthStore,
+    ) -> Self {
         Self {
             server_name: server_name.into(),
+            resource: resource.into(),
             store,
             http: reqwest::Client::new(),
         }
     }
 
     pub async fn access_token(&self) -> Result<String> {
+        self.load_access_token(false).await
+    }
+
+    pub async fn refresh_access_token(&self) -> Result<String> {
+        self.load_access_token(true).await
+    }
+
+    async fn load_access_token(&self, force_refresh: bool) -> Result<String> {
         let mut credential = self.store.load(&self.server_name)?.ok_or_else(|| {
             AgentError::Auth(format!(
                 "MCP server `{}` is not authorized; run `oli mcp login {}`",
                 self.server_name, self.server_name
             ))
         })?;
-        if credential.access_token_is_fresh() {
+        if !same_resource(&credential.resource, &self.resource) {
+            return Err(AgentError::Auth(format!(
+                "MCP server `{}` is authorized for {}, not {}; run `oli mcp login {}` again",
+                self.server_name, credential.resource, self.resource, self.server_name
+            )));
+        }
+        if !force_refresh && credential.access_token_is_fresh() {
             return Ok(credential.access_token);
         }
         refresh(&self.http, &mut credential).await?;
@@ -219,7 +240,7 @@ pub async fn login(
     let http = reqwest::Client::new();
     let (resource, authorization) = discover(&http, resource_url).await?;
     ensure_https(&resource.resource, "protected resource")?;
-    if resource.resource.trim_end_matches('/') != resource_url.trim_end_matches('/') {
+    if !same_resource(&resource.resource, resource_url) {
         return Err(AgentError::Auth(format!(
             "MCP resource mismatch: connected to {resource_url}, metadata identifies {}",
             resource.resource
@@ -251,7 +272,7 @@ pub async fn login(
         .as_ref()
         .map(CallbackServer::port)
         .unwrap_or(PASTE_CALLBACK_PORT);
-    let redirect_uri = format!("http://localhost:{port}{CALLBACK_PATH}");
+    let redirect_uri = format!("http://127.0.0.1:{port}{CALLBACK_PATH}");
     let registration = register_client(&http, &authorization, &redirect_uri).await?;
     let pkce = pkce::generate();
     let state = pkce::generate_state();
@@ -328,10 +349,7 @@ async fn discover(
         AgentError::Auth("MCP resource metadata names no authorization server".into())
     })?;
     ensure_https(issuer, "authorization server")?;
-    let metadata_url = format!(
-        "{}/.well-known/oauth-authorization-server",
-        issuer.trim_end_matches('/')
-    );
+    let metadata_url = authorization_metadata_url(issuer, "oauth-authorization-server")?;
     let authorization: AuthorizationServerMetadata =
         match get_json(http, &metadata_url, "authorization-server metadata").await {
             Ok(metadata) => metadata,
@@ -359,6 +377,24 @@ async fn discover(
     Ok((resource, authorization))
 }
 
+fn authorization_metadata_url(issuer: &str, suffix: &str) -> Result<String> {
+    let mut url = reqwest::Url::parse(issuer)
+        .map_err(|error| AgentError::Auth(format!("invalid authorization issuer: {error}")))?;
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(AgentError::Auth(
+            "authorization issuer must not contain a query or fragment".into(),
+        ));
+    }
+    let issuer_path = url.path().trim_matches('/');
+    let path = if issuer_path.is_empty() {
+        format!("/.well-known/{suffix}")
+    } else {
+        format!("/.well-known/{suffix}/{issuer_path}")
+    };
+    url.set_path(&path);
+    Ok(url.into())
+}
+
 async fn probe_resource_metadata(http: &reqwest::Client, resource_url: &str) -> Result<String> {
     let response = http
         .post(resource_url)
@@ -376,25 +412,27 @@ async fn probe_resource_metadata(http: &reqwest::Client, resource_url: &str) -> 
         .send()
         .await
         .map_err(|error| AgentError::Auth(format!("cannot reach MCP server: {error}")))?;
-    let header = response
+    let metadata_url = response
         .headers()
-        .get(reqwest::header::WWW_AUTHENTICATE)
-        .and_then(|value| value.to_str().ok())
+        .get_all(reqwest::header::WWW_AUTHENTICATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .find_map(|header| challenge_parameter(header, "resource_metadata"))
         .ok_or_else(|| {
             AgentError::Auth(format!(
                 "MCP server returned HTTP {} without an OAuth challenge",
                 response.status()
             ))
         })?;
-    challenge_parameter(header, "resource_metadata").ok_or_else(|| {
-        AgentError::Auth("MCP OAuth challenge did not include `resource_metadata`".into())
-    })
+    Ok(metadata_url)
 }
 
 fn challenge_parameter(header: &str, name: &str) -> Option<String> {
     header.split(',').find_map(|part| {
         let (key, value) = part.trim().split_once('=')?;
-        (key.trim() == name).then(|| value.trim().trim_matches('"').to_string())
+        let key = key.split_whitespace().last()?;
+        key.eq_ignore_ascii_case(name)
+            .then(|| value.trim().trim_matches('"').to_string())
     })
 }
 
@@ -508,7 +546,14 @@ fn build_authorize_url(
         .map(|(key, value)| format!("{key}={}", form_encode(value)))
         .collect::<Vec<_>>()
         .join("&");
-    format!("{}?{query}", endpoint.trim_end_matches('?'))
+    let separator = if endpoint.ends_with(['?', '&']) {
+        ""
+    } else if endpoint.contains('?') {
+        "&"
+    } else {
+        "?"
+    };
+    format!("{endpoint}{separator}{query}")
 }
 
 async fn exchange_code(
@@ -617,12 +662,21 @@ fn credential_from_token(
 }
 
 fn ensure_https(url: &str, label: &str) -> Result<()> {
-    if !url.starts_with("https://") {
+    let parsed = reqwest::Url::parse(url)
+        .map_err(|error| AgentError::Auth(format!("invalid {label} URL `{url}`: {error}")))?;
+    if parsed.scheme() != "https" {
         return Err(AgentError::Auth(format!(
             "{label} must use HTTPS, got `{url}`"
         )));
     }
     Ok(())
+}
+
+fn same_resource(left: &str, right: &str) -> bool {
+    matches!(
+        (reqwest::Url::parse(left), reqwest::Url::parse(right)),
+        (Ok(left), Ok(right)) if left == right
+    )
 }
 
 fn now_unix() -> u64 {
@@ -648,6 +702,30 @@ fn open_private(path: &Path) -> Result<std::fs::File> {
 fn open_private(path: &Path) -> Result<std::fs::File> {
     std::fs::File::create(path)
         .map_err(|error| AgentError::Auth(format!("cannot create {}: {error}", path.display())))
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    std::fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> std::io::Result<()> {
+    if !destination.exists() {
+        return std::fs::rename(source, destination);
+    }
+    let old = destination.with_extension(format!("old.{}", std::process::id()));
+    std::fs::rename(destination, &old)?;
+    match std::fs::rename(source, destination) {
+        Ok(()) => {
+            let _ = std::fs::remove_file(old);
+            Ok(())
+        }
+        Err(error) => {
+            let _ = std::fs::rename(old, destination);
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -680,6 +758,15 @@ mod tests {
     }
 
     #[test]
+    fn extracts_case_insensitive_first_bearer_challenge_parameter() {
+        let header = r#"Bearer Resource_Metadata="https://mcp.example/.well-known/oauth-protected-resource""#;
+        assert_eq!(
+            challenge_parameter(header, "resource_metadata").as_deref(),
+            Some("https://mcp.example/.well-known/oauth-protected-resource")
+        );
+    }
+
+    #[test]
     fn authorize_url_binds_resource_scope_pkce_and_state() {
         let pkce = pkce::Pkce {
             verifier: "verifier".into(),
@@ -698,6 +785,25 @@ mod tests {
         assert!(url.contains("scope=read%20write"));
         assert!(url.contains("code_challenge=challenge"));
         assert!(url.contains("state=state"));
+    }
+
+    #[test]
+    fn authorize_url_preserves_endpoint_query_parameters() {
+        let pkce = pkce::Pkce {
+            verifier: "verifier".into(),
+            challenge: "challenge".into(),
+        };
+        let url = build_authorize_url(
+            "https://auth.example/authorize?tenant=acme",
+            "client",
+            "http://127.0.0.1:1234/auth/callback",
+            "https://mcp.example/mcp",
+            &[],
+            &pkce,
+            "state",
+        );
+
+        assert!(url.contains("?tenant=acme&response_type=code"));
     }
 
     #[test]
@@ -752,5 +858,39 @@ mod tests {
         let mut value = credential();
         value.expires_at = Some(now_unix());
         assert!(!value.access_token_is_fresh());
+    }
+
+    #[tokio::test]
+    async fn session_rejects_credentials_for_a_different_resource() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McpOAuthStore::at(dir.path());
+        store.save(&credential()).unwrap();
+        let session = McpOAuthSession::with_store("linear", "https://evil.example/mcp", store);
+
+        let error = session.access_token().await.unwrap_err();
+
+        assert!(error.to_string().contains("authorized for"));
+        assert!(error.to_string().contains("https://mcp.linear.app/mcp"));
+    }
+
+    #[test]
+    fn authorization_metadata_url_places_well_known_before_issuer_path() {
+        assert_eq!(
+            authorization_metadata_url("https://auth.example/tenant", "oauth-authorization-server")
+                .unwrap(),
+            "https://auth.example/.well-known/oauth-authorization-server/tenant"
+        );
+    }
+
+    #[test]
+    fn resource_comparison_accepts_canonical_case_but_not_a_different_path() {
+        assert!(same_resource(
+            "HTTPS://MCP.EXAMPLE/mcp",
+            "https://mcp.example/mcp"
+        ));
+        assert!(!same_resource(
+            "https://mcp.example/mcp/",
+            "https://mcp.example/mcp"
+        ));
     }
 }

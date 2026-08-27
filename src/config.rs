@@ -22,7 +22,7 @@
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::error::{AgentError, Result};
@@ -250,15 +250,16 @@ impl Config {
 
     fn from_layers(global: Option<&str>, project: Option<&str>) -> Result<Self> {
         let mut merged = env_default_value();
+        let mut configured_providers = HashSet::new();
         if let Some(global) = global {
             let value: toml::Value = toml::from_str(global)
                 .map_err(|e| AgentError::Config(format!("global config: {e}")))?;
-            merged = merge_toml(merged, value);
+            merged = merge_config_layer(merged, value, &mut configured_providers);
         }
         if let Some(project) = project {
             let value: toml::Value = toml::from_str(project)
                 .map_err(|e| AgentError::Config(format!("project config: {e}")))?;
-            merged = merge_toml(merged, value);
+            merged = merge_config_layer(merged, value, &mut configured_providers);
         }
         merged
             .try_into::<Self>()
@@ -358,6 +359,25 @@ fn env_default_value() -> toml::Value {
     );
     root.insert("providers".into(), toml::Value::Table(providers));
     toml::Value::Table(root)
+}
+
+fn merge_config_layer(
+    mut base: toml::Value,
+    overlay: toml::Value,
+    configured_providers: &mut HashSet<String>,
+) -> toml::Value {
+    if let Some(providers) = overlay.get("providers").and_then(toml::Value::as_table)
+        && let Some(base_providers) = base
+            .get_mut("providers")
+            .and_then(toml::Value::as_table_mut)
+    {
+        for name in providers.keys() {
+            if configured_providers.insert(name.clone()) {
+                base_providers.remove(name);
+            }
+        }
+    }
+    merge_toml(base, overlay)
 }
 
 /// `$XDG_CONFIG_HOME/oli`, falling back to `$HOME/.config/oli`.
@@ -732,6 +752,24 @@ auth = "oauth"
         assert_eq!(cfg.default_provider, "openrouter");
         assert!(cfg.providers.contains_key("openrouter"));
         assert!(cfg.mcp.servers.contains_key("linear"));
+    }
+
+    #[test]
+    fn configured_openrouter_literal_key_replaces_environment_baseline() {
+        let cfg = Config::from_layers(
+            Some(
+                r#"default_provider = "openrouter"
+[providers.openrouter]
+kind = "openai-compat"
+api_key = "configured-key"
+"#,
+            ),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(cfg.resolve_api_key("openrouter").unwrap(), "configured-key");
+        assert!(cfg.providers["openrouter"].api_key_env.is_none());
     }
 
     #[test]

@@ -147,7 +147,7 @@ impl McpServer {
             Some(McpAuthKind::OAuth) => HttpTransport::with_oauth(
                 url.clone(),
                 expanded_headers,
-                McpOAuthSession::new(&self.name)?,
+                McpOAuthSession::new(&self.name, url)?,
             ),
             None => HttpTransport::new(url.clone(), expanded_headers),
         };

@@ -164,7 +164,7 @@ already produces for built-in tools. No schema translation layer.
 
 ```toml
 # Per-server entries. Identifier is the table key.
-[mcp.servers.linear]
+[mcp.servers.linear_local]
 kind     = "stdio"
 command  = "npx"
 args     = ["-y", "@linear/mcp-server"]
