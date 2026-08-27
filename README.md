@@ -511,17 +511,38 @@ oli is a Model Context Protocol client (stdio + streamable-http). Add a server
 in config and its tools show up in `/tools` alongside the built-ins:
 
 ```toml
-[[mcp.servers]]
-name      = "filesystem"
-transport = "stdio"
-command   = "npx"
-args      = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+[mcp.servers.filesystem]
+kind    = "stdio"
+command = "npx"
+args    = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 
-[[mcp.servers]]
-name      = "my-sse"
-transport = "sse"
-url       = "https://example.com/mcp"
+[mcp.servers.internal]
+kind = "streamable-http"
+url  = "https://example.com/mcp"
 ```
+
+For hosted servers that implement MCP OAuth, one command discovers the
+authorization service, registers oli as a public client, opens the browser,
+stores the refreshable credential outside `config.toml`, and writes the server
+block:
+
+```console
+oli mcp add linear https://mcp.linear.app/mcp
+```
+
+Use `--read-only` to request only the `read` scope. When the browser is on
+another machine (SSH, a container, or a remote workstation), use `--paste` and
+paste the final localhost redirect URL back into oli:
+
+```console
+oli mcp add linear https://mcp.linear.app/mcp --read-only --paste
+```
+
+Manage an existing connection with `oli mcp status [name]`,
+`oli mcp login <name>`, and `oli mcp logout <name>`. OAuth credentials live
+under `~/.config/oli/mcp-auth/` in owner-only files and refresh automatically.
+API-key and service-account servers remain supported through an
+`Authorization = "Bearer ${TOKEN}"` entry in `headers`.
 
 `/mcp` shows per-server health and tool counts and lets you restart
 failed servers without restarting oli. See [`specs/mcp.md`](specs/mcp.md)

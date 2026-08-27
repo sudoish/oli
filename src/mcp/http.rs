@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Mutex;
 
 use crate::error::{AgentError, Result};
+use crate::mcp::oauth::McpOAuthSession;
 use crate::mcp::transport::McpTransport;
 
 const SESSION_HEADER: &str = "Mcp-Session-Id";
@@ -33,6 +34,7 @@ pub struct HttpTransport {
     /// Static headers configured by the user (Authorization, etc.).
     /// Values were `${VAR}`-expanded by the caller.
     headers: HashMap<String, String>,
+    oauth: Option<McpOAuthSession>,
     /// Captured from the first response that supplies it; echoed on
     /// every subsequent request. Servers that don't issue one stay at
     /// `None` and the header simply isn't sent.
@@ -46,6 +48,22 @@ impl HttpTransport {
             client: Client::new(),
             url,
             headers,
+            oauth: None,
+            session_id: Mutex::new(None),
+            next_id: AtomicI64::new(1),
+        }
+    }
+
+    pub fn with_oauth(
+        url: String,
+        headers: HashMap<String, String>,
+        oauth: McpOAuthSession,
+    ) -> Self {
+        Self {
+            client: Client::new(),
+            url,
+            headers,
+            oauth: Some(oauth),
             session_id: Mutex::new(None),
             next_id: AtomicI64::new(1),
         }
@@ -59,7 +77,7 @@ impl HttpTransport {
         self.session_id.lock().await.clone()
     }
 
-    async fn build_request(&self, body: &Value) -> reqwest::RequestBuilder {
+    async fn build_request(&self, body: &Value) -> Result<reqwest::RequestBuilder> {
         let mut req = self
             .client
             .post(&self.url)
@@ -69,10 +87,13 @@ impl HttpTransport {
         for (k, v) in &self.headers {
             req = req.header(k.as_str(), v.as_str());
         }
+        if let Some(oauth) = &self.oauth {
+            req = req.bearer_auth(oauth.access_token().await?);
+        }
         if let Some(id) = self.session_id.lock().await.clone() {
             req = req.header(SESSION_HEADER, id);
         }
-        req
+        Ok(req)
     }
 
     /// Capture an `Mcp-Session-Id` header from a response if the
@@ -99,7 +120,7 @@ impl McpTransport for HttpTransport {
             "method": method,
             "params": params,
         });
-        let req = self.build_request(&body).await;
+        let req = self.build_request(&body).await?;
         let resp = req
             .send()
             .await
@@ -146,7 +167,7 @@ impl McpTransport for HttpTransport {
             "method": method,
             "params": params,
         });
-        let req = self.build_request(&body).await;
+        let req = self.build_request(&body).await?;
         let resp = req
             .send()
             .await
@@ -463,5 +484,42 @@ mod tests {
         let t = HttpTransport::new(url, headers);
         let result = t.request("call", json!({})).await.expect("request");
         assert_eq!(result["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn oauth_credentials_supply_the_authorization_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::mcp::oauth::McpOAuthStore::at(dir.path());
+        store
+            .save(&crate::mcp::oauth::McpOAuthCredential {
+                server_name: "linear".into(),
+                resource: "https://mcp.linear.app/mcp".into(),
+                issuer: "https://mcp.linear.app".into(),
+                token_endpoint: "https://mcp.linear.app/token".into(),
+                client_id: "client-1".into(),
+                client_secret: None,
+                redirect_uri: "http://localhost/auth/callback".into(),
+                access_token: "access-1".into(),
+                refresh_token: Some("refresh-1".into()),
+                expires_at: None,
+                scope: Some("read write".into()),
+            })
+            .unwrap();
+        let oauth = McpOAuthSession::with_store("linear", store);
+        let transport =
+            HttpTransport::with_oauth("https://mcp.example/mcp".into(), HashMap::new(), oauth);
+        let request = transport
+            .build_request(&json!({"jsonrpc":"2.0"}))
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer access-1"
+        );
     }
 }

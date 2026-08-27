@@ -65,6 +65,7 @@ progress in the terminal, and supports interactive approval when policy mode is
 | Path | Contents |
 | --- | --- |
 | `~/.config/oli/config.toml` | Global provider, model, policy, MCP, and tool configuration. |
+| `~/.config/oli/mcp-auth/` | Owner-only OAuth credentials for hosted MCP servers. |
 | `<project>/.oli/config.toml` | Project-scoped overlay found by walking upward from cwd. |
 | `~/.config/oli/sessions/<id>.jsonl` | Persisted conversation transcript and read-set events. |
 | `~/.config/oli/policy-allow.json` | Persisted approval fingerprints. |
@@ -81,3 +82,8 @@ progress in the terminal, and supports interactive approval when policy mode is
 | `oli login --device-auth` | Authenticate on a headless or remote machine. |
 | `oli login --check` | Refresh credentials, discover models, and run the release-check prompt. |
 | `oli logout` | Remove stored ChatGPT credentials. |
+| `oli mcp add <name> <url>` | Add and authorize a hosted MCP server in one browser flow. |
+| `oli mcp add <name> <url> --read-only --paste` | Request read-only access using a browser on another machine. |
+| `oli mcp login <name>` | Reauthorize a configured OAuth MCP server. |
+| `oli mcp status [name]` | Show stored MCP authorization status. |
+| `oli mcp logout <name>` | Remove one MCP server's stored OAuth credential. |

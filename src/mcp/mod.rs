@@ -16,6 +16,8 @@ use crate::error::Result;
 
 pub mod config;
 pub mod http;
+pub mod oauth;
+pub mod provision;
 pub mod server;
 pub mod stdio;
 pub mod tool;
@@ -119,6 +121,7 @@ mod tests {
             env: Default::default(),
             url: None,
             headers: Default::default(),
+            auth: None,
             init_timeout_ms: 1000,
             call_timeout_ms: 1000,
             tools: Default::default(),

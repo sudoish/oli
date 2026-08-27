@@ -65,11 +65,10 @@ server" path.
   time of writing). Feature-detect via `initialize`'s `protocolVersion`
   exchange; surface a clear error if a server only speaks an older
   version.
-- **Auth:** environment variable substitution in headers and env. No
-  built-in OAuth flow in v1 — servers that need it can either be
-  pre-authenticated by the user (pasted token in env) or delegate to
-  their own browser-based flow on first run, the same way they would
-  outside oli.
+- **Auth:** environment variable substitution in headers and env for
+  API-key/service-account use, plus MCP OAuth discovery, dynamic client
+  registration, authorization-code + PKCE, refresh, and owner-only
+  credential persistence for hosted HTTP servers.
 
 ## Out of scope (v1)
 
@@ -80,7 +79,6 @@ server" path.
   a coupling we don't want yet.
 - **Discovery / package managers.** Users name their servers in TOML;
   we do not pull from a registry.
-- **OAuth dance.** v2 candidate.
 
 ## The `McpTransport` trait
 
@@ -185,6 +183,11 @@ headers     = { Authorization = "Bearer ${SENTRY_TOKEN}" }
 init_timeout_ms = 5000
 call_timeout_ms = 60000
 
+[mcp.servers.linear]
+kind = "streamable-http"
+url  = "https://mcp.linear.app/mcp"
+auth = "oauth"
+
 # Optional: filter which tools from this server are exposed to the model.
 # Glob patterns; empty `allow` = expose all.
 [mcp.servers.linear.tools]
@@ -286,6 +289,9 @@ per cache window, not per turn.
 | 5b | `HttpTransport` (streamable-http), per-server `allow`/`deny` filtering, `/mcp restart`, policy `default = "ask"` + `auto_allow_pure_reads`. |
 | 5c | `resources/list` + `resources/read` exposed as a built-in `McpResource` tool (one tool, server+uri arg) so we don't multiply tool count by N resources. `prompts/list` as discoverable slash commands. |
 | 5d | OAuth flow (browser-spawn, callback listener) for hosted servers that need it. SSE transport if any target server demands it. |
+
+Phase 5d's OAuth flow is shipped through `oli mcp add/login/logout/status`;
+SSE remains deferred because current hosted integrations use streamable HTTP.
 
 5a is the only phase that has to land for "amazing" — everything else
 is upside.
