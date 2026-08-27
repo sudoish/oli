@@ -174,6 +174,7 @@ mod tests {
                 env: Default::default(),
                 url: None,
                 headers: Default::default(),
+                auth: None,
                 init_timeout_ms: 5000,
                 call_timeout_ms: 60000,
                 tools: Default::default(),

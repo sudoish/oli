@@ -161,6 +161,41 @@ enum Cmd {
 
     /// Discard stored ChatGPT subscription credentials.
     Logout,
+
+    /// Add, authorize, and inspect Model Context Protocol servers.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum McpCommand {
+    /// Add an HTTP MCP server and authorize it in the browser.
+    Add {
+        /// Name used for config, tools, and later MCP commands.
+        name: String,
+        /// Streamable-HTTP MCP endpoint.
+        url: String,
+        /// Paste the browser redirect URL back instead of binding localhost.
+        #[arg(long)]
+        paste: bool,
+        /// Request only the OAuth `read` scope.
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Reauthorize an OAuth MCP server already present in config.
+    Login {
+        name: String,
+        #[arg(long)]
+        paste: bool,
+        #[arg(long)]
+        read_only: bool,
+    },
+    /// Discard one MCP server's stored OAuth credential.
+    Logout { name: String },
+    /// Show OAuth status for one server, or all configured OAuth servers.
+    Status { name: Option<String> },
 }
 
 #[tokio::main]
@@ -201,6 +236,7 @@ async fn main() {
             no_config,
         }) => login_command(check, no_browser, device_auth, paste, no_config).await,
         Some(Cmd::Logout) => logout_command(),
+        Some(Cmd::Mcp { command }) => mcp_command(command).await,
         None => run_interactive().await,
     };
     if let Err(e) = result {
@@ -208,6 +244,119 @@ async fn main() {
             eprintln!("{}", e);
         }
         process::exit(1);
+    }
+}
+
+async fn mcp_command(command: McpCommand) -> Result<()> {
+    match command {
+        McpCommand::Add {
+            name,
+            url,
+            paste,
+            read_only,
+        } => {
+            let credential = mcp::oauth::login(&name, &url, paste, &mcp_scopes(read_only)).await?;
+            let path = oli::config::default_config_path().ok_or_else(|| {
+                oli::error::AgentError::Config(
+                    "cannot locate config.toml; set XDG_CONFIG_HOME or HOME".into(),
+                )
+            })?;
+            mcp::provision::apply_to_file(&path, &name, &url)?;
+            println!(
+                "Connected `{name}` with scopes {}.\nUpdated {}.\n\
+                 Its tools will be available the next time Oli starts.",
+                credential.scope.as_deref().unwrap_or("(server default)"),
+                path.display()
+            );
+            Ok(())
+        }
+        McpCommand::Login {
+            name,
+            paste,
+            read_only,
+        } => {
+            let config = Config::load_or_default()?;
+            let server = config.mcp.servers.get(&name).ok_or_else(|| {
+                oli::error::AgentError::Config(format!(
+                    "unknown MCP server `{name}`; add it with `oli mcp add {name} <url>`"
+                ))
+            })?;
+            if server.auth != Some(oli::mcp::config::McpAuthKind::OAuth) {
+                return Err(oli::error::AgentError::Config(format!(
+                    "MCP server `{name}` does not use OAuth; set `auth = \"oauth\"` or \
+                     reconnect it with `oli mcp add {name} <url>`"
+                )));
+            }
+            let url = server.url.as_deref().ok_or_else(|| {
+                oli::error::AgentError::Config(format!("MCP server `{name}` has no HTTP `url`"))
+            })?;
+            let credential = mcp::oauth::login(&name, url, paste, &mcp_scopes(read_only)).await?;
+            println!(
+                "Connected `{name}` with scopes {}.",
+                credential.scope.as_deref().unwrap_or("(server default)")
+            );
+            Ok(())
+        }
+        McpCommand::Logout { name } => {
+            if mcp::oauth::logout(&name)? {
+                println!("Disconnected MCP server `{name}`.");
+            } else {
+                println!("MCP server `{name}` was not logged in.");
+            }
+            Ok(())
+        }
+        McpCommand::Status { name } => {
+            let config = Config::load_or_default()?;
+            let names: Vec<String> = match name {
+                Some(name) => vec![name],
+                None => config
+                    .mcp
+                    .servers
+                    .iter()
+                    .filter(|(_, server)| server.auth.is_some())
+                    .map(|(name, _)| name.clone())
+                    .collect(),
+            };
+            if names.is_empty() {
+                println!("No OAuth MCP servers are configured.");
+                return Ok(());
+            }
+            for name in names {
+                match mcp::oauth::status(&name).await? {
+                    Some(credential) => {
+                        let Some(server_config) = config.mcp.servers.get(&name) else {
+                            println!(
+                                "{name}: credentials stored for {}, but the server is not configured",
+                                credential.resource
+                            );
+                            continue;
+                        };
+                        let server = mcp::McpServer::connect(&name, server_config).await;
+                        match server.health {
+                            mcp::HealthState::Healthy => println!(
+                                "{name}: connected to {} with {} tool(s) (scopes: {})",
+                                credential.resource,
+                                server.tools.len(),
+                                credential.scope.as_deref().unwrap_or("(server default)")
+                            ),
+                            mcp::HealthState::Down(reason) => println!(
+                                "{name}: credentials stored, but connection failed: {reason}"
+                            ),
+                        }
+                    }
+                    None => println!("{name}: not logged in; run `oli mcp login {name}`"),
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn mcp_scopes(read_only: bool) -> Vec<String> {
+    if read_only {
+        vec!["read".into()]
+    } else {
+        Vec::new()
     }
 }
 
@@ -880,6 +1029,36 @@ mod tests {
         assert!(
             Args::try_parse_from(["oli", "run", "--conversation", "abc", "--continue"]).is_err()
         );
+    }
+
+    #[test]
+    fn mcp_add_parses_the_one_command_oauth_flow() {
+        let args = Args::try_parse_from([
+            "oli",
+            "mcp",
+            "add",
+            "linear",
+            "https://mcp.linear.app/mcp",
+            "--paste",
+            "--read-only",
+        ])
+        .unwrap();
+        let Some(Cmd::Mcp {
+            command:
+                McpCommand::Add {
+                    name,
+                    url,
+                    paste,
+                    read_only,
+                },
+        }) = args.cmd
+        else {
+            panic!("expected mcp add command");
+        };
+        assert_eq!(name, "linear");
+        assert_eq!(url, "https://mcp.linear.app/mcp");
+        assert!(paste);
+        assert!(read_only);
     }
 
     #[test]

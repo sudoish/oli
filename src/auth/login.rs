@@ -259,7 +259,7 @@ fn release_check_reply(response: &crate::providers::ChatResponse) -> Result<Stri
 }
 
 /// Prompt and read one line from stdin, off the async runtime.
-async fn read_line(prompt: &str) -> Result<String> {
+pub(crate) async fn read_line(prompt: &str) -> Result<String> {
     use std::io::{BufRead, Write};
 
     let prompt = prompt.to_string();
@@ -294,7 +294,7 @@ pub fn describe(tokens: &Tokens, store: &AuthStore) -> String {
 /// Best-effort browser launch. Returns whether a launcher was actually
 /// started — the caller prints the URL either way, so a false negative
 /// costs the user nothing.
-fn open_browser(url: &str) -> bool {
+pub(crate) fn open_browser(url: &str) -> bool {
     // On Linux, a headless session has no browser to open. Detecting
     // that up front is better than spawning xdg-open into the void.
     #[cfg(target_os = "linux")]

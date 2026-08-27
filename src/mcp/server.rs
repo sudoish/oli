@@ -10,8 +10,11 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 use crate::error::{AgentError, Result};
-use crate::mcp::config::{McpServerConfig, McpTransportKind, env_snapshot, expand_env_vars};
+use crate::mcp::config::{
+    McpAuthKind, McpServerConfig, McpTransportKind, env_snapshot, expand_env_vars,
+};
 use crate::mcp::http::HttpTransport;
+use crate::mcp::oauth::McpOAuthSession;
 use crate::mcp::stdio::StdioTransport;
 use crate::mcp::transport::McpTransport;
 
@@ -140,7 +143,14 @@ impl McpServer {
             expanded_headers.insert(k.clone(), expanded);
         }
 
-        let transport = HttpTransport::new(url.clone(), expanded_headers);
+        let transport = match self.cfg.auth {
+            Some(McpAuthKind::OAuth) => HttpTransport::with_oauth(
+                url.clone(),
+                expanded_headers,
+                McpOAuthSession::new(&self.name, url)?,
+            ),
+            None => HttpTransport::new(url.clone(), expanded_headers),
+        };
         // HTTP servers don't expose a stderr stream — `/mcp logs` is a
         // no-op for them. We leave `stderr_source` at None.
         let dyn_transport: Arc<dyn McpTransport> = Arc::new(transport);
@@ -443,6 +453,7 @@ mod tests {
             env: Default::default(),
             url: None,
             headers: Default::default(),
+            auth: None,
             init_timeout_ms: 5000,
             call_timeout_ms: 60_000,
             tools: Default::default(),
@@ -532,6 +543,7 @@ for line in iter(sys.stdin.readline, ''):
             env: Default::default(),
             url: None,
             headers: Default::default(),
+            auth: None,
             init_timeout_ms: 1000,
             call_timeout_ms: 1000,
             tools: Default::default(),
@@ -559,6 +571,7 @@ for line in iter(sys.stdin.readline, ''):
             // refused fires immediately on most systems.
             url: Some("http://127.0.0.1:1/".into()),
             headers: Default::default(),
+            auth: None,
             init_timeout_ms: 1000,
             call_timeout_ms: 1000,
             tools: Default::default(),
@@ -589,6 +602,7 @@ for line in iter(sys.stdin.readline, ''):
             env: Default::default(),
             url: None,
             headers: Default::default(),
+            auth: None,
             init_timeout_ms: 5000,
             call_timeout_ms: 60_000,
             tools: Default::default(),
@@ -633,6 +647,7 @@ for line in iter(sys.stdin.readline, ''):
             env: Default::default(),
             url: None,
             headers: Default::default(),
+            auth: None,
             init_timeout_ms: 5000,
             call_timeout_ms: 60_000,
             tools: Default::default(),
@@ -678,6 +693,7 @@ for line in iter(sys.stdin.readline, ''):
             env: Default::default(),
             url: None,
             headers: Default::default(),
+            auth: None,
             init_timeout_ms: 5000,
             call_timeout_ms: 60_000,
             tools: Default::default(),
@@ -741,6 +757,7 @@ for line in iter(sys.stdin.readline, ''):
             env: Default::default(),
             url: None,
             headers: Default::default(),
+            auth: None,
             init_timeout_ms: 1000,
             call_timeout_ms: 1000,
             tools: Default::default(),

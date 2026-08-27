@@ -5,9 +5,8 @@
 //! whose `id` matches the request is the response. Notifications are
 //! POSTed without an `id` and the server acknowledges with 202.
 //!
-//! Auth is handled outside the transport: the user puts headers
-//! (`Authorization: Bearer ${TOKEN}`, etc.) in `[mcp.servers.<id>]
-//! .headers`, with `${VAR}` expansion handled at config-load time.
+//! Auth can use static headers from config or an OAuth session that
+//! supplies and refreshes bearer tokens.
 //!
 //! Some servers issue an `Mcp-Session-Id` header on the initialize
 //! response and require it echoed on subsequent calls. We capture the
@@ -23,6 +22,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use tokio::sync::Mutex;
 
 use crate::error::{AgentError, Result};
+use crate::mcp::oauth::McpOAuthSession;
 use crate::mcp::transport::McpTransport;
 
 const SESSION_HEADER: &str = "Mcp-Session-Id";
@@ -33,6 +33,7 @@ pub struct HttpTransport {
     /// Static headers configured by the user (Authorization, etc.).
     /// Values were `${VAR}`-expanded by the caller.
     headers: HashMap<String, String>,
+    oauth: Option<McpOAuthSession>,
     /// Captured from the first response that supplies it; echoed on
     /// every subsequent request. Servers that don't issue one stay at
     /// `None` and the header simply isn't sent.
@@ -46,6 +47,22 @@ impl HttpTransport {
             client: Client::new(),
             url,
             headers,
+            oauth: None,
+            session_id: Mutex::new(None),
+            next_id: AtomicI64::new(1),
+        }
+    }
+
+    pub fn with_oauth(
+        url: String,
+        headers: HashMap<String, String>,
+        oauth: McpOAuthSession,
+    ) -> Self {
+        Self {
+            client: Client::new(),
+            url,
+            headers,
+            oauth: Some(oauth),
             session_id: Mutex::new(None),
             next_id: AtomicI64::new(1),
         }
@@ -59,7 +76,11 @@ impl HttpTransport {
         self.session_id.lock().await.clone()
     }
 
-    async fn build_request(&self, body: &Value) -> reqwest::RequestBuilder {
+    async fn build_request(
+        &self,
+        body: &Value,
+        refresh_oauth: bool,
+    ) -> Result<reqwest::RequestBuilder> {
         let mut req = self
             .client
             .post(&self.url)
@@ -69,10 +90,18 @@ impl HttpTransport {
         for (k, v) in &self.headers {
             req = req.header(k.as_str(), v.as_str());
         }
+        if let Some(oauth) = &self.oauth {
+            let token = if refresh_oauth {
+                oauth.refresh_access_token().await?
+            } else {
+                oauth.access_token().await?
+            };
+            req = req.bearer_auth(token);
+        }
         if let Some(id) = self.session_id.lock().await.clone() {
             req = req.header(SESSION_HEADER, id);
         }
-        req
+        Ok(req)
     }
 
     /// Capture an `Mcp-Session-Id` header from a response if the
@@ -99,11 +128,19 @@ impl McpTransport for HttpTransport {
             "method": method,
             "params": params,
         });
-        let req = self.build_request(&body).await;
-        let resp = req
+        let req = self.build_request(&body, false).await?;
+        let mut resp = req
             .send()
             .await
             .map_err(|e| AgentError::Provider(format!("mcp http {} send: {}", method, e)))?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.oauth.is_some() {
+            resp = self
+                .build_request(&body, true)
+                .await?
+                .send()
+                .await
+                .map_err(|e| AgentError::Provider(format!("mcp http {} send: {}", method, e)))?;
+        }
 
         let status = resp.status();
         if !status.is_success() {
@@ -146,11 +183,19 @@ impl McpTransport for HttpTransport {
             "method": method,
             "params": params,
         });
-        let req = self.build_request(&body).await;
-        let resp = req
+        let req = self.build_request(&body, false).await?;
+        let mut resp = req
             .send()
             .await
             .map_err(|e| AgentError::Provider(format!("mcp http notify {}: {}", method, e)))?;
+        if resp.status() == reqwest::StatusCode::UNAUTHORIZED && self.oauth.is_some() {
+            resp = self
+                .build_request(&body, true)
+                .await?
+                .send()
+                .await
+                .map_err(|e| AgentError::Provider(format!("mcp http notify {}: {}", method, e)))?;
+        }
         self.capture_session_id(&resp).await;
         let status = resp.status();
         if !status.is_success() {
@@ -235,6 +280,7 @@ mod tests {
     use super::*;
     use std::net::SocketAddr;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -463,5 +509,92 @@ mod tests {
         let t = HttpTransport::new(url, headers);
         let result = t.request("call", json!({})).await.expect("request");
         assert_eq!(result["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn oauth_credentials_supply_the_authorization_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::mcp::oauth::McpOAuthStore::at(dir.path());
+        store
+            .save(&crate::mcp::oauth::McpOAuthCredential {
+                server_name: "linear".into(),
+                resource: "https://mcp.linear.app/mcp".into(),
+                issuer: "https://mcp.linear.app".into(),
+                token_endpoint: "https://mcp.linear.app/token".into(),
+                client_id: "client-1".into(),
+                client_secret: None,
+                redirect_uri: "http://localhost/auth/callback".into(),
+                access_token: "access-1".into(),
+                refresh_token: Some("refresh-1".into()),
+                expires_at: None,
+                scope: Some("read write".into()),
+            })
+            .unwrap();
+        let oauth = McpOAuthSession::with_store("linear", "https://mcp.linear.app/mcp", store);
+        let transport =
+            HttpTransport::with_oauth("https://mcp.linear.app/mcp".into(), HashMap::new(), oauth);
+        let request = transport
+            .build_request(&json!({"jsonrpc":"2.0"}), false)
+            .await
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer access-1"
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_unauthorized_response_refreshes_and_retries_once() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let resource_calls = calls.clone();
+        let (resource_addr, _resource_join) = fake_server(move |_body| {
+            if resource_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+                b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    .to_vec()
+            } else {
+                json_response(r#"{"jsonrpc":"2.0","id":1,"result":{"ok":true}}"#)
+            }
+        })
+        .await;
+        let (token_addr, _token_join) = fake_server(|_body| {
+            json_response(
+                r#"{"access_token":"access-2","refresh_token":"refresh-2","expires_in":3600}"#,
+            )
+        })
+        .await;
+        let resource_url = format!("http://{resource_addr}");
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::mcp::oauth::McpOAuthStore::at(dir.path());
+        store
+            .save(&crate::mcp::oauth::McpOAuthCredential {
+                server_name: "linear".into(),
+                resource: resource_url.clone(),
+                issuer: format!("http://{token_addr}"),
+                token_endpoint: format!("http://{token_addr}"),
+                client_id: "client-1".into(),
+                client_secret: None,
+                redirect_uri: "http://localhost/auth/callback".into(),
+                access_token: "access-1".into(),
+                refresh_token: Some("refresh-1".into()),
+                expires_at: None,
+                scope: Some("read write".into()),
+            })
+            .unwrap();
+        let oauth = McpOAuthSession::with_store("linear", &resource_url, store.clone());
+        let transport = HttpTransport::with_oauth(resource_url, HashMap::new(), oauth);
+
+        let result = transport.request("call", json!({})).await.unwrap();
+
+        assert_eq!(result["ok"], true);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            store.load("linear").unwrap().unwrap().access_token,
+            "access-2"
+        );
     }
 }

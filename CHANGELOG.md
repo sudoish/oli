@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add one-command OAuth onboarding for hosted MCP servers through
+  `oli mcp add`, including standards-based discovery, dynamic client
+  registration, PKCE, pasted redirects for SSH, owner-only credential
+  persistence, automatic refresh, and login/logout/status commands.
+
 ## v0.1.0 — Private-agent baseline
 
 The first baseline release for oli's private-agent reference workflows.

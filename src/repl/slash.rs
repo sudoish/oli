@@ -1176,6 +1176,11 @@ fn render_paths(agent: &Agent) -> String {
         "Policy allow-list",
         crate::policy::persisted_allow::default_path().as_deref(),
     );
+    push_dir_opt(
+        &mut out,
+        "MCP OAuth credentials",
+        crate::mcp::oauth::default_store_dir().as_deref(),
+    );
 
     out.trim_end().to_string()
 }

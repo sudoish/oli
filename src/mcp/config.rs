@@ -39,6 +39,12 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub headers: HashMap<String, String>,
 
+    /// streamable-http: discover and manage an OAuth 2.1 credential for
+    /// this server. Static `headers` remain available for API-key and
+    /// unattended service-account use.
+    #[serde(default)]
+    pub auth: Option<McpAuthKind>,
+
     /// Initialize timeout in milliseconds. Default 5000.
     #[serde(default = "default_init_timeout")]
     pub init_timeout_ms: u64,
@@ -64,6 +70,12 @@ pub struct McpServerConfig {
 pub enum McpTransportKind {
     Stdio,
     StreamableHttp,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum McpAuthKind {
+    OAuth,
 }
 
 #[derive(Clone, Debug, Default, Deserialize)]
@@ -282,6 +294,7 @@ mod tests {
             [mcp.servers.sentry]
             kind = "streamable-http"
             url = "https://mcp.sentry.dev"
+            auth = "oauth"
             headers = { Authorization = "Bearer ${SENTRY_TOKEN}" }
         "#;
         #[derive(Deserialize)]
@@ -292,6 +305,7 @@ mod tests {
         let s = &w.mcp.servers["sentry"];
         assert_eq!(s.kind, McpTransportKind::StreamableHttp);
         assert_eq!(s.url.as_deref(), Some("https://mcp.sentry.dev"));
+        assert_eq!(s.auth, Some(McpAuthKind::OAuth));
         assert_eq!(s.headers["Authorization"], "Bearer ${SENTRY_TOKEN}");
     }
 
