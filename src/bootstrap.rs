@@ -32,7 +32,7 @@ use crate::tools::{
 
 /// Built-in tool set shared between the parent agent and any
 /// subagent spawned via `Task`. Excludes `Task` itself so
-/// subagents can't recurse (the binary registers `Task`
+/// subagents can't recurse (top-level startup registers `Task`
 /// separately on top of this). Includes the notes tools backed
 /// by the supplied `NotesStore`.
 pub fn build_default_tools(cfg: &Config, notes_store: Arc<dyn notes::NotesStore>) -> Registry {

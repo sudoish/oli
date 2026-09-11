@@ -564,7 +564,7 @@ add what" table is the map:
 
 | Goal | Where |
 | --- | --- |
-| New tool | `src/tools/<name>.rs` impl `tools::Tool`; register in `src/bin/oli.rs`. |
+| New tool | `src/tools/<name>.rs` impl `tools::Tool`; register in `src/cli/run.rs`. |
 | New provider | `src/providers/<name>.rs` impl `Provider`; wire into `providers::build()`. |
 | New slash command | Relevant module under `src/repl/slash/`; register in `SlashRegistry::default_set_with_reloader` in `registry.rs`. |
 | Model capability override | `[[caps]]` block in config, layered over defaults in `src/agent/caps.rs`. |
@@ -579,8 +579,9 @@ that keeps the codebase small.
 
 ```
 src/
-├── bin/oli.rs       # CLI entry; wires startup, registers tools and hooks
+├── bin/oli.rs       # thin Clap entry and command dispatcher
 ├── bootstrap.rs     # shared startup and persisted-session wiring
+├── cli/             # command handlers + top-level agent startup assembly
 ├── agent/           # think → call → observe loop
 │   ├── mod.rs       #   Agent + Memory trait
 │   ├── context.rs   #   System prompt + AGENTS.md/CLAUDE.md ingestion

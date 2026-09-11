@@ -39,8 +39,9 @@ codebase*.
 | Path | What lives there |
 |---|---|
 | `agent/` | think→call→observe loop, `Memory` trait, system-prompt builder (`agent/context.rs`), capability table (`agent/caps.rs`) |
-| `bin/oli.rs` | CLI entry point; wires startup, registers tools and hooks |
+| `bin/oli.rs` | thin Clap entry point and command dispatcher |
 | `bootstrap.rs` | shared startup and persisted-session wiring |
+| `cli/` | reusable command handlers and top-level agent startup assembly |
 | `config.rs` | layered TOML loader (global `~/.config/oli/config.toml` + project `.oli/config.toml` walked up from cwd) |
 | `diagnostics.rs` | operational warning ring buffer (surfaced via `/diagnostics`) |
 | `hooks/` | `PreToolUse` / `PostToolUse` / `Stop` event dispatch |
@@ -58,7 +59,7 @@ codebase*.
 
 | Goal | Where |
 |---|---|
-| New tool | `src/tools/<name>.rs` impl `tools::Tool` (trait at `src/tools/mod.rs:47`); register in `src/bin/oli.rs` startup. |
+| New tool | `src/tools/<name>.rs` impl `tools::Tool` (trait at `src/tools/mod.rs:47`); register in `src/cli/run.rs` startup. |
 | New provider | `src/providers/<name>.rs` impl `Provider` (trait at `src/providers/mod.rs:125`); wire into `providers::build()` (`src/providers/mod.rs:36`). |
 | New slash command | Add it to the relevant module under `src/repl/slash/`; register it in `SlashRegistry::default_set_with_reloader` in `registry.rs`. |
 | New hook event | `src/hooks/`. Existing dispatcher fires `PreToolUse` / `PostToolUse` / `Stop`. |

@@ -22,6 +22,8 @@ exists.
   tested without driving a provider loop.
 - The slash-command registry and bundled commands are split under
   `src/repl/slash/` while preserving the existing public paths.
+- CLI command handling and top-level startup assembly are split under
+  `src/cli/`; the binary now owns only Clap syntax, parsing, and dispatch.
 
 ## Principles
 
@@ -119,21 +121,24 @@ unchanged, and command-specific helpers stay with their implementations.
 
 ### 5. Split CLI command handling out of `src/bin/oli.rs`
 
-Target shape:
+Completed with boundaries based on the current command and startup dependencies:
 
 ```text
 src/cli/
   mod.rs
+  auth.rs
+  mcp.rs
   run.rs
   init.rs
-  login.rs
   replay.rs
   sessions.rs
 ```
 
-`src/bin/oli.rs` should remain a thin clap entrypoint plus subcommand dispatch.
+Clap-only types remain in the binary. Command options and handlers, headless
+output shaping, session selection, and agent startup assembly are library-side.
+The existing `bootstrap.rs` constructors remain the lower-level reusable seam.
 
-Done when CLI behavior is organized by user command rather than startup history.
+CLI behavior is now organized by user command rather than startup history.
 
 ### 6. Split `src/agent/mod.rs` mechanically
 

@@ -18,7 +18,8 @@ flowchart TD
     T --> X["Built-ins, plugins, subprocess, MCP"]
 ```
 
-[`src/bin/oli.rs`](../src/bin/oli.rs) parses commands and assembles a run.
+[`src/bin/oli.rs`](../src/bin/oli.rs) parses and dispatches commands.
+[`src/cli/`](../src/cli/) implements those commands and assembles top-level runs.
 [`src/bootstrap.rs`](../src/bootstrap.rs) provides reusable constructors for
 tools, sessions, memory, accounting, and subagents. [`Agent`](../src/agent/mod.rs)
 owns conversation state and coordinates the think → call → observe loop.
@@ -52,6 +53,7 @@ cannot be converted into a successful completion by presentation code.
 | Path | Responsibility |
 | --- | --- |
 | `src/agent/` | Agent coordinator, typed outcomes, tool execution, model capabilities, system context, fallback parsing, and memory strategies. |
+| `src/cli/` | Reusable command handlers, headless output contracts, session selection, and top-level agent startup assembly. |
 | `src/providers/` | `Provider` implementations for Anthropic, ChatGPT subscription, and OpenAI-compatible APIs. |
 | `src/tools/` | `Tool`, registry, built-in tools, subprocess tools, output bounds, and subagent support. |
 | `src/hooks/` | Pre-tool, post-tool, and stop hook composition. |
@@ -60,7 +62,7 @@ cannot be converted into a successful completion by presentation code.
 | `src/plugins/` | Sandboxed Lua discovery, loading, host APIs, tools, hooks, and slash commands. |
 | `src/repl/` | Rustyline frontend and stream rendering; `repl/slash/` contains the slash registry and responsibility-grouped built-in commands. |
 | `src/bootstrap.rs` | Reusable startup constructors for tools, sessions, memory, ledger, and subagents. |
-| `src/bin/oli.rs` | Clap entrypoint and top-level command dispatch. |
+| `src/bin/oli.rs` | Clap-only syntax, parsing, and thin top-level dispatch. |
 | `src/config.rs` | Global/project TOML loading and deterministic overlay rules. |
 | `src/ledger/` | Request estimates, context attribution, usage, cost, and latency records. |
 | `src/auth/` | ChatGPT subscription OAuth and credential refresh. |
@@ -142,7 +144,7 @@ variables.
 nearest project overlay. Tables merge by key, scalar leaves are replaced, and
 project array entries precede global entries where lookup order matters.
 
-The binary then:
+The `cli::run` startup path then:
 
 1. resolves provider and model overrides;
 2. opens notes, plugins, MCP servers, transcript, and ledger;
@@ -167,8 +169,8 @@ diagnostics without preventing unrelated capabilities from starting.
 ## Frontend boundary
 
 Today, `repl::run` owns rustyline input and consumes provider `StreamEvent`
-values directly. Headless mode separately shapes text or JSON output in the
-binary. Both reuse `Agent`, but cancellation, commands, snapshots, and
+values directly. `cli::run` separately shapes headless text or JSON output.
+Both reuse `Agent`, but cancellation, commands, snapshots, and
 presentation are not yet one library contract.
 
 The target boundary is deliberately smaller than a `Ui` trait:

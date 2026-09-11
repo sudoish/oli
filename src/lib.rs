@@ -35,6 +35,7 @@
 pub mod agent;
 pub mod auth;
 pub mod bootstrap;
+pub mod cli;
 pub mod config;
 pub mod diagnostics;
 pub mod error;
