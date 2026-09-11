@@ -6,12 +6,10 @@ mod snapshot;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use async_trait::async_trait;
 use tokio::sync::{Notify, mpsc};
 
 use crate::agent::{Agent, RunOutcome};
 use crate::error::Result;
-use crate::hooks::{Hook, HookOutcome, HookPayload};
 use crate::mcp::HealthState;
 use crate::providers::StreamEvent;
 
@@ -70,38 +68,6 @@ impl CancellationToken {
 
 type EventSender = mpsc::UnboundedSender<RuntimeEvent>;
 
-struct RuntimeProgressHook {
-    sender: Arc<Mutex<Option<EventSender>>>,
-}
-
-#[async_trait]
-impl Hook for RuntimeProgressHook {
-    fn name(&self) -> &str {
-        "runtime-events"
-    }
-
-    async fn handle(&self, payload: &HookPayload<'_>) -> HookOutcome {
-        let event = match payload {
-            HookPayload::PreToolUse { tool, args } => Some(RuntimeEvent::ToolStarted {
-                name: (*tool).to_string(),
-                args: (*args).clone(),
-            }),
-            HookPayload::PostToolUse { .. } | HookPayload::Stop { .. } => None,
-        };
-        if let Some(event) = event {
-            if let Some(sender) = self
-                .sender
-                .lock()
-                .expect("runtime event lock poisoned")
-                .as_ref()
-            {
-                let _ = sender.send(event);
-            }
-        }
-        HookOutcome::Continue
-    }
-}
-
 /// Owns a single [`Agent`] and translates its borrowed stream into owned events.
 pub struct SessionRuntime {
     agent: Agent,
@@ -112,10 +78,20 @@ pub struct SessionRuntime {
 
 impl SessionRuntime {
     pub fn new(mut agent: Agent, session_id: impl Into<String>) -> Self {
-        let event_sender = Arc::new(Mutex::new(None));
-        agent.hooks.register(RuntimeProgressHook {
-            sender: event_sender.clone(),
-        });
+        let event_sender: Arc<Mutex<Option<EventSender>>> = Arc::new(Mutex::new(None));
+        let observer_sender = event_sender.clone();
+        agent.tool_started_observer = Some(Arc::new(move |name, args| {
+            if let Some(sender) = observer_sender
+                .lock()
+                .expect("runtime event lock poisoned")
+                .as_ref()
+            {
+                let _ = sender.send(RuntimeEvent::ToolStarted {
+                    name: name.to_string(),
+                    args: args.clone(),
+                });
+            }
+        }));
         Self {
             agent,
             session_id: session_id.into(),
@@ -461,6 +437,43 @@ mod tests {
             .unwrap();
         assert!(started < content);
         assert!(content < completed);
+    }
+
+    #[tokio::test]
+    async fn denied_tools_do_not_emit_started_events() {
+        let provider = FakeProvider::new(vec![
+            json!({
+                "role":"assistant",
+                "content":null,
+                "tool_calls":[{
+                    "id":"call-1",
+                    "type":"function",
+                    "function":{"name":"Echo","arguments":"{\"text\":\"hi\"}"}
+                }]
+            }),
+            json!({"role":"assistant","content":"denied"}),
+        ]);
+        let mut tools = Registry::new();
+        tools.register(Echo);
+        let agent = Agent::new(Box::new(provider), tools, "test-model".into())
+            .with_policy(Box::new(crate::policy::DenyAll));
+        let mut runtime = SessionRuntime::new(agent, "s1");
+        let mut events = Vec::new();
+
+        runtime
+            .execute(
+                RuntimeCommand::Prompt("use echo".into()),
+                &CancellationToken::new(),
+                |event| events.push(event),
+            )
+            .await
+            .unwrap();
+
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, RuntimeEvent::ToolStarted { .. }))
+        );
     }
 
     #[tokio::test]

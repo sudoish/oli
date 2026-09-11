@@ -53,11 +53,15 @@ impl SlashCommand for Provider {
             Ok(p) => p,
             Err(e) => return SlashOutcome::Continue(Some(format!("error: {}", e))),
         };
-        let new_model = pcfg
+        let Some(new_model) = pcfg
             .default_model
             .clone()
             .or_else(|| cfg.default_model.clone())
-            .unwrap_or_else(|| agent.model.clone());
+        else {
+            return SlashOutcome::Continue(Some(format!(
+                "error: provider `{arg}` has no default model; configure `providers.{arg}.default_model` or `default_model`"
+            )));
+        };
         let new_provider = match crate::providers::build(cfg.as_ref(), arg) {
             Ok(p) => p,
             Err(e) => return SlashOutcome::Continue(Some(format!("error: {}", e))),

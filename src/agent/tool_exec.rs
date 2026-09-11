@@ -9,6 +9,7 @@ pub(crate) async fn execute(
     ctx: &ToolContext,
     policy: &dyn Policy,
     hooks: &HookRegistry,
+    started_observer: Option<&(dyn Fn(&str, &Value) + Send + Sync)>,
     name: &str,
     args: Value,
 ) -> String {
@@ -16,10 +17,15 @@ pub(crate) async fn execute(
     let (final_args, raw_result) = match decision {
         PreToolDecision::Continue { args } => {
             let result = match policy.check(name, &args) {
-                Decision::Allow => match tools.dispatch(name, args.clone(), ctx).await {
-                    Ok(result) => result,
-                    Err(error) => format!("Error: {error}"),
-                },
+                Decision::Allow => {
+                    if let Some(observer) = started_observer {
+                        observer(name, &args);
+                    }
+                    match tools.dispatch(name, args.clone(), ctx).await {
+                        Ok(result) => result,
+                        Err(error) => format!("Error: {error}"),
+                    }
+                }
                 Decision::Deny(reason) => format!("policy denied {name}: {reason}"),
             };
             (args, result)
@@ -96,6 +102,7 @@ mod tests {
             &ToolContext::new(),
             &AllowAll,
             &HookRegistry::new(),
+            None,
             "Echo",
             json!({"value": 1}),
         )
@@ -113,6 +120,7 @@ mod tests {
             &ToolContext::new(),
             &DenyAll,
             &HookRegistry::new(),
+            None,
             "MustNotRun",
             json!({"value": 1}),
         )

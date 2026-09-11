@@ -26,6 +26,7 @@ toml_edit = "0.25"
 glob = "0.3"
 futures = "0.3"
 rustyline = "14"
+rpassword = "7"
 mlua = { version = "0.10", features = ["lua54", "vendored", "async", "send", "serialize"] }
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 eventsource-stream = "0.2"

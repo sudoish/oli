@@ -7,6 +7,28 @@ use super::{
 };
 use crate::agent::Agent;
 
+const BUILTIN_NAMES: &[&str] = &[
+    "clear",
+    "help",
+    "cost",
+    "tools",
+    "system",
+    "memory",
+    "compact",
+    "provider",
+    "model",
+    "sessions",
+    "plugins",
+    "config",
+    "diagnostics",
+    "paths",
+    "exit",
+];
+
+pub(crate) fn is_builtin_name(name: &str) -> bool {
+    BUILTIN_NAMES.contains(&name)
+}
+
 #[async_trait]
 pub trait SlashCommand: Send + Sync {
     fn name(&self) -> &str;
@@ -163,6 +185,10 @@ impl SlashRegistry {
         r.register(Diagnostics);
         r.register(Paths);
         r.register(Exit);
+        debug_assert_eq!(
+            r.order.iter().map(String::as_str).collect::<Vec<_>>(),
+            BUILTIN_NAMES
+        );
         r
     }
 }

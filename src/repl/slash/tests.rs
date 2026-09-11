@@ -557,6 +557,38 @@ default_model = "anthropic/claude-haiku-4.5"
     }
 
     #[tokio::test]
+    async fn provider_without_a_default_model_does_not_reuse_the_active_providers_model() {
+        let toml = r#"
+default_provider = "ollama"
+
+[providers.ollama]
+kind          = "openai-compat"
+base_url      = "http://localhost:11434/v1"
+api_key       = "ollama"
+default_model = "qwen2.5-coder:7b"
+
+[providers.cloud]
+kind     = "openai-compat"
+base_url = "https://api.example.com/v1"
+api_key  = "x"
+"#;
+        let cfg = std::sync::Arc::new(crate::config::Config::from_str(toml).unwrap());
+        let provider = FakeProvider::new(vec![]);
+        let mut agent = Agent::new(
+            Box::new(provider),
+            Registry::new(),
+            "qwen2.5-coder:7b".into(),
+        )
+        .with_config(cfg, "ollama");
+
+        let out = reg_dispatch_provider("provider cloud", &mut agent).await;
+
+        assert!(out.contains("no default model"));
+        assert_eq!(agent.provider_name, "ollama");
+        assert_eq!(agent.model, "qwen2.5-coder:7b");
+    }
+
+    #[tokio::test]
     async fn model_without_args_reports_current_and_lists_when_provider_supports_it() {
         let reg = SlashRegistry::default_set();
         let provider = FakeProvider::new(vec![]);

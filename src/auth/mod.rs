@@ -185,27 +185,21 @@ mod tests {
     }
 
     #[test]
-    fn client_id_defaults_to_the_codex_public_client() {
-        // SAFETY: single-purpose env var, removed immediately after.
+    fn client_id_honors_nonblank_environment_overrides() {
+        let previous = std::env::var_os(CLIENT_ID_ENV);
+
+        // SAFETY: all mutations of this process-wide variable are kept in this
+        // single test and the original value is restored before it returns.
         unsafe { std::env::remove_var(CLIENT_ID_ENV) };
         assert_eq!(client_id(), CLIENT_ID);
-    }
-
-    #[test]
-    fn client_id_env_override_wins() {
-        // SAFETY: as above. Kept in one test so the set/remove pair is
-        // not interleaved with the default-value assertion above.
         unsafe { std::env::set_var(CLIENT_ID_ENV, "app_custom") };
         assert_eq!(client_id(), "app_custom");
-        unsafe { std::env::remove_var(CLIENT_ID_ENV) };
-    }
-
-    #[test]
-    fn client_id_env_override_ignores_blank() {
-        // SAFETY: as above.
         unsafe { std::env::set_var(CLIENT_ID_ENV, "   ") };
         assert_eq!(client_id(), CLIENT_ID);
-        unsafe { std::env::remove_var(CLIENT_ID_ENV) };
+        match previous {
+            Some(value) => unsafe { std::env::set_var(CLIENT_ID_ENV, value) },
+            None => unsafe { std::env::remove_var(CLIENT_ID_ENV) },
+        }
     }
 
     #[test]

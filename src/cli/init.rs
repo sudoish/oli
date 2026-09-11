@@ -184,17 +184,24 @@ fn prompt_provider() -> Result<WizardProvider> {
 }
 
 fn prompt_api_key(provider: WizardProvider) -> Result<String> {
-    use std::io::BufRead;
+    use std::io::{BufRead, IsTerminal};
 
-    let mut stdout = std::io::stdout();
-    let _ = write!(stdout, "API key for {}: ", provider.label());
-    let _ = stdout.flush();
-    let mut line = String::new();
-    std::io::stdin()
-        .lock()
-        .read_line(&mut line)
-        .map_err(|e| AgentError::Config(format!("stdin read failed: {}", e)))?;
-    let key = line.trim().to_string();
+    let stdin = std::io::stdin();
+    let key = if stdin.is_terminal() {
+        rpassword::prompt_password(format!("API key for {}: ", provider.label()))
+            .map_err(|e| AgentError::Config(format!("stdin read failed: {e}")))?
+    } else {
+        let mut stdout = std::io::stdout();
+        let _ = write!(stdout, "API key for {}: ", provider.label());
+        let _ = stdout.flush();
+        let mut line = String::new();
+        stdin
+            .lock()
+            .read_line(&mut line)
+            .map_err(|e| AgentError::Config(format!("stdin read failed: {e}")))?;
+        line
+    };
+    let key = key.trim().to_string();
     if key.is_empty() {
         return Err(AgentError::Config(
             "api key is required for paid providers".into(),

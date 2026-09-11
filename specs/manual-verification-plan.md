@@ -8,6 +8,7 @@ before releases or after large architectural moves.
 Run these first:
 
 ```sh
+export XDG_CONFIG_HOME="$(mktemp -d)"
 cargo test
 cargo build --release
 cargo doc --no-deps --lib
@@ -15,6 +16,9 @@ cargo doc --no-deps --lib
 ./target/release/oli init --provider ollama --force
 ./target/release/oli run --output json -p "say hello" --max-turns 3
 ```
+
+The temporary `XDG_CONFIG_HOME` keeps `init --force`, credentials, sessions,
+and other verification state out of the user's real configuration.
 
 ## Headless CLI contract
 

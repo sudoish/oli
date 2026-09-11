@@ -67,8 +67,8 @@ of TOML.
 - **Resumable and scriptable.** Every run is a JSONL transcript at
   `~/.config/oli/sessions/<id>.jsonl`. `oli run --conversation <id>` and
   `oli run --continue` replay it; `/sessions` browses the lot.
-- **Small surface.** Five extension traits, no plugin framework, no
-  package manager. The whole agent loop fits in your head.
+- **Small surface.** Seven extension traits, one bundled Lua plugin runtime,
+  and no package manager. The whole agent loop fits in your head.
 
 ---
 
@@ -602,8 +602,10 @@ src/
 └── wizard_init.rs   # first-run config wizard
 ```
 
-Five extension traits — `Tool`, `Provider`, `Policy`, `SlashCommand`,
-`Hook` — and that's it. The agent loop is re-entrant (a tool
+Seven extension traits — `Tool`, `Provider`, `Memory`, `Policy`, `Hook`,
+`SlashCommand`, and `SubagentSpawner` — cover the runtime's customization
+points. `McpHandle` is the integration handle for a connected MCP server,
+not an extension trait. The agent loop is re-entrant (a tool
 executor can spin up a fresh loop with its own message list and tool
 budget; this is how `Task` and `ctx:prompt(...)` work). The hook
 dispatcher is shared between built-in hooks and plugin-registered

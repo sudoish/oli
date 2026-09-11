@@ -100,7 +100,9 @@ Document the extension surfaces:
 - `Hook`
 - `SlashCommand`
 - `SubagentSpawner`
-- `McpHandle`
+
+Document `McpHandle` separately as the integration handle for a connected MCP
+server rather than presenting it as an extension trait.
 
 For each, include:
 

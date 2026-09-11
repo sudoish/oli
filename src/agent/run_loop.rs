@@ -91,6 +91,7 @@ where
                 &agent.ctx,
                 agent.policy.as_ref(),
                 &agent.hooks,
+                agent.tool_started_observer.as_deref(),
                 name,
                 args,
             )

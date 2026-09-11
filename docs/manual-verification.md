@@ -7,6 +7,13 @@ processes, and persistence that hermetic tests cannot fully prove.
 Do not put API keys in the repository. Supply them through the documented
 environment variables or owner-only user configuration.
 
+Run the entire checklist with an isolated configuration so destructive setup
+commands and test credentials cannot affect the user's real configuration:
+
+```sh
+export XDG_CONFIG_HOME="$(mktemp -d)"
+```
+
 ## Baseline
 
 ```sh

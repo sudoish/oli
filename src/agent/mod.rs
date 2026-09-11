@@ -24,7 +24,7 @@
 //! - [`caps`] — model-capability table (context window, native
 //!   tools yes/no, streaming, etc.).
 
-use serde_json::json;
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 use crate::config::Config;
@@ -48,6 +48,8 @@ pub mod tool_parse;
 pub use caps::{ModelCaps, RequestBudget, caps_for, caps_for_with_overrides};
 pub use memory::{CompactContext, CompactionReport, LinearWithCompact, Memory};
 pub use outcome::RunOutcome;
+
+pub(crate) type ToolStartedObserver = Arc<dyn Fn(&str, &Value) + Send + Sync>;
 
 pub struct Agent {
     pub provider: Box<dyn Provider>,
@@ -105,6 +107,7 @@ pub struct Agent {
     /// model turn. Empty by default; the binary populates this at
     /// startup.
     pub mcp_handles: Arc<Vec<crate::mcp::McpHandle>>,
+    pub(crate) tool_started_observer: Option<ToolStartedObserver>,
     ctx: ToolContext,
 }
 
@@ -127,6 +130,7 @@ impl Agent {
             max_turns: None,
             plugin_manifest: Vec::new(),
             mcp_handles: Arc::new(Vec::new()),
+            tool_started_observer: None,
             ctx: ToolContext::new(),
         }
     }
