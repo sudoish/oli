@@ -20,6 +20,8 @@ exists.
 - The `Agent` split has started with typed outcomes in `agent/outcome.rs`.
 - The tool execution boundary is extracted into `agent/tool_exec.rs` and can be
   tested without driving a provider loop.
+- The slash-command registry and bundled commands are split under
+  `src/repl/slash/` while preserving the existing public paths.
 
 ## Principles
 
@@ -92,32 +94,28 @@ Done when release confidence does not depend on ad hoc memory.
 
 ### 4. Split `src/repl/slash.rs`
 
-Current issue: one file owns the slash registry and every command.
+Previous issue: one file owned the slash registry and every command.
 
-Target shape:
+Completed with a practical responsibility-based shape:
 
 ```text
 src/repl/slash/
   mod.rs
   registry.rs
-  clear.rs
-  help.rs
+  basic.rs
   cost.rs
-  tools.rs
-  system.rs
   memory.rs
-  provider.rs
-  model.rs
-  sessions.rs
+  selection.rs
+  runtime.rs
   plugins.rs
   mcp.rs
   config.rs
-  diagnostics.rs
   paths.rs
+  tests.rs
 ```
 
-Done when each slash command is easy to open independently and adding a new
-command does not require editing a 2000-line file.
+The public command types remain re-exported from `repl::slash`, registry order is
+unchanged, and command-specific helpers stay with their implementations.
 
 ### 5. Split CLI command handling out of `src/bin/oli.rs`
 

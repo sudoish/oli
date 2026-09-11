@@ -566,7 +566,7 @@ add what" table is the map:
 | --- | --- |
 | New tool | `src/tools/<name>.rs` impl `tools::Tool`; register in `src/bin/oli.rs`. |
 | New provider | `src/providers/<name>.rs` impl `Provider`; wire into `providers::build()`. |
-| New slash command | `src/repl/slash.rs`; register in `SlashRegistry::default_set_with_reloader`. |
+| New slash command | Relevant module under `src/repl/slash/`; register in `SlashRegistry::default_set_with_reloader` in `registry.rs`. |
 | Model capability override | `[[caps]]` block in config, layered over defaults in `src/agent/caps.rs`. |
 
 The test loop is fast (`cargo test --lib` is ~2s for the full

@@ -58,7 +58,7 @@ cannot be converted into a successful completion by presentation code.
 | `src/policy/` | Optional deterministic hard-deny policy. Normal runs use `AllowAll`; `--strict` uses `DenyAll`. |
 | `src/mcp/` | stdio and streamable-HTTP MCP clients, OAuth, server lifecycle, and MCP-to-Tool adapters. |
 | `src/plugins/` | Sandboxed Lua discovery, loading, host APIs, tools, hooks, and slash commands. |
-| `src/repl/` | Rustyline frontend, stream rendering, and built-in slash commands. |
+| `src/repl/` | Rustyline frontend and stream rendering; `repl/slash/` contains the slash registry and responsibility-grouped built-in commands. |
 | `src/bootstrap.rs` | Reusable startup constructors for tools, sessions, memory, ledger, and subagents. |
 | `src/bin/oli.rs` | Clap entrypoint and top-level command dispatch. |
 | `src/config.rs` | Global/project TOML loading and deterministic overlay rules. |
@@ -77,7 +77,7 @@ cannot be converted into a successful completion by presentation code.
 | `Memory` | Own active conversation context and compaction. | `LinearWithCompact`, `PersistedMemory`, and `EmbeddingRagMemory` under `agent/memory/`. |
 | `Hook` | Observe, replace, or skip lifecycle values. | Built-in and Lua hooks share `HookRegistry`. |
 | `Policy` | Deterministically allow or hard-deny a model tool call. | `AllowAll` and `DenyAll`; embedders can provide another implementation with `Agent::with_policy`. |
-| `SlashCommand` | Handle line-frontend commands without sending them to a model. | Implementations and `SlashRegistry` currently live in `repl/slash.rs`. |
+| `SlashCommand` | Handle line-frontend commands without sending them to a model. | `SlashRegistry` lives in `repl/slash/registry.rs`; bundled implementations are grouped by responsibility beside it. |
 | `SubagentSpawner` | Construct isolated child loops for the `Task` tool. | `DefaultAgentSpawner` in `bootstrap.rs`. |
 | `McpHandle` | Retain a live MCP server and refresh its tools. | Built by `mcp::connect_all`; exposed tools enter the normal registry. |
 

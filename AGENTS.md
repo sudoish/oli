@@ -60,7 +60,7 @@ codebase*.
 |---|---|
 | New tool | `src/tools/<name>.rs` impl `tools::Tool` (trait at `src/tools/mod.rs:47`); register in `src/bin/oli.rs` startup. |
 | New provider | `src/providers/<name>.rs` impl `Provider` (trait at `src/providers/mod.rs:125`); wire into `providers::build()` (`src/providers/mod.rs:36`). |
-| New slash command | `src/repl/slash.rs`: struct + `impl SlashCommand`; register in `SlashRegistry::default_set_with_reloader`. |
+| New slash command | Add it to the relevant module under `src/repl/slash/`; register it in `SlashRegistry::default_set_with_reloader` in `registry.rs`. |
 | New hook event | `src/hooks/`. Existing dispatcher fires `PreToolUse` / `PostToolUse` / `Stop`. |
 | Capability override for a model | `[[caps]]` block keyed by model-id `prefix` in user config, layered over built-in defaults in `src/agent/caps.rs`. |
 | Plugin (no rebuild) | drop `.lua` into `~/.config/oli/plugins/` (global) or `<project>/.oli/plugins/`. Plugins can register tools, slashes, and hooks. Sandbox strips `os` / `io` / `package.loadlib`; filesystem and shell use registered tools and hooks. |
