@@ -1,6 +1,6 @@
 # Polish roadmap (post-9/10 → 10/10)
 
-Closes the persistent weaknesses called out in `specs/review-2.md`.
+Closes the persistent weaknesses called out in `review-2.md`.
 Goal: turn a 9/10 "feature-complete with rough edges" harness into
 a 10/10 "clean, robust, easy to navigate" one.
 
@@ -253,8 +253,8 @@ The "easy to navigate" piece for new contributors and operators.
   - `specs/progress.md` (state)
   - `specs/roadmap.md` (post-MCP follow-ups)
   - `specs/tui.md` (TUI architecture)
-  - `specs/review-2.md` (latest review)
-  - `specs/polish.md` (this doc)
+  - `specs/archive/review-2.md` (latest review at the time)
+  - `specs/archive/polish.md` (this doc)
   - `specs/memory.md` (memory strategy)
   - `specs/mcp.md` (MCP design)
   - `specs/ui.md` (historical line-mode UX plan)

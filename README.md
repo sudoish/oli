@@ -614,7 +614,9 @@ hooks — one mechanism, two registration sources.
 | If you want to… | Read |
 | --- | --- |
 | Use oli day-to-day | [`docs/cheatsheet.md`](docs/cheatsheet.md) — every slash command, file path, and env var. |
-| Understand the design | [`specs/README.md`](specs/README.md) — mission, principles, in/out of scope, full config schema, plugin contract, roadmap. |
+| Understand the current architecture | [`docs/current-architecture.md`](docs/current-architecture.md) — runtime lifecycle, module ownership, extension and frontend boundaries. |
+| Verify a release or structural change | [`docs/manual-verification.md`](docs/manual-verification.md) — repeatable live checks beyond the test suite. |
+| Understand the design rationale | [`specs/README.md`](specs/README.md) — mission, principles, feature specifications, and roadmap. |
 | Track what's shipped | [`specs/progress.md`](specs/progress.md) — phase-by-phase status with commit SHAs. |
 | Write a plugin | [`examples/README.md`](examples/README.md) — 60-second tour + host API reference. |
 | Modify the code | [`AGENTS.md`](AGENTS.md) — module map, "where to add what" table, testing conventions, gotchas. |

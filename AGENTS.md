@@ -6,8 +6,10 @@ agent harnesses that read AGENTS.md), so it doubles as the project's
 self-description: when oli is asked about itself in this repo, this is
 what it knows.
 
-User-facing build / config docs live in `README.md`. Architectural specs
-live under `specs/`. This file is for agents *modifying the codebase*.
+User-facing build / config docs live in `README.md`. Current runtime structure
+is documented in `docs/current-architecture.md`; architectural specs and
+historical plans live under `specs/`. This file is for agents *modifying the
+codebase*.
 
 ## Build & test
 

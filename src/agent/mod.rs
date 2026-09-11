@@ -27,42 +27,24 @@ use serde_json::{Value, json};
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::hooks::{HookRegistry, PreToolDecision};
+use crate::hooks::HookRegistry;
 use crate::ledger::{CompactionMetrics, Latency, Ledger, as_ms, estimate_context, now_ms};
-use crate::policy::{AllowAll, Decision, Policy};
+use crate::policy::{AllowAll, Policy};
 use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage, UsageTotals};
 use crate::tools::{Registry, ToolContext};
 
 const MAX_COMPACTION_PASSES: usize = 8;
 
-/// Typed terminal state for one agent invocation. Callers that need to
-/// distinguish a model completion from a safety-boundary stop can inspect
-/// this enum returned by [`Agent::run`] and [`Agent::run_streaming`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunOutcome {
-    Completed(String),
-    MaxTurnsExhausted { limit: usize, message: String },
-}
-
-impl RunOutcome {
-    /// Require a completed response at a non-interactive composition boundary.
-    pub fn into_completed(self) -> Result<String> {
-        match self {
-            Self::Completed(text) => Ok(text),
-            Self::MaxTurnsExhausted { limit, .. } => {
-                Err(crate::error::AgentError::MaxTurnsExhausted(limit))
-            }
-        }
-    }
-}
-
 pub mod caps;
 pub mod context;
 pub mod memory;
+pub mod outcome;
+mod tool_exec;
 pub mod tool_parse;
 
 pub use caps::{ModelCaps, RequestBudget, caps_for, caps_for_with_overrides};
 pub use memory::{CompactContext, CompactionReport, LinearWithCompact, Memory};
+pub use outcome::RunOutcome;
 
 pub struct Agent {
     pub provider: Box<dyn Provider>,
@@ -384,19 +366,6 @@ impl Agent {
             .await;
     }
 
-    /// Run a single tool call through the policy gate, then through the
-    /// tool registry. Policy denials are tool results, not agent errors.
-    async fn dispatch_with_policy(&self, name: &str, args: Value) -> String {
-        let decision = self.policy.check(name, &args);
-        match decision {
-            Decision::Allow => match self.tools.dispatch(name, args, &self.ctx).await {
-                Ok(s) => s,
-                Err(e) => format!("Error: {}", e),
-            },
-            Decision::Deny(reason) => format!("policy denied {}: {}", name, reason),
-        }
-    }
-
     /// Append `prompt` as a user turn, run the loop until the assistant
     /// produces a response without tool calls, and return that final
     /// content. Non-streaming path; uses a no-op sink under the hood.
@@ -602,23 +571,15 @@ impl Agent {
                     .unwrap_or("{}");
                 let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
 
-                // Pre-hooks compose: `Replace` mutates the args the
-                // policy + tool will see; the first `Skip` short-circuits
-                // dispatch with a synthetic result. Post-hooks still
-                // fire afterwards so observers and redactors run on
-                // whatever the model is about to see.
-                let decision = self.hooks.dispatch_pre_tool_use(name, args).await;
-                let (final_args, raw_result) = match decision {
-                    PreToolDecision::Continue { args } => {
-                        let r = self.dispatch_with_policy(name, args.clone()).await;
-                        (args, r)
-                    }
-                    PreToolDecision::Skip { args, result } => (args, result),
-                };
-                let result = self
-                    .hooks
-                    .dispatch_post_tool_use(name, &final_args, raw_result)
-                    .await;
+                let result = tool_exec::execute(
+                    &self.tools,
+                    &self.ctx,
+                    self.policy.as_ref(),
+                    &self.hooks,
+                    name,
+                    args,
+                )
+                .await;
 
                 self.memory
                     .record(json!({
@@ -639,6 +600,7 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::policy::Decision;
     use crate::providers::ChatResponse;
     use crate::providers::fake::{FakeProvider, NeverCalled};
     use crate::tools::Tool;

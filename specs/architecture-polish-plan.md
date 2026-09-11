@@ -13,6 +13,14 @@ commands. The main issue is navigability. Several files have become too large,
 and some historical specs still describe TUI-era architecture that no longer
 exists.
 
+## Progress
+
+- Phase 1 is complete: historical reviews are archived, and the current
+  architecture and manual verification guides live under `docs/`.
+- The `Agent` split has started with typed outcomes in `agent/outcome.rs`.
+- The tool execution boundary is extracted into `agent/tool_exec.rs` and can be
+  tested without driving a provider loop.
+
 ## Principles
 
 1. No behavior change during structural moves.
@@ -39,10 +47,10 @@ not another tool-permission prompt.
 Move historical TUI-era docs to an archive path, or add an explicit header to
 each saying it is historical.
 
-Candidates:
+Archived:
 
-- `specs/review-2.md`
-- `specs/polish.md`
+- `specs/archive/review-2.md`
+- `specs/archive/polish.md`
 
 Done when a new reader can start from `specs/README.md` without being confused
 about whether oli currently has a TUI.

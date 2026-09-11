@@ -12,13 +12,15 @@ will land alongside it as `specs/<topic>.md`.
 | Doc                                 | What's there                                                                                                                |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | **[`specs/README.md`](README.md)** (you are here) | High-level mission, principles, in/out of scope, architecture sketch, configuration shape, plugin contract, roadmap, success criteria. |
+| [`docs/current-architecture.md`](../docs/current-architecture.md) | Current runtime lifecycle, module ownership, persistence, extension surfaces, and frontend boundary.                              |
+| [`docs/manual-verification.md`](../docs/manual-verification.md) | Release and structural-change checks involving real providers, terminals, credentials, and persistence.                         |
 | [`specs/progress.md`](progress.md)  | Phase ledger with commit SHAs, and dated smoke-test results. History, not current state.                                   |
 | [`specs/roadmap.md`](roadmap.md)    | Post-MCP follow-ups (phases A–E): daily-driver safety, hooks, plugin reload, caching/parity, plugin caps, RAG, MCP refresh. All DONE. |
-| [`specs/review-2.md`](review-2.md)  | Deep review #2 (rated 9/10). Strengths + persistent weaknesses that drove the polish plan.                                  |
-| [`specs/polish.md`](polish.md)      | Historical 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, packaging.                        |
+| [`specs/archive/review-2.md`](archive/review-2.md) | Historical deep review #2 (rated 9/10). Strengths and weaknesses that drove the earlier polish plan.                    |
+| [`specs/archive/polish.md`](archive/polish.md) | Historical 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, and packaging.                |
 | [`specs/architecture-polish-plan.md`](architecture-polish-plan.md) | Current plan to make the codebase easier to navigate and its runtime reusable by line, headless, TUI, or desktop frontends.    |
-| [`specs/current-architecture-doc-outline.md`](current-architecture-doc-outline.md) | Outline for the current-state architecture doc that should live under `docs/`.                                                |
-| [`specs/manual-verification-plan.md`](manual-verification-plan.md) | Manual smoke/release checks for provider, plugin, MCP, tool execution, compaction, and replay behavior.                       |
+| [`specs/current-architecture-doc-outline.md`](current-architecture-doc-outline.md) | Implementation outline retained alongside the completed current-state architecture doc.                                      |
+| [`specs/manual-verification-plan.md`](manual-verification-plan.md) | Planning source retained alongside the completed manual verification guide.                                                  |
 | [`specs/private-agent-roadmap.md`](private-agent-roadmap.md) | Product and content roadmap for private remote workstations, model and MCP service planes, and privacy-preserving operations. |
 | [`specs/memory.md`](memory.md)      | `Memory` trait design — pluggable strategies (linear+compact default, RAG, graph, hierarchical).                            |
 | [`specs/mcp.md`](mcp.md)            | MCP client design. stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.                    |
@@ -26,8 +28,9 @@ will land alongside it as `specs/<topic>.md`.
 | [`AGENTS.md`](../AGENTS.md)         | Module map and working discipline. The closest thing to a current-state doc.                                                |
 
 If you want to **use** oli, start with [`docs/cheatsheet.md`](../docs/cheatsheet.md) and `oli init`.
-If you want to **understand** oli, read this README → `progress.md` → whichever
-phase doc matches what you're poking at.
+If you want to **understand** oli, start with
+[`docs/current-architecture.md`](../docs/current-architecture.md), then use the
+feature specs for the subsystem you are changing.
 If you want to **extend** oli, the public API surface is in [`src/lib.rs`](../src/lib.rs);
 `cargo doc --no-deps --open` renders the per-module overviews.
 
