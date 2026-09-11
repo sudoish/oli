@@ -24,6 +24,10 @@ exists.
   `src/repl/slash/` while preserving the existing public paths.
 - CLI command handling and top-level startup assembly are split under
   `src/cli/`; the binary now owns only Clap syntax, parsing, and dispatch.
+- The `Agent` mechanical split is complete: `agent/mod.rs` owns state and stable
+  entrypoints, while `run_loop.rs`, `streaming.rs`, and `compaction.rs` own turn
+  sequencing, borrowed provider-event/response assembly, and transactional
+  request budgeting respectively.
 
 ## Principles
 
@@ -141,6 +145,10 @@ The existing `bootstrap.rs` constructors remain the lower-level reusable seam.
 CLI behavior is now organized by user command rather than startup history.
 
 ### 6. Split `src/agent/mod.rs` mechanically
+
+Completed with the planned internal modules. `Agent::run` and
+`Agent::run_streaming` remain the public entrypoints, `StreamEvent<'_>` remains
+borrowed, and no frontend command/event/snapshot API is introduced.
 
 Target shape:
 

@@ -22,7 +22,11 @@ flowchart TD
 [`src/cli/`](../src/cli/) implements those commands and assembles top-level runs.
 [`src/bootstrap.rs`](../src/bootstrap.rs) provides reusable constructors for
 tools, sessions, memory, accounting, and subagents. [`Agent`](../src/agent/mod.rs)
-owns conversation state and coordinates the think → call → observe loop.
+owns conversation state and exposes the stable run entrypoints. Its internal
+[`run_loop`](../src/agent/run_loop.rs) coordinates think → call → observe while
+[`compaction`](../src/agent/compaction.rs) and
+[`streaming`](../src/agent/streaming.rs) own request preflight and provider
+response assembly respectively.
 
 The current line and headless frontends share `Agent` and bootstrap helpers, but
 there is not yet a frontend-neutral session controller. The architecture polish
@@ -52,7 +56,7 @@ cannot be converted into a successful completion by presentation code.
 
 | Path | Responsibility |
 | --- | --- |
-| `src/agent/` | Agent coordinator, typed outcomes, tool execution, model capabilities, system context, fallback parsing, and memory strategies. |
+| `src/agent/` | Agent state/coordinator, think-call-observe loop, request compaction, provider stream assembly, typed outcomes, tool execution, model capabilities, system context, fallback parsing, and memory strategies. |
 | `src/cli/` | Reusable command handlers, headless output contracts, session selection, and top-level agent startup assembly. |
 | `src/providers/` | `Provider` implementations for Anthropic, ChatGPT subscription, and OpenAI-compatible APIs. |
 | `src/tools/` | `Tool`, registry, built-in tools, subprocess tools, output bounds, and subagent support. |
@@ -116,8 +120,10 @@ the registry. Lua has no raw `os`, `io`, or dynamic-library access.
 ## Memory and persistence
 
 The system prompt is pinned once with `Agent::pin_system_prompt`; clearing or
-compacting recent memory does not remove it. `Memory::snapshot_parts` keeps
-pinned, compacted, recent, and tool-schema attribution separate for accounting.
+compacting recent memory does not remove it. `agent::compaction` materializes
+`Memory::snapshot_parts`, keeps pinned, compacted, recent, and tool-schema
+attribution separate for accounting, and rejects an over-limit authoritative
+request only after bounded transactional compaction attempts.
 
 Top-level runs wrap memory in `PersistedMemory`. Session transcripts are JSONL,
 and replay restores both conversation messages and the read set needed by the

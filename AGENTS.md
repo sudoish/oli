@@ -38,7 +38,7 @@ codebase*.
 
 | Path | What lives there |
 |---|---|
-| `agent/` | think→call→observe loop, `Memory` trait, system-prompt builder (`agent/context.rs`), capability table (`agent/caps.rs`) |
+| `agent/` | `Agent` state/coordinator plus focused run-loop, streaming assembly, compaction, tool execution, memory, context, and capability modules |
 | `bin/oli.rs` | thin Clap entry point and command dispatcher |
 | `bootstrap.rs` | shared startup and persisted-session wiring |
 | `cli/` | reusable command handlers and top-level agent startup assembly |
