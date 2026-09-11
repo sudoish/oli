@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 use crate::error::{AgentError, Result};
 
-use super::{CompactContext, Memory};
+use super::{CompactContext, ContextParts, Memory, MemoryCheckpoint};
 
 const DEFAULT_RECENT_N: usize = 4;
 const DEFAULT_TOP_K: usize = 8;
@@ -167,6 +167,21 @@ impl Memory for EmbeddingRagMemory {
 
     async fn pinned(&self) -> Vec<Value> {
         self.pinned.clone()
+    }
+
+    async fn checkpoint(&self) -> MemoryCheckpoint {
+        MemoryCheckpoint::from_parts(
+            ContextParts {
+                pinned: self.pinned.clone(),
+                summary: Vec::new(),
+                recent: self
+                    .messages
+                    .iter()
+                    .map(|message| message.msg.clone())
+                    .collect(),
+            },
+            self.messages.len(),
+        )
     }
 
     fn len(&self) -> usize {

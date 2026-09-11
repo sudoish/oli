@@ -4,17 +4,6 @@
 //! snapshot, and an optional rolling summary that absorbs older turns when
 //! the conversation outgrows the model's context window.
 //!
-//! ## Cancellation under compaction
-//!
-//! `len()` returns a monotonic record counter, not the physical message
-//! count. This is what keeps Ctrl-C rollback honest after compaction has
-//! run mid-session: the REPL captures `saved_len = memory.len()` before a
-//! turn, and `truncate(saved_len)` always rolls back to that logical
-//! position, even if compaction has since drained earlier records into the
-//! summary. When the rollback target predates anything we still hold
-//! verbatim, we drop the live message window and keep the summary —
-//! best-effort, but predictable.
-
 use std::time::Instant;
 
 use async_trait::async_trait;
@@ -24,7 +13,7 @@ use crate::error::{AgentError, Result};
 use crate::ledger::{ContextEstimate, Latency, as_ms, estimate::estimate_messages, now_ms};
 use crate::providers::ChatRequest;
 
-use super::{CompactContext, CompactionReport, ContextParts, Memory};
+use super::{CompactContext, CompactionReport, ContextParts, Memory, MemoryCheckpoint};
 
 const MIN_MESSAGES_TO_COMPACT: usize = 4;
 
@@ -86,6 +75,19 @@ impl Memory for LinearWithCompact {
 
     async fn pinned(&self) -> Vec<Value> {
         self.pinned.clone()
+    }
+
+    async fn checkpoint(&self) -> MemoryCheckpoint {
+        MemoryCheckpoint::from_parts(self.snapshot_parts().await, self.record_count)
+    }
+
+    async fn restore(&mut self, checkpoint: MemoryCheckpoint) -> Result<()> {
+        self.pinned = checkpoint.pinned;
+        self.summary = checkpoint.summary.into_iter().next();
+        self.messages = checkpoint.recent;
+        self.record_count = checkpoint.len;
+        self.base = self.record_count.saturating_sub(self.messages.len());
+        Ok(())
     }
 
     fn len(&self) -> usize {

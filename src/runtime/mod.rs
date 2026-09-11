@@ -177,7 +177,7 @@ impl SessionRuntime {
         F: FnMut(RuntimeEvent) + Send,
     {
         let RuntimeCommand::Prompt(prompt) = command;
-        let saved_len = self.agent.memory.len();
+        let checkpoint = self.agent.memory.checkpoint().await;
         let (sender, mut receiver) = mpsc::unbounded_channel();
         *self
             .event_sender
@@ -228,9 +228,9 @@ impl SessionRuntime {
         }
 
         let Some(result) = result else {
-            if let Err(error) = self.agent.memory.truncate(saved_len).await {
+            if let Err(error) = self.agent.memory.restore(checkpoint).await {
                 sink(RuntimeEvent::Error {
-                    message: format!("failed to truncate memory on cancel: {error}"),
+                    message: format!("failed to restore memory on cancel: {error}"),
                 });
             }
             self.run_state = RunState::Cancelled;
@@ -268,11 +268,14 @@ impl SessionRuntime {
 #[cfg(test)]
 mod tests {
     use std::future;
+    use std::sync::Arc;
 
     use async_trait::async_trait;
     use serde_json::json;
 
     use super::*;
+    use crate::agent::memory::{CompactContext, LinearWithCompact, Memory, PersistedMemory};
+    use crate::config::Config;
     use crate::providers::fake::FakeProvider;
     use crate::providers::{ChatRequest, ChatResponse, Provider, StreamSink, Usage};
     use crate::tools::{Registry, Tool, ToolContext};
@@ -530,6 +533,25 @@ mod tests {
         }
     }
 
+    struct SummarizeThenCancelProvider {
+        cancellation: CancellationToken,
+    }
+
+    #[async_trait]
+    impl Provider for SummarizeThenCancelProvider {
+        async fn chat(&self, _: ChatRequest) -> Result<ChatResponse> {
+            self.cancellation.cancel();
+            Ok(ChatResponse {
+                message: json!({"role":"assistant","content":"compacted history"}),
+                usage: None,
+            })
+        }
+
+        async fn chat_stream(&self, _: ChatRequest, _: StreamSink<'_>) -> Result<ChatResponse> {
+            future::pending().await
+        }
+    }
+
     #[tokio::test]
     async fn cancellation_rolls_memory_back_and_emits_cancelled() {
         let mut runtime = test_runtime(Box::new(PendingProvider));
@@ -554,5 +576,85 @@ mod tests {
         assert_eq!(events, vec![RuntimeEvent::Cancelled]);
         assert_eq!(runtime.agent.memory.len(), 0);
         assert_eq!(runtime.snapshot().await.run_state, RunState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancellation_after_compaction_restores_live_and_persisted_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut memory = PersistedMemory::open_at(
+            dir.path(),
+            "cancelled-compaction",
+            Box::new(LinearWithCompact::new()),
+            true,
+        )
+        .await
+        .unwrap();
+        for message in [
+            json!({"role":"user","content":"first"}),
+            json!({"role":"assistant","content":"one"}),
+            json!({"role":"user","content":"second"}),
+            json!({"role":"assistant","content":"two"}),
+            json!({"role":"user","content":"third"}),
+            json!({"role":"assistant","content":"three"}),
+            json!({"role":"user","content":"fourth"}),
+            json!({"role":"assistant","content":"four"}),
+        ] {
+            memory.record(message).await.unwrap();
+        }
+        memory
+            .maybe_compact(CompactContext {
+                provider: &FakeProvider::new(vec![
+                    json!({"role":"assistant","content":"pre-command summary"}),
+                ]),
+                model: "test-model",
+                target_tokens: 1,
+                hard_limit_tokens: 100_000,
+                next_request_tokens: 100,
+            })
+            .await
+            .unwrap();
+        let before = memory.snapshot().await;
+        assert_eq!(
+            memory.snapshot_parts().await.summary,
+            vec![
+                json!({"role":"system","content":"[Earlier conversation summary]\npre-command summary"})
+            ]
+        );
+        let cancellation = CancellationToken::new();
+        let mut config = Config::env_default();
+        config.agent.context_target_tokens = Some(1);
+        let agent = Agent::new(
+            Box::new(SummarizeThenCancelProvider {
+                cancellation: cancellation.clone(),
+            }),
+            Registry::new(),
+            "test-model".into(),
+        )
+        .with_memory(Box::new(memory))
+        .with_config(Arc::new(config), "test");
+        let mut runtime = SessionRuntime::new(agent, "cancelled-compaction");
+
+        let outcome = runtime
+            .execute(
+                RuntimeCommand::Prompt("discard me".into()),
+                &cancellation,
+                |_| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(outcome, CommandOutcome::Cancelled);
+        assert_eq!(runtime.agent.memory.snapshot().await, before);
+        drop(runtime);
+
+        let resumed = PersistedMemory::open_at(
+            dir.path(),
+            "cancelled-compaction",
+            Box::new(LinearWithCompact::new()),
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(resumed.snapshot().await, before);
     }
 }
