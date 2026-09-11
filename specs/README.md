@@ -15,7 +15,10 @@ will land alongside it as `specs/<topic>.md`.
 | [`specs/progress.md`](progress.md)  | Phase ledger with commit SHAs, and dated smoke-test results. History, not current state.                                   |
 | [`specs/roadmap.md`](roadmap.md)    | Post-MCP follow-ups (phases A–E): daily-driver safety, hooks, plugin reload, caching/parity, plugin caps, RAG, MCP refresh. All DONE. |
 | [`specs/review-2.md`](review-2.md)  | Deep review #2 (rated 9/10). Strengths + persistent weaknesses that drove the polish plan.                                  |
-| [`specs/polish.md`](polish.md)      | The 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, packaging.                              |
+| [`specs/polish.md`](polish.md)      | Historical 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, packaging.                        |
+| [`specs/architecture-polish-plan.md`](architecture-polish-plan.md) | Current plan to make the codebase easier to navigate and its runtime reusable by line, headless, TUI, or desktop frontends.    |
+| [`specs/current-architecture-doc-outline.md`](current-architecture-doc-outline.md) | Outline for the current-state architecture doc that should live under `docs/`.                                                |
+| [`specs/manual-verification-plan.md`](manual-verification-plan.md) | Manual smoke/release checks for provider, plugin, MCP, approval, compaction, and replay behavior.                             |
 | [`specs/private-agent-roadmap.md`](private-agent-roadmap.md) | Product and content roadmap for private remote workstations, model and MCP service planes, and privacy-preserving operations. |
 | [`specs/memory.md`](memory.md)      | `Memory` trait design — pluggable strategies (linear+compact default, RAG, graph, hierarchical).                            |
 | [`specs/mcp.md`](mcp.md)            | MCP client design. stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.                    |
