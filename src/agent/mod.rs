@@ -4,10 +4,10 @@
 //!
 //! Two entry points:
 //! - [`Agent::run`] — one-shot prompt; returns a typed terminal outcome.
-//!   Used by the headless CLI and nested agents.
+//!   Used by nested agents and low-level embedders.
 //! - [`Agent::run_streaming`] — same loop but emits incremental
-//!   events (content chunks, tool starts/ends, usage updates) to a
-//!   user-supplied callback. Drives headless runs and the line REPL.
+//!   content and tool-call argument chunks to a
+//!   user-supplied callback. The frontend-neutral runtime wraps this API.
 //!
 //! `Agent::with_*` builder methods layer on optional pieces
 //! (memory strategy, hook registry, MCP handles, plugin manifest,

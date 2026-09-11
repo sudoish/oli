@@ -52,6 +52,7 @@ codebase*.
 | `policy/` | Deterministic `Policy` extension point; default allows all tools, `--strict` denies all |
 | `providers/` | `Provider` trait + `anthropic`, `openai_compat` (covers Ollama / OpenRouter / OpenAI / LM Studio / vLLM / llama.cpp), `fake` (tests) |
 | `repl/` | line-mode REPL + `SlashRegistry` + built-in slash commands |
+| `runtime/` | Frontend-neutral `SessionRuntime`, owned events, cancellation, and session snapshots |
 | `tools/` | built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `task` (subagent), `notes`, `subprocess` (config-defined external binaries) |
 | `wizard_init.rs` | first-run config wizard |
 

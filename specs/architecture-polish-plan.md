@@ -28,6 +28,10 @@ exists.
   entrypoints, while `run_loop.rs`, `streaming.rs`, and `compaction.rs` own turn
   sequencing, borrowed provider-event/response assembly, and transactional
   request budgeting respectively.
+- The frontend boundary is established in `runtime/`: `SessionRuntime` owns the
+  agent, converts borrowed provider streaming into owned events, centralizes
+  cancellation rollback, and exposes authoritative session snapshots. The line
+  and headless frontends now share prompt lifecycle behavior.
 
 ## Principles
 
@@ -198,9 +202,10 @@ Do not add a broad `Ui` trait. The stable boundary is a small command API plus
 events and snapshots. Framework-specific state, widgets, windows, and event
 loops stay in the frontend.
 
-Done when a test frontend can run and cancel a turn, observe tool progress,
-and inspect session state without reading stdin, writing stdout/stderr, or
-reaching into `Agent` fields.
+Completed. Contract tests run and cancel turns, verify ordered owned content and
+tool events, and inspect session/provider/model/tool/MCP/usage/accounting state
+without terminal I/O. Line-only slash commands retain a transitional
+`SessionRuntime::agent_mut` bridge rather than forcing a broad slash redesign.
 
 ### 8. Document the lifecycle in code and docs
 

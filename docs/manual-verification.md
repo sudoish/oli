@@ -202,17 +202,22 @@ fixtures remain unchanged, and comparison output is deterministic.
 
 ## Frontend contract
 
-Once the session command/event/snapshot boundary exists, run its non-rendering
-test frontend and verify:
+Run `cargo test --lib runtime::` for the non-rendering contract and verify:
 
 - prompts produce ordered content, tool, completion, and error events;
 - events own payloads and cross a channel safely;
 - cancellation preserves the line REPL's memory rollback behavior;
-- snapshots expose session, provider, model, tools, MCP health, usage, and cost;
+- snapshots expose session, provider, model, tools, MCP health, provider-reported
+  usage, and bounded ledger cost without inventing missing values;
 - line and headless frontends do not duplicate lifecycle rules.
 
 A TUI or desktop test adapter should not import rustyline, capture terminal
 output, or access private `Agent` fields.
+
+In the real line REPL, start a response and press Ctrl-C. Confirm `(cancelled)`
+appears once and the next prompt does not include the cancelled user message.
+Cancellation is local and cooperative: a remote provider may still finish work
+server-side after its client future is dropped.
 
 ## Release gate
 

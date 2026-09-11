@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
+use crate::agent::Agent;
 use crate::agent::context::SystemPromptBuilder;
-use crate::agent::{Agent, RunOutcome};
 use crate::bootstrap::{
     DefaultAgentSpawner, build_default_tools, build_memory, build_run_accounting,
 };
@@ -16,6 +16,9 @@ use crate::hooks;
 use crate::ledger::RunSummary;
 use crate::policy::DenyAll;
 use crate::providers::{Provider as ProviderTrait, UsageTotals};
+use crate::runtime::{
+    CancellationToken, CommandOutcome, RuntimeCommand, SessionRuntime, UsageSnapshot,
+};
 use crate::tools::task::{SubagentSpawner, Task};
 use crate::{mcp, notes, plugins, providers, repl};
 
@@ -124,6 +127,28 @@ impl From<UsageTotals> for UsageOutput {
     }
 }
 
+impl From<UsageSnapshot> for UsageOutput {
+    fn from(usage: UsageSnapshot) -> Self {
+        Self {
+            prompt_tokens: usage.prompt_tokens.reported,
+            completion_tokens: usage.completion_tokens.reported,
+            total_tokens: usage.total_tokens.reported,
+            cache_read_tokens: usage.cache_read_tokens.reported,
+            cache_write_tokens: usage.cache_write_tokens.reported,
+            reasoning_tokens: usage.reasoning_tokens.reported,
+            calls: usage.calls,
+            unreported_calls: UnreportedCalls {
+                prompt_tokens: usage.prompt_tokens.unreported_calls,
+                completion_tokens: usage.completion_tokens.unreported_calls,
+                total_tokens: usage.total_tokens.unreported_calls,
+                cache_read_tokens: usage.cache_read_tokens.unreported_calls,
+                cache_write_tokens: usage.cache_write_tokens.unreported_calls,
+                reasoning_tokens: usage.reasoning_tokens.unreported_calls,
+            },
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct CompletedRun<'a> {
     status: &'static str,
@@ -211,7 +236,6 @@ async fn run_agent(headless: Option<(Options, String)>) -> Result<()> {
     let plugin_hooks = plugins.hooks;
 
     let system_prompt = SystemPromptBuilder::from_env().build().await;
-    let interactive = headless.is_none();
     let (conversation, continue_session) = headless
         .as_ref()
         .map(|(options, _)| (options.conversation.as_deref(), options.continue_session))
@@ -239,11 +263,6 @@ async fn run_agent(headless: Option<(Options, String)>) -> Result<()> {
     for hook in plugin_hooks {
         hooks.register_box(hook);
     }
-    if interactive {
-        // Headless runs omit live tool-call progress to keep automation output stable.
-        hooks.register(repl::ProgressHook);
-    }
-
     let agent_base = Agent::new(provider, tools, model)
         .with_config(cfg.clone(), provider_name)
         .with_memory(memory)
@@ -271,18 +290,33 @@ async fn run_agent(headless: Option<(Options, String)>) -> Result<()> {
             } else {
                 agent_base
             };
-            let mut agent = agent_base.pin_system_prompt(system_prompt).await?;
-            let outcome = agent.run(&prompt).await;
-            let accounting = agent.ledger.finish().await;
+            let agent = agent_base.pin_system_prompt(system_prompt).await?;
+            let mut runtime = SessionRuntime::new(agent, session_id.clone());
+            let outcome = runtime
+                .execute(
+                    RuntimeCommand::Prompt(prompt),
+                    &CancellationToken::new(),
+                    |_| {},
+                )
+                .await;
+            let accounting = runtime.finish().await;
             let outcome = outcome?;
+            let snapshot = runtime.snapshot().await;
             // Omit usage entirely when no provider call reported any category.
-            let usage = agent
-                .session_usage
-                .any_reported()
-                .then(|| UsageOutput::from(agent.session_usage));
+            let usage = [
+                snapshot.usage.prompt_tokens.reported,
+                snapshot.usage.completion_tokens.reported,
+                snapshot.usage.total_tokens.reported,
+                snapshot.usage.cache_read_tokens.reported,
+                snapshot.usage.cache_write_tokens.reported,
+                snapshot.usage.reasoning_tokens.reported,
+            ]
+            .iter()
+            .any(Option::is_some)
+            .then(|| UsageOutput::from(snapshot.usage));
             let response = match outcome {
-                RunOutcome::Completed(response) => response,
-                RunOutcome::MaxTurnsExhausted { limit, message } => {
+                CommandOutcome::Completed(response) => response,
+                CommandOutcome::MaxTurnsExhausted { limit, message } => {
                     match options.output {
                         OutputMode::Text => {
                             eprint!(
@@ -306,6 +340,7 @@ async fn run_agent(headless: Option<(Options, String)>) -> Result<()> {
                     }
                     return Err(AgentError::MaxTurnsExhausted(limit));
                 }
+                CommandOutcome::Cancelled => unreachable!("headless cancellation is not requested"),
             };
             match options.output {
                 OutputMode::Text => {
@@ -335,7 +370,8 @@ async fn run_agent(headless: Option<(Options, String)>) -> Result<()> {
         None => {
             println!("session: {session_id}");
             let agent = agent_base.pin_system_prompt(system_prompt).await?;
-            repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
+            let runtime = SessionRuntime::new(agent, session_id);
+            repl::run(runtime, plugin_slashes, Some(plugin_reloader)).await
         }
     }
 }

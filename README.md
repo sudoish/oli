@@ -595,6 +595,7 @@ src/
 ├── plugins/         # Lua runtime (mlua), discovery dirs, hot-reload
 ├── mcp/             # MCP clients (stdio + streamable-http)
 ├── hooks/           # PreToolUse / PostToolUse / Stop dispatch
+├── runtime/         # frontend-neutral session controller, events + snapshots
 ├── repl/            # line-mode REPL + SlashRegistry + built-in slash commands
 ├── notes/           # cross-session note store (filesystem, TOML frontmatter)
 ├── config.rs        # layered TOML loader (global + project)
@@ -606,7 +607,11 @@ Five extension traits — `Tool`, `Provider`, `Policy`, `SlashCommand`,
 executor can spin up a fresh loop with its own message list and tool
 budget; this is how `Task` and `ctx:prompt(...)` work). The hook
 dispatcher is shared between built-in hooks and plugin-registered
-hooks — one mechanism, two registration sources.
+hooks — one mechanism, two registration sources. `SessionRuntime` owns an
+agent at the frontend boundary, converts borrowed provider stream values to
+owned events, rolls memory back on cancellation, and exposes truthful session
+snapshots. Terminal input and rendering remain in the line and headless
+frontends.
 
 ---
 

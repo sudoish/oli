@@ -9,7 +9,8 @@ and historical plans live under [`specs/`](../specs/README.md).
 ```mermaid
 flowchart TD
     F["Line REPL or headless CLI"] --> B["Startup and session wiring"]
-    B --> A["Agent coordinator"]
+    B --> R["Session runtime"]
+    R --> A["Agent coordinator"]
     A --> P["Provider"]
     A --> M["Memory"]
     A --> T["Tool registry"]
@@ -26,12 +27,9 @@ owns conversation state and exposes the stable run entrypoints. Its internal
 [`run_loop`](../src/agent/run_loop.rs) coordinates think → call → observe while
 [`compaction`](../src/agent/compaction.rs) and
 [`streaming`](../src/agent/streaming.rs) own request preflight and provider
-response assembly respectively.
-
-The current line and headless frontends share `Agent` and bootstrap helpers, but
-there is not yet a frontend-neutral session controller. The architecture polish
-work will introduce a command/event/snapshot boundary so a TUI or desktop
-frontend does not need to copy REPL behavior.
+response assembly respectively. [`SessionRuntime`](../src/runtime/mod.rs) owns
+the top-level agent and translates that low-level API into commands, owned
+events, cancellation, and snapshots for frontends.
 
 ## Runtime lifecycle
 
@@ -65,6 +63,7 @@ cannot be converted into a successful completion by presentation code.
 | `src/mcp/` | stdio and streamable-HTTP MCP clients, OAuth, server lifecycle, and MCP-to-Tool adapters. |
 | `src/plugins/` | Sandboxed Lua discovery, loading, host APIs, tools, hooks, and slash commands. |
 | `src/repl/` | Rustyline frontend and stream rendering; `repl/slash/` contains the slash registry and responsibility-grouped built-in commands. |
+| `src/runtime/` | Frontend-neutral session ownership, prompt commands, owned run/tool events, cancellation rollback, and session snapshots. |
 | `src/bootstrap.rs` | Reusable startup constructors for tools, sessions, memory, ledger, and subagents. |
 | `src/bin/oli.rs` | Clap-only syntax, parsing, and thin top-level dispatch. |
 | `src/config.rs` | Global/project TOML loading and deterministic overlay rules. |
@@ -156,7 +155,7 @@ The `cli::run` startup path then:
 2. opens notes, plugins, MCP servers, transcript, and ledger;
 3. builds the default registry and registers `Task`, plugin, and MCP tools;
 4. constructs and pins the agent;
-5. hands it to the headless command path or line REPL.
+5. wraps it in `SessionRuntime` and hands that to the headless path or line REPL.
 
 MCP connection failures and plugin load failures are reported through
 diagnostics without preventing unrelated capabilities from starting.
@@ -174,24 +173,46 @@ diagnostics without preventing unrelated capabilities from starting.
 
 ## Frontend boundary
 
-Today, `repl::run` owns rustyline input and consumes provider `StreamEvent`
-values directly. `cli::run` separately shapes headless text or JSON output.
-Both reuse `Agent`, but cancellation, commands, snapshots, and
-presentation are not yet one library contract.
-
-The target boundary is deliberately smaller than a `Ui` trait:
+The boundary is deliberately smaller than a `Ui` trait:
 
 ```text
-frontend commands → session controller → Agent
-Agent/runtime events → frontend
-session snapshot → frontend
+RuntimeCommand::Prompt → SessionRuntime → Agent::run_streaming
+borrowed StreamEvent → owned RuntimeEvent → frontend renderer
+CancellationToken → drop in-flight run + memory rollback
+SessionRuntime::snapshot → frontend
 ```
 
-Owned events must be safe to send over a channel or process bridge. Snapshots
-must expose session id, active provider/model, tools, MCP health, usage/cost,
-and run state without parsing terminal output. Frontends own widgets, windows,
-key bindings, and rendering. Core runtime modules must not read stdin or depend
-on a UI framework.
+`RuntimeEvent` owns every payload and is serializable. It reports content,
+tool-call deltas and starts, then completion, turn exhaustion, cancellation, or
+an error. The controller drains queued progress before emitting that outcome. A
+rollback failure is reported as an error immediately before the cancellation
+event, matching the line frontend's existing best-effort rollback behavior.
+`SessionSnapshot` reports the session id, last run state, configured provider
+when known, model, registered tools, MCP health/tool counts, provider-reported
+usage (including missing-report counts), and the bounded ledger summary. It does
+not infer unavailable values.
+
+Both the line and headless paths execute prompts through `SessionRuntime`.
+Headless ignores incremental events and preserves its final text/JSON contract;
+the line frontend renders content and tool progress. Rustyline, signals, stdout,
+stderr, and JSON output shaping stay outside `runtime`.
+
+Cancellation is an externally triggerable, one-shot token. When observed, the
+controller drops the in-flight agent future and truncates memory to its exact
+pre-command length, preserving the former line-REPL transaction. Cancellation
+cannot guarantee that a remote provider stops server-side work, and—as with any
+cooperative async cancellation—it cannot interrupt code that blocks its
+executor thread without yielding.
+
+Slash commands still own line-frontend concerns and receive `&mut Agent`.
+`SessionRuntime::agent_mut` is the narrow transitional escape hatch for that
+existing API; prompt lifecycle behavior no longer uses it.
+
+The controller runs in its caller's task rather than hiding the agent behind a
+background actor. This keeps ownership and event ordering direct, preserves the
+slash-command bridge, and makes the cancellation token the only cross-task
+handle. Snapshots are therefore requested between commands; a concurrent
+command queue or live snapshot service is not part of this boundary.
 
 A future review mechanism belongs at this boundary as a typed run checkpoint:
 the runtime stops and returns control. It is not a per-tool approval prompt.
