@@ -303,17 +303,10 @@ async fn run_agent(headless: Option<(Options, String)>) -> Result<()> {
             let outcome = outcome?;
             let snapshot = runtime.snapshot().await;
             // Omit usage entirely when no provider call reported any category.
-            let usage = [
-                snapshot.usage.prompt_tokens.reported,
-                snapshot.usage.completion_tokens.reported,
-                snapshot.usage.total_tokens.reported,
-                snapshot.usage.cache_read_tokens.reported,
-                snapshot.usage.cache_write_tokens.reported,
-                snapshot.usage.reasoning_tokens.reported,
-            ]
-            .iter()
-            .any(Option::is_some)
-            .then(|| UsageOutput::from(snapshot.usage));
+            let usage = snapshot
+                .usage
+                .any_reported()
+                .then(|| UsageOutput::from(snapshot.usage));
             let response = match outcome {
                 CommandOutcome::Completed(response) => response,
                 CommandOutcome::MaxTurnsExhausted { limit, message } => {

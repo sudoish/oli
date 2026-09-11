@@ -46,6 +46,21 @@ pub struct UsageSnapshot {
     pub reasoning_tokens: TokenTotalSnapshot,
 }
 
+impl UsageSnapshot {
+    pub fn any_reported(&self) -> bool {
+        [
+            &self.prompt_tokens,
+            &self.completion_tokens,
+            &self.total_tokens,
+            &self.cache_read_tokens,
+            &self.cache_write_tokens,
+            &self.reasoning_tokens,
+        ]
+        .iter()
+        .any(|total| total.reported.is_some())
+    }
+}
+
 impl From<UsageTotals> for UsageSnapshot {
     fn from(usage: UsageTotals) -> Self {
         let token = |total: crate::providers::TokenTotal| TokenTotalSnapshot {

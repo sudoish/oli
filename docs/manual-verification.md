@@ -30,7 +30,7 @@ printf 'say hello' | ./target/release/oli run --max-turns 3
 
 - Text mode writes the final answer to stdout and the conversation id to stderr.
 - JSON mode keeps stdout machine-clean.
-- Prompt argument, prompt file, and stdin remain mutually exclusive.
+- The `--prompt` argument and piped stdin remain mutually exclusive.
 - Resume reuses the requested conversation id.
 - Max-turn exhaustion is a typed non-success result and remains resumable.
 
@@ -51,34 +51,34 @@ errors identify the failing endpoint.
 
 ### OpenRouter
 
-Prerequisite: `OPENROUTER_API_KEY` is set.
+Prerequisite: `OPENROUTER_API_KEY` is set and `default_provider = "openrouter"`
+is selected in the active config.
 
 ```sh
-./target/release/oli run --output json \
-  --provider openrouter -p "say hello" --max-turns 3
+./target/release/oli run --output json -p "say hello" --max-turns 3
 ```
 
 Confirm usage and cost are populated when the provider reports usage.
 
 ### Anthropic
 
-Prerequisite: `ANTHROPIC_API_KEY` and an Anthropic provider entry.
+Prerequisite: `ANTHROPIC_API_KEY`, an Anthropic provider entry, and
+`default_provider = "anthropic"` in the active config.
 
 ```sh
-./target/release/oli run --output json \
-  --provider anthropic -p "say hello" --max-turns 3
+./target/release/oli run --output json -p "say hello" --max-turns 3
 ```
 
 Confirm native streaming and tool-call shapes work.
 
 ### ChatGPT subscription
 
-Prerequisite: complete `oli login`.
+Prerequisite: complete `oli login`, which provisions and selects the ChatGPT
+provider.
 
 ```sh
 ./target/release/oli login --check
-./target/release/oli run --output json \
-  --provider chatgpt -p "say hello" --max-turns 3
+./target/release/oli run --output json -p "say hello" --max-turns 3
 ```
 
 Confirm model discovery works and an expired access token refreshes without

@@ -6,6 +6,14 @@
   `oli mcp add`, including standards-based discovery, dynamic client
   registration, PKCE, pasted redirects for SSH, owner-only credential
   persistence, automatic refresh, and login/logout/status commands.
+- Remove interactive tool approvals. Normal runs execute tools automatically,
+  while `oli run --strict` deterministically denies every tool call. Existing
+  `[policy]` configuration must be removed.
+- Add a frontend-neutral `SessionRuntime` with owned events, cancellation
+  rollback, and session snapshots, while preserving the line and headless
+  interfaces.
+- Breaking library cleanup: remove approval-policy types and the old
+  `repl::ProgressHook`; `repl::run` now accepts `SessionRuntime`.
 
 ## v0.1.0 — Private-agent baseline
 

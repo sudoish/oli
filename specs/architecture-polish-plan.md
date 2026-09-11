@@ -186,9 +186,9 @@ src/runtime/
   event.rs        # owned events: content, tools, completion, errors
   snapshot.rs     # current session/provider/model/tool/health state
 
-src/frontends/
-  line.rs         # rustyline + stdout/stderr adapter
-  headless.rs     # one-shot text/JSON adapter
+existing frontend adapters
+  src/repl/mod.rs # rustyline + stdout/stderr
+  src/cli/run.rs  # one-shot text/JSON
 ```
 
 A future `tui` module or desktop binary should only need to:
@@ -206,6 +206,8 @@ Completed. Contract tests run and cancel turns, verify ordered owned content and
 tool events, and inspect session/provider/model/tool/MCP/usage/accounting state
 without terminal I/O. Line-only slash commands retain a transitional
 `SessionRuntime::agent_mut` bridge rather than forcing a broad slash redesign.
+The adapters remain in their existing modules because moving files would add no
+frontend boundary; both now depend on the shared runtime contract.
 
 ### 8. Document the lifecycle in code and docs
 

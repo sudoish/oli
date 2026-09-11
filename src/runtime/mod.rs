@@ -212,11 +212,7 @@ impl SessionRuntime {
                 tokio::select! {
                     biased;
                     _ = cancellation.cancelled() => break None,
-                    event = receiver.recv() => {
-                        if let Some(event) = event {
-                            sink(event);
-                        }
-                    }
+                    Some(event) = receiver.recv() => sink(event),
                     result = &mut run => break Some(result),
                 }
             }
@@ -392,6 +388,7 @@ mod tests {
         assert!(snapshot.tools.is_empty());
         assert_eq!(snapshot.usage.calls, 1);
         assert_eq!(snapshot.usage.total_tokens.reported, Some(7));
+        assert!(snapshot.usage.any_reported());
         assert_eq!(snapshot.accounting.calls, 1);
     }
 
