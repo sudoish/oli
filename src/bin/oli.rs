@@ -19,7 +19,7 @@ use oli::bootstrap::{
 use oli::config::Config;
 use oli::error::Result;
 use oli::ledger::RunSummary;
-use oli::policy::{AlwaysDeny, ConfigPolicy, PolicyConfig, PolicyMode, ReadlineApprover};
+use oli::policy::DenyAll;
 use oli::providers::{Provider as ProviderTrait, UsageTotals};
 use oli::tools::task::{SubagentSpawner, Task};
 use oli::{hooks, mcp, notes, plugins, providers, repl};
@@ -75,7 +75,7 @@ enum Cmd {
         #[arg(long)]
         max_turns: Option<usize>,
 
-        /// Deny every operation that requires an approval decision.
+        /// Deny every tool call.
         #[arg(long)]
         strict: bool,
 
@@ -834,10 +834,6 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
     let plugin_hooks = plugins.hooks;
 
     let system_prompt = SystemPromptBuilder::from_env().build().await;
-    let strict = headless.as_ref().is_some_and(|(options, _)| options.strict);
-    let policy_config = policy_config_for_run(&cfg.policy, strict, headless.is_some());
-    let policy = Box::new(ConfigPolicy::from_config(&policy_config));
-
     let interactive = headless.is_none();
     let (conversation, continue_session) = headless
         .as_ref()
@@ -876,7 +872,6 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
     }
 
     let agent_base = Agent::new(provider, tools, model)
-        .with_policy(policy)
         .with_config(cfg.clone(), provider_name)
         .with_memory(memory)
         .with_hooks(hooks)
@@ -900,10 +895,12 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
 
     match headless {
         Some((options, prompt)) => {
-            let mut agent = agent_base
-                .with_approver(Box::new(AlwaysDeny))
-                .pin_system_prompt(system_prompt)
-                .await?;
+            let agent_base = if options.strict {
+                agent_base.with_policy(Box::new(DenyAll))
+            } else {
+                agent_base
+            };
+            let mut agent = agent_base.pin_system_prompt(system_prompt).await?;
             let outcome = agent.run(&prompt).await;
             let accounting = agent.ledger.finish().await;
             let outcome = outcome?;
@@ -967,21 +964,10 @@ async fn run_agent(headless: Option<(RunOptions, String)>) -> Result<()> {
         }
         None => {
             println!("session: {session_id}");
-            let agent = agent_base
-                .with_approver(Box::new(ReadlineApprover))
-                .pin_system_prompt(system_prompt)
-                .await?;
+            let agent = agent_base.pin_system_prompt(system_prompt).await?;
             repl::run(agent, plugin_slashes, Some(plugin_reloader)).await
         }
     }
-}
-
-fn policy_config_for_run(config: &PolicyConfig, strict: bool, one_shot: bool) -> PolicyConfig {
-    let mut config = config.clone();
-    if strict && one_shot {
-        config.mode = PolicyMode::Ask;
-    }
-    config
 }
 
 #[cfg(test)]
@@ -1199,20 +1185,8 @@ mod tests {
     }
 
     #[test]
-    fn strict_one_shot_runs_restore_ask_policy_before_denying_approvals() {
-        let config = policy_config_for_run(&PolicyConfig::default(), true, true);
-        assert_eq!(config.mode, PolicyMode::Ask);
-    }
-
-    #[test]
-    fn strict_interactive_runs_preserve_configured_policy_mode() {
-        let config = policy_config_for_run(&PolicyConfig::default(), true, false);
-        assert_eq!(config.mode, PolicyMode::Auto);
-    }
-
-    #[test]
-    fn regular_runs_preserve_configured_policy_mode() {
-        let config = policy_config_for_run(&PolicyConfig::default(), false, true);
-        assert_eq!(config.mode, PolicyMode::Auto);
+    fn strict_one_shot_flag_selects_deterministic_tool_denial() {
+        let args = Args::try_parse_from(["oli", "run", "--strict", "-p", "test"]).unwrap();
+        assert!(matches!(args.cmd, Some(Cmd::Run { strict: true, .. })));
     }
 }

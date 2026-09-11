@@ -956,8 +956,7 @@ impl SlashCommand for Exit {
 /// without restarting. Memory, transcript, system prompt,
 /// session token totals — all survive. The active provider gets
 /// rebuilt only if its `default_provider` or its provider-block
-/// config changed; the same is true for `[policy]` and the
-/// model id.
+/// config changed; the same is true for the model id.
 pub struct ConfigCmd;
 
 #[async_trait]
@@ -1034,7 +1033,6 @@ async fn reload_config_at(agent: &mut Agent, cwd: &std::path::Path) -> SlashOutc
     agent.provider_name = target_provider;
     agent.model = new_model.clone();
     agent.caps = agent.resolve_caps(&new_model);
-    agent.policy = Box::new(crate::policy::ConfigPolicy::from_config(&new_cfg.policy));
     agent.cfg = Some(new_cfg);
     // last_usage doesn't survive a swap — the prior usage was
     // measured against a different model/provider.
@@ -1170,11 +1168,6 @@ fn render_paths(agent: &Agent) -> String {
         &mut out,
         "Notes",
         crate::notes::filesystem::FilesystemNotesStore::default_dir().as_deref(),
-    );
-    push_path(
-        &mut out,
-        "Policy allow-list",
-        crate::policy::persisted_allow::default_path().as_deref(),
     );
     push_dir_opt(
         &mut out,

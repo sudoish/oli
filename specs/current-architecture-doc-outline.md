@@ -23,7 +23,7 @@ It should replace the need to infer architecture from historical roadmap specs.
 Explain oli as:
 
 ```text
-CLI/REPL → Agent → Provider + Memory + Tools + Policy + Hooks → Transcript/Ledger
+CLI/REPL → Agent → Provider + Memory + Tools + Hooks → Transcript/Ledger
 ```
 
 ### 2. Runtime lifecycle
@@ -55,7 +55,7 @@ Use the current source tree, not historical plans:
 | `src/agent/` | think/call/observe loop, memory, caps, system prompt |
 | `src/providers/` | model backend adapters |
 | `src/tools/` | built-in tools and tool registry |
-| `src/policy/` | approval decisions and persisted allow-list |
+| `src/policy/` | Optional deterministic tool-denial policy |
 | `src/hooks/` | pre/post/stop hooks |
 | `src/plugins/` | Lua plugin runtime |
 | `src/mcp/` | MCP clients and tool adapters |
@@ -83,7 +83,6 @@ Cover:
 
 - prompt and command submission;
 - streaming content and tool progress events;
-- approval through the `Approver` seam;
 - cancellation and completion;
 - session/provider/model/tool/health snapshots;
 - where a TUI or desktop adapter should live;
@@ -98,7 +97,6 @@ Document the extension surfaces:
 - `Tool`
 - `Memory`
 - `Policy`
-- `Approver`
 - `Hook`
 - `SlashCommand`
 - `SubagentSpawner`
@@ -118,9 +116,8 @@ Explain:
 ```text
 model tool call
 → fallback/native parsing
-→ policy decision
-→ approver if needed
 → pre-tool hooks
+→ optional deterministic policy
 → registry dispatch
 → post-tool hooks
 → result truncation/cache
@@ -147,7 +144,6 @@ Explain files and purpose:
 - sessions JSONL
 - ledger JSONL
 - notes
-- policy allow-list
 - config overlays
 - plugins
 

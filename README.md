@@ -14,7 +14,7 @@ A minimal, hackable, scriptable coding-agent runtime.
 
 `oli` drives an LLM through a small set of code-aware
 tools (`Read`, `Write`, `Edit`, `Bash`, `Grep`, `Glob`, `Task`) with automatic
-tool execution by default and an opt-in approval flow. It runs locally against [Ollama] by default,
+tool execution and no interactive permission prompts. It runs locally against [Ollama] by default,
 flips to any OpenAI-compatible endpoint (OpenRouter, OpenAI, LM Studio,
 vLLM, llama.cpp server) with a config change, and speaks the native
 Anthropic Messages API when you want prompt caching.
@@ -57,9 +57,9 @@ of TOML.
 - **Provider-agnostic.** Same binary, same prompts, same tools — point
   it at Ollama, OpenRouter, OpenAI, LM Studio, vLLM, llama.cpp's
   `server`, or Anthropic native. One config flip.
-- **Safe by default.** Every shell command, file write, and edit goes
-  through a policy engine. Conservative defaults; per-fingerprint
-  `[A]llow always` persists across sessions.
+- **Focused autonomy.** Tools run without permission prompts. Edit safety,
+  bounded turns, cancellation rollback, hooks, transcripts, and Git keep
+  autonomous work observable and recoverable.
 - **Extensible without recompiling.** Drop a `.lua` file in
   `~/.config/oli/plugins/` to register tools, slash commands, and
   hooks. Drop three lines of TOML to wire up an external binary as a
@@ -133,7 +133,7 @@ run `oli` without a subcommand for the line-mode REPL.
 | `oli run --conversation <id> -p "continue"` | Append to a specific conversation. |
 | `oli run --continue -p "continue"` | Append to the most recent conversation. |
 | `oli run --output json -p "..."` | Emit one machine-readable result object. |
-| `oli run --strict -p "..."` | Deny every operation requiring approval. |
+| `oli run --strict -p "..."` | Deny every tool call for a model-only run. |
 | `oli run --max-turns N -p "..."` | Override the turn cap for one run. |
 | `oli replay --fixture capture.json` | Compare captured full-history and recorded-linear contexts offline. |
 
@@ -163,7 +163,7 @@ without running it (e.g. `/cost ?`).
 | `/memory` / `/compact` | Memory stats; force a compaction pass. |
 | `/clear` | Drop conversation history (system prompt is preserved). |
 | `/system` | Render or overwrite the pinned system prompt. |
-| `/paths` | Resolved on-disk locations — config, plugins, sessions, notes, policy. |
+| `/paths` | Resolved on-disk locations — config, plugins, sessions, notes, and MCP credentials. |
 | `/diagnostics` | Operational warnings (plugin load failures, MCP errors, etc.). |
 | `/exit` | Leave (also `Ctrl+D`). |
 
@@ -177,23 +177,15 @@ files and folds them into the system prompt. Both are also loaded
 from `~/.codex/AGENTS.md` and `~/.claude/CLAUDE.md` as user-level
 overlays. A repo-root `AGENTS.md` is found from any subdirectory.
 
-### Approval flow
+### Tool execution
 
-Tools run automatically by default. Set `[policy] mode = "ask"` to have the
-line REPL prompt with the diff or command preview when a policy rule returns
-`Ask`:
-
-| Key | Effect |
-| --- | --- |
-| `y` / `Y` | Allow this one call. |
-| `n` / `Esc` | Deny. |
-| `a` | Allow the same `(tool, args)` fingerprint for the session. |
-| `[A]` (capital A) | Allow always — also writes to `~/.config/oli/policy-allow.json`. |
-| `d` | Deny the fingerprint for the session. |
-
-The granular `auto_allow`, `ask`, `bash_allowlist`, and MCP read rules apply in
-ask mode. Headless `oli run` never waits for input: unresolved approval requests
-are denied. `--strict` forces ask mode and therefore denies every gated mutation.
+Tools run automatically in both the line REPL and headless mode; Oli never
+pauses for per-call permission prompts. Use `oli run --strict` when a one-shot
+task must not execute tools. Embedders can install a custom deterministic
+`Policy` to hard-deny selected calls without introducing interactive approval.
+Review checkpoints are intentionally a separate future concept. When upgrading
+from an older release, remove the obsolete `[policy]` section from both config
+files.
 
 ---
 
@@ -358,7 +350,7 @@ The private remote-workstation reference design begins with its
 The runnable clean-host setup is under
 [`examples/remote-workstation/`](examples/remote-workstation/).
 
-A more loaded config with multiple providers and a stricter policy:
+A more loaded config with multiple providers and a subprocess tool:
 
 ```toml
 default_provider = "ollama"
@@ -380,12 +372,6 @@ kind          = "anthropic"               # native Messages API (prompt caching)
 api_key_env   = "ANTHROPIC_API_KEY"
 default_model = "claude-opus-4-7"
 
-[policy]
-mode            = "ask"
-auto_allow      = ["Read", "Glob", "Grep", "ListNotes", "SearchNotes"]
-ask             = ["Write", "Edit"]
-bash_allowlist  = ["git status", "git diff", "cargo *", "ls *", "rg *"]
-
 [[tools.subprocess]]
 name        = "FormatJson"
 command     = "/absolute/path/to/examples/subprocess/format_json.py"
@@ -397,7 +383,7 @@ accepted — prefer `api_key_env` so secrets don't sit in TOML on disk.
 
 The full schema is in [`specs/README.md`](specs/README.md). Use
 `/paths` from inside oli to see exactly where it's reading config,
-plugins, sessions, notes, and the policy allow-list from on **your**
+plugins, sessions, notes, and MCP credentials from on **your**
 machine.
 
 ---
@@ -457,10 +443,9 @@ The host bridge (`ctx`) gives plugins:
 - `ctx:tool(name, args)` — dispatch any registered tool. Returns the
   string result. Async — Lua suspends until it resolves.
 - `ctx:read_file(path)` / `ctx:write_file(path, content)` /
-  `ctx:shell(cmd)` — sugar over `Read`/`Write`/`Bash`; all
-  policy-gated.
+  `ctx:shell(cmd)` — sugar over `Read`/`Write`/`Bash`.
 - `ctx:prompt(text)` — spawn a fresh subagent loop with the same
-  provider/model/policy and return its final message (10-turn cap).
+  provider/model and return its final message (10-turn cap).
 - `ctx:get_state(key)` / `ctx:set_state(key, value)` — per-plugin,
   per-session bag.
 - `ctx:ask_user(question)` — blocking stdin read. Use sparingly.
@@ -468,8 +453,8 @@ The host bridge (`ctx`) gives plugins:
 
 **Sandbox:** `os`, `io`, `require`, `dofile`, `loadfile`, `debug`, and
 `package.loadlib` are removed. Filesystem and shell access flows
-through `ctx:*` — which goes through the same policy gate as the
-model's own tool calls.
+through explicit `ctx:*` host APIs. Plugins are user-installed code; these
+host calls execute automatically.
 
 Three runnable examples are in [`examples/plugins/`](examples/plugins):
 
@@ -555,7 +540,7 @@ selection, etc.).
 Hooks fire on `pre_tool_use` / `post_tool_use` / `stop` events and
 can short-circuit or rewrite tool calls. They run **before** the
 policy gate, so a hook can refuse a Bash command before the
-allowlist even sees it.
+tool executes.
 
 Dispatch order: `pre_tool_use → policy → tool → post_tool_use`.
 
@@ -605,7 +590,7 @@ src/
 │                    #   attribution, latency, dated pricing
 ├── tools/           # built-ins: read, write, edit, bash, grep, glob, task,
 │                    #            notes, subprocess
-├── policy/          # auto_allow / ask / bash_allowlist + persisted allow-list
+├── policy/          # automatic execution + optional deterministic hard denial
 ├── plugins/         # Lua runtime (mlua), discovery dirs, hot-reload
 ├── mcp/             # MCP clients (stdio + streamable-http)
 ├── hooks/           # PreToolUse / PostToolUse / Stop dispatch

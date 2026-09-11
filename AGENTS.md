@@ -46,7 +46,7 @@ live under `specs/`. This file is for agents *modifying the codebase*.
 | `mcp/` | Model Context Protocol clients (stdio + streamable-http) |
 | `notes/` | cross-session note store (filesystem, TOML frontmatter) |
 | `plugins/` | Lua runtime (`mlua`), discovery dirs, hot-reload |
-| `policy/` | `auto_allow` / `ask` / `bash_allowlist` gating + persisted allow-list |
+| `policy/` | Deterministic `Policy` extension point; default allows all tools, `--strict` denies all |
 | `providers/` | `Provider` trait + `anthropic`, `openai_compat` (covers Ollama / OpenRouter / OpenAI / LM Studio / vLLM / llama.cpp), `fake` (tests) |
 | `repl/` | line-mode REPL + `SlashRegistry` + built-in slash commands |
 | `tools/` | built-in tools: `read`, `write`, `edit`, `bash`, `grep`, `glob`, `task` (subagent), `notes`, `subprocess` (config-defined external binaries) |
@@ -61,7 +61,7 @@ live under `specs/`. This file is for agents *modifying the codebase*.
 | New slash command | `src/repl/slash.rs`: struct + `impl SlashCommand`; register in `SlashRegistry::default_set_with_reloader`. |
 | New hook event | `src/hooks/`. Existing dispatcher fires `PreToolUse` / `PostToolUse` / `Stop`. |
 | Capability override for a model | `[[caps]]` block keyed by model-id `prefix` in user config, layered over built-in defaults in `src/agent/caps.rs`. |
-| Plugin (no rebuild) | drop `.lua` into `~/.config/oli/plugins/` (global) or `<project>/.oli/plugins/`. Plugins can register tools, slashes, and hooks. Sandbox strips `os` / `io` / `package.loadlib`; filesystem and shell go through the policy gate. |
+| Plugin (no rebuild) | drop `.lua` into `~/.config/oli/plugins/` (global) or `<project>/.oli/plugins/`. Plugins can register tools, slashes, and hooks. Sandbox strips `os` / `io` / `package.loadlib`; filesystem and shell use registered tools and hooks. |
 | Project-scoped agent instructions | `AGENTS.md` and/or `CLAUDE.md` at any directory between cwd and filesystem root. Both auto-load into the system prompt. User-level overlays: `~/.codex/AGENTS.md`, `~/.claude/CLAUDE.md`. |
 
 ## Testing patterns
@@ -81,12 +81,12 @@ live under `specs/`. This file is for agents *modifying the codebase*.
 ## Runtime introspection — use these before guessing
 
 - `/paths` — resolved on-disk locations for config, plugins, sessions,
-  notes, policy allow-list. Source-of-truth, computed at runtime from
+  notes, and MCP credentials. Source-of-truth, computed at runtime from
   the same code that loads each file.
 - `/tools` — registered tools (built-ins + plugin + MCP).
 - `/plugins` / `/plugins reload` — list loaded plugins; `reload`
   re-scans dirs and swaps tools/hooks/slashes atomically.
-- `/config reload` — re-read config and apply provider/model/policy
+- `/config reload` — re-read config and apply provider/model
   changes in place without losing memory.
 - `/system` — show the pinned system prompt (env, git, dir listing,
   AGENTS.md/CLAUDE.md content).
@@ -102,11 +102,8 @@ live under `specs/`. This file is for agents *modifying the codebase*.
   treat it as a full snapshot.
 - `SlashOutcome::Rebuild` is the only way to swap registered slashes
   after startup (used by `/plugins reload`).
-- Policy fingerprints are `tool-name + canonical-JSON args`. Reordering
-  map keys in args is fine; renaming a tool invalidates the entry.
 - The line REPL builds its registry via `default_set_with_reloader`.
-- Don't bypass the policy gate for "trusted" callers. If something
-  should be auto-approved, that's an `auto_allow` config entry, not a
-  code-path special case.
+- Tools run automatically without approval prompts. `Policy` may hard-deny
+  calls for embedders, while hooks remain the composable interception surface.
 - The system prompt's project-context loader walks **up** from cwd, not
   down — `AGENTS.md` at the repo root is found from any subdirectory.

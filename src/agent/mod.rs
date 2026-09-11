@@ -1,5 +1,5 @@
 //! The agent loop — `Agent` ties together a `Provider`, a `Memory`,
-//! a `tools::Registry`, and the `Policy`/`Approver` gate into the
+//! a `tools::Registry`, and an optional hard-deny `Policy` into the
 //! think → call → observe loop the model drives.
 //!
 //! Two entry points:
@@ -29,7 +29,7 @@ use crate::config::Config;
 use crate::error::Result;
 use crate::hooks::{HookRegistry, PreToolDecision};
 use crate::ledger::{CompactionMetrics, Latency, Ledger, as_ms, estimate_context, now_ms};
-use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
+use crate::policy::{AllowAll, Decision, Policy};
 use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage, UsageTotals};
 use crate::tools::{Registry, ToolContext};
 
@@ -95,14 +95,8 @@ pub struct Agent {
     /// (in memory, and on disk when a session sink is attached); only
     /// `Ledger::summary` is shaped for export.
     pub ledger: Ledger,
-    /// Gate every tool call. Default is `ConfigPolicy::defaults()` (Read /
-    /// Glob / Grep auto-allow, Edit / Write / Bash ask, common dev shell
-    /// commands on the bash allowlist).
+    /// Deterministic gate for tool calls. The default allows every call.
     pub policy: Box<dyn Policy>,
-    /// Resolves `Decision::Ask` outcomes. Default is `AlwaysApprove` so
-    /// non-interactive scripted invocations don't deadlock; the REPL
-    /// swaps in `ReadlineApprover` at startup.
-    pub approver: Box<dyn Approver>,
     /// Optional handle on the parsed configuration. The `/provider` and
     /// `/model` slash commands need it to enumerate alternatives and
     /// build new providers. Tests construct agents without a config.
@@ -142,8 +136,7 @@ impl Agent {
             last_usage: None,
             session_usage: UsageTotals::default(),
             ledger: Ledger::default(),
-            policy: Box::new(ConfigPolicy::defaults()),
-            approver: Box::new(AlwaysApprove),
+            policy: Box::new(AllowAll),
             cfg: None,
             hooks: HookRegistry::new(),
             max_turns: None,
@@ -244,17 +237,9 @@ impl Agent {
         );
     }
 
-    /// Override the default policy. Pairs with `with_approver` for
-    /// REPL-vs-script approval ergonomics.
+    /// Override the default automatic tool policy.
     pub fn with_policy(mut self, policy: Box<dyn Policy>) -> Self {
         self.policy = policy;
-        self
-    }
-
-    /// Override the default approver. The REPL swaps in `ReadlineApprover`;
-    /// scripted `-p` mode keeps `AlwaysApprove`.
-    pub fn with_approver(mut self, approver: Box<dyn Approver>) -> Self {
-        self.approver = approver;
         self
     }
 
@@ -400,9 +385,7 @@ impl Agent {
     }
 
     /// Run a single tool call through the policy gate, then through the
-    /// tool registry. The returned string is what the model sees as the
-    /// tool result — including policy denials and user declines, which
-    /// are not errors at the agent level.
+    /// tool registry. Policy denials are tool results, not agent errors.
     async fn dispatch_with_policy(&self, name: &str, args: Value) -> String {
         let decision = self.policy.check(name, &args);
         match decision {
@@ -411,16 +394,6 @@ impl Agent {
                 Err(e) => format!("Error: {}", e),
             },
             Decision::Deny(reason) => format!("policy denied {}: {}", name, reason),
-            Decision::Ask(reason) => {
-                if self.approver.approve(name, &args, &reason).await {
-                    match self.tools.dispatch(name, args, &self.ctx).await {
-                        Ok(s) => s,
-                        Err(e) => format!("Error: {}", e),
-                    }
-                } else {
-                    format!("user declined {}: {}", name, reason)
-                }
-            }
         }
     }
 
@@ -1140,54 +1113,6 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("policy denied")
-        );
-    }
-
-    #[tokio::test]
-    async fn ask_decision_resolved_by_approver_returning_false_is_user_declined() {
-        struct AskAll;
-        impl Policy for AskAll {
-            fn check(&self, _: &str, _: &Value) -> Decision {
-                Decision::Ask("you sure?".into())
-            }
-        }
-        struct No;
-        #[async_trait]
-        impl crate::policy::Approver for No {
-            async fn approve(&self, _: &str, _: &Value, _: &str) -> bool {
-                false
-            }
-        }
-
-        let provider = FakeProvider::new(vec![
-            assistant_with_tool_calls(vec![tool_call("c1", "Echo", json!({}))]),
-            assistant_text("got it"),
-        ]);
-        let raw = std::sync::Arc::new(provider);
-        let provider_ref = raw.clone();
-
-        let mut tools = Registry::new();
-        tools.register(StaticTool {
-            name: "Echo",
-            out: "tool-output",
-        });
-
-        let mut agent = Agent::new(
-            Box::new(ScriptedProviderHandle(provider_ref.clone())),
-            tools,
-            "m".into(),
-        )
-        .with_policy(Box::new(AskAll))
-        .with_approver(Box::new(No));
-
-        agent.run("hi").await.unwrap();
-        let seen = provider_ref.requests();
-        let tool_msg = &seen[1].messages[2];
-        assert!(
-            tool_msg["content"]
-                .as_str()
-                .unwrap()
-                .contains("user declined")
         );
     }
 

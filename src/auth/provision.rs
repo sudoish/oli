@@ -306,14 +306,15 @@ kind = "openai-chatgpt"   # subscription
 [agent]
 max_turns = 40
 
-[policy]
-auto_allow = ["Read"]
+[mcp.servers.docs]
+kind = "streamable-http"
+url = "https://example.test/mcp"
 "#;
         let (out, _) = apply_str(input);
         assert!(out.contains("# my oli config"), "{out}");
         assert!(out.contains("# subscription"), "{out}");
         assert!(out.contains("max_turns = 40"), "{out}");
-        assert!(out.contains(r#"auto_allow = ["Read"]"#), "{out}");
+        assert!(out.contains("https://example.test/mcp"), "{out}");
     }
 
     #[test]

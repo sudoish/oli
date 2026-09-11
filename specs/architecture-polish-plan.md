@@ -24,6 +24,14 @@ exists.
 6. Keep the harness UI-agnostic; line, TUI, desktop, and headless clients should
    drive the same runtime contract.
 
+## Autonomy and review decision
+
+Normal runs execute tools automatically and never pause for per-call approval.
+`Policy` remains a deterministic embedder extension for hard denials, while
+`--strict` installs a deny-all policy. A future review mechanism should be a
+typed run checkpoint where the agent stops and returns control to its frontend,
+not another tool-permission prompt.
+
 ## Phase 1 — Establish current truth
 
 ### 1. Archive stale specs
@@ -62,7 +70,7 @@ cannot fully prove:
 - OpenRouter run
 - Anthropic native run
 - ChatGPT subscription auth
-- approval prompt flow
+- automatic tool execution and `--strict`
 - resume/edit invariant
 - external edit invalidation
 - plugin reload
@@ -143,7 +151,7 @@ agent concern at once.
 ### 7. Establish a frontend boundary
 
 The line REPL currently combines input, output, cancellation, progress
-rendering, approval, and slash-command dispatch. Preserve it as the bundled
+rendering, and slash-command dispatch. Preserve it as the bundled
 text frontend, but move the shared session behavior behind a library-side
 controller that another frontend can drive without copying the REPL.
 
@@ -152,7 +160,7 @@ Target shape:
 ```text
 src/runtime/
   mod.rs          # session controller and frontend-facing commands
-  event.rs        # owned events: content, tools, approval, completion, errors
+  event.rs        # owned events: content, tools, completion, errors
   snapshot.rs     # current session/provider/model/tool/health state
 
 src/frontends/
@@ -164,17 +172,16 @@ A future `tui` module or desktop binary should only need to:
 
 - submit prompts and slash/runtime commands;
 - consume typed, owned events;
-- answer approval requests through an `Approver`;
 - request cancellation;
 - render snapshots and events in its own way.
 
 Do not add a broad `Ui` trait. The stable boundary is a small command API plus
-events, snapshots, and the existing `Approver` seam. Framework-specific state,
-widgets, windows, and event loops stay in the frontend.
+events and snapshots. Framework-specific state, widgets, windows, and event
+loops stay in the frontend.
 
 Done when a test frontend can run and cancel a turn, observe tool progress,
-answer an approval, and inspect session state without reading stdin, writing
-stdout/stderr, or reaching into `Agent` fields.
+and inspect session state without reading stdin, writing stdout/stderr, or
+reaching into `Agent` fields.
 
 ### 8. Document the lifecycle in code and docs
 
@@ -202,11 +209,11 @@ reflected by module boundaries.
 Move policy/hook/dispatch details behind a small internal API, roughly:
 
 ```rust
-ToolExecutor::execute(call, ctx, policy, approver, hooks, registry).await
+ToolExecutor::execute(call, ctx, policy, hooks, registry).await
 ```
 
 Exact naming can differ. The point is that the main loop should ask for a tool
-call to be executed, not inline all approval/hook/mutation details.
+call to be executed, not inline hook/policy/dispatch details.
 
 Done when testing tool execution behavior does not require driving the whole
 agent loop.
@@ -288,7 +295,7 @@ Audit names across docs, config, slash commands, and code for:
 - provider/model
 - memory/context
 - transcript/session/conversation
-- policy/approval/allow-list
+- policy/tool execution/review
 - diagnostics/logging
 
 Done when user-facing language is consistent.

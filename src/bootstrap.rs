@@ -21,7 +21,6 @@ use crate::error::{AgentError, Result};
 use crate::ledger::{self, Ledger, PromptAccounting, RunIdentity, pricing};
 use crate::mcp;
 use crate::notes;
-use crate::policy::ConfigPolicy;
 use crate::providers;
 use crate::providers::Provider as ProviderTrait;
 use crate::tools::context::ReadLogger;
@@ -210,7 +209,6 @@ pub fn run_accounting_profile(
         "strategy": MEMORY_STRATEGY,
         "strategy_version": MEMORY_STRATEGY_VERSION,
         "max_turns": max_turns,
-        "policy_mode": format!("{:?}", cfg.policy.mode),
         "ctx_window": ctx_window,
         "ctx_window_authoritative": caps.ctx_window_is_authoritative,
         "context_target_tokens": cfg.agent.context_target_tokens,
@@ -307,10 +305,9 @@ pub fn build_run_accounting(
 /// `SubagentSpawner` impl that builds a fresh agent from config
 /// on each call. Each subagent has its own `LinearWithCompact`
 /// memory (no persistence — children are ephemeral by design)
-/// and inherits the parent's policy + capability registry. The
-/// result is the child's final assistant message; intermediate
-/// tool steps stay in the child's memory and are discarded when
-/// it returns.
+/// and uses the same provider and capability registry as its parent.
+/// The result is the child's final assistant message; intermediate tool
+/// steps stay in the child's memory and are discarded when it returns.
 pub struct DefaultAgentSpawner {
     pub cfg: Arc<Config>,
     pub provider_name: String,
@@ -335,10 +332,7 @@ impl SubagentSpawner for DefaultAgentSpawner {
         for tool in mcp::build_tools(&self.mcp_handles).await {
             tools.register_box(tool);
         }
-        let policy = Box::new(ConfigPolicy::from_config(&self.cfg.policy));
-
         let mut agent = Agent::new(provider, tools, model)
-            .with_policy(policy)
             .with_config(self.cfg.clone(), &self.provider_name)
             .with_max_turns(max_turns);
 

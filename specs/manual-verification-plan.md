@@ -112,7 +112,6 @@ Verify:
 
 - prompts produce ordered content, tool, and completion events;
 - events own their payloads and can cross a channel or process bridge;
-- approvals can be answered without terminal input;
 - cancellation preserves the same memory rollback invariant as the line REPL;
 - session, provider, model, tool, MCP-health, and cost state are available as
   snapshots rather than parsed terminal output;
@@ -121,19 +120,15 @@ Verify:
 Expected: a future TUI or desktop adapter can drive a session without importing
 rustyline, capturing stdout/stderr, or accessing private `Agent` internals.
 
-## Approval flow
+## Automatic tool execution
 
-Configure ask mode, then trigger an edit or gated bash command.
+Verify that the line REPL and ordinary headless runs execute read, edit, and
+shell tools without pausing for permission input. Then run a tool-using prompt
+with `oli run --strict`.
 
-Verify responses:
-
-- `y`: allow once
-- `n`: deny once
-- `a`: allow fingerprint for current process
-- `A`: persist fingerprint to `~/.config/oli/policy-allow.json`
-- `d`: deny fingerprint for current process
-
-Expected: persisted `A` survives restart.
+Expected: ordinary runs remain fully automatic; strict mode returns
+deterministic policy-denied tool results and never executes a tool or waits for
+input.
 
 ## Edit safety
 
@@ -216,7 +211,7 @@ Before tagging a release, complete:
 - [ ] headless text run
 - [ ] headless JSON run
 - [ ] one real provider smoke
-- [ ] approval flow if policy changed
+- [ ] automatic and strict tool execution if policy changed
 - [ ] plugin reload if plugins changed
 - [ ] MCP smoke if MCP changed
 - [ ] replay fixture if memory/ledger/provider shaping changed

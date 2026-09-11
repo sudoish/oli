@@ -427,9 +427,8 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
     }
 
     // ctx:tool(name, args) — async dispatch through the harness's tool
-    // registry. Goes through the registry but NOT through the agent's
-    // policy engine for now (plugins are user-trusted code; if the user's
-    // policy needs to gate plugin tool calls, that's a later refinement).
+    // registry. Plugins are user-installed code, so host calls execute
+    // directly rather than re-entering the model's dispatch pipeline.
     {
         let host_clone = host.clone();
         let tool_fn = lua.create_async_function(

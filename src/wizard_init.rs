@@ -109,8 +109,6 @@ pub fn render_toml(provider: WizardProvider, api_key: &str) -> String {
     out.push_str("\n[agent]\n");
     out.push_str("max_turns = 40\n");
     out.push_str("# context_target_tokens = 120000\n");
-    out.push_str("\n[policy]\n");
-    out.push_str("mode = \"auto\"\n");
     out
 }
 
@@ -374,10 +372,10 @@ mod tests {
     }
 
     #[test]
-    fn render_toml_makes_automatic_tool_execution_explicit() {
+    fn render_toml_needs_no_tool_approval_configuration() {
         let body = render_toml(WizardProvider::Ollama, "");
-        let cfg = crate::config::Config::from_str(&body).expect("must parse as Config");
-        assert_eq!(cfg.policy.mode, crate::policy::PolicyMode::Auto);
+        assert!(!body.contains("[policy]"));
+        crate::config::Config::from_str(&body).expect("must parse as Config");
     }
 
     #[test]
