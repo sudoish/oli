@@ -3,8 +3,7 @@
 //! Wraps an inner `Memory` and mirrors every state-mutating call to a
 //! line-delimited file under `~/.config/oli/sessions/<id>.jsonl`. On
 //! open, an existing file is replayed into the inner memory so the
-//! session resumes exactly where it left off (modulo compaction, which
-//! is internal restructuring and does not get logged).
+//! session resumes exactly where it left off.
 //!
 //! Format is `{"op": ..., "msg"?: ..., "n"?: ...}` per line. The op
 //! vocabulary mirrors the trait surface:
@@ -13,16 +12,17 @@
 //! - `record` — `msg` field carries the recorded message
 //! - `clear` — no payload
 //! - `truncate` — `n` field carries the new logical length
+//! - `restore` — `checkpoint` carries the complete state restored after a
+//!   cancelled command
 //! - `meta` — `meta` field names the model, provider and settings the
 //!   session ran under. Session identity, not conversation state:
 //!   replay stashes it for callers and applies nothing to memory.
 //!   Written whenever it differs from the last one on file, so
 //!   resuming under a different model is visible rather than implied.
 //!
-//! Compaction is *not* logged. The original records are still present
-//! in the transcript; replay reapplies them to a fresh inner memory and
-//! lets the new session re-derive its own summary if it ever crosses
-//! the compaction threshold again.
+//! Ordinary compaction is not logged because the original records remain
+//! replayable. A rollback checkpoint does include summary state so replay
+//! can reproduce the exact pre-command state after cancellation.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,7 +36,7 @@ use tokio::sync::Mutex;
 use crate::error::{AgentError, Result};
 use crate::tools::context::ReadLogger;
 
-use super::{CompactContext, ContextParts, Memory};
+use super::{CompactContext, ContextParts, Memory, MemoryCheckpoint};
 
 pub struct PersistedMemory {
     inner: Box<dyn Memory>,
@@ -216,6 +216,16 @@ impl Memory for PersistedMemory {
         self.inner.pinned().await
     }
 
+    async fn checkpoint(&self) -> MemoryCheckpoint {
+        self.inner.checkpoint().await
+    }
+
+    async fn restore(&mut self, checkpoint: MemoryCheckpoint) -> Result<()> {
+        self.append(json!({"op": "restore", "checkpoint": &checkpoint}))
+            .await?;
+        self.inner.restore(checkpoint).await
+    }
+
     fn len(&self) -> usize {
         self.inner.len()
     }
@@ -279,6 +289,15 @@ async fn replay_into(
             "truncate" => {
                 let n = v.get("n").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
                 let _ = mem.truncate(n).await;
+            }
+            "restore" => {
+                if let Some(checkpoint) = v
+                    .get("checkpoint")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                {
+                    let _ = mem.restore(checkpoint).await;
+                }
             }
             "read" => {
                 if let Some(p) = v.get("path").and_then(|x| x.as_str()) {

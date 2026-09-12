@@ -319,6 +319,11 @@ async fn load_one(
         for entry in slash_table.sequence_values::<Table>() {
             let entry = entry?;
             let s_name: String = entry.get("name")?;
+            if crate::repl::slash::is_builtin_name(&s_name) {
+                return Err(AgentError::Plugin(format!(
+                    "plugin slash command `/{s_name}` conflicts with a built-in command"
+                )));
+            }
             let s_desc: String = entry
                 .get::<Option<String>>("description")?
                 .unwrap_or_default();
@@ -427,9 +432,8 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
     }
 
     // ctx:tool(name, args) — async dispatch through the harness's tool
-    // registry. Goes through the registry but NOT through the agent's
-    // policy engine for now (plugins are user-trusted code; if the user's
-    // policy needs to gate plugin tool calls, that's a later refinement).
+    // registry. Plugins are user-installed code, so host calls execute
+    // directly rather than re-entering the model's dispatch pipeline.
     {
         let host_clone = host.clone();
         let tool_fn = lua.create_async_function(
@@ -476,8 +480,7 @@ fn build_ctx(lua: &Lua, host: HostShared) -> mlua::Result<Table> {
         ctx.set("write_file", f)?;
     }
 
-    // ctx:shell(cmd) — dispatches the Bash tool. Plugin authors get the
-    // same allowlist semantics as the model.
+    // ctx:shell(cmd) — sugar for direct dispatch of the Bash tool.
     {
         let host_clone = host.clone();
         let f = lua.create_async_function(move |_lua, (_self, cmd): (Table, String)| {
@@ -1030,6 +1033,28 @@ return p
         load_dir(dir.path(), empty_registry(), None, &mut out).await;
         assert_eq!(out.slash_commands.len(), 1);
         assert_eq!(out.slash_commands[0].name(), "demo");
+    }
+
+    #[tokio::test]
+    async fn plugin_cannot_shadow_a_builtin_slash_command() {
+        let dir = tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("slash.lua"),
+            r#"
+local p = { name = "slash-demo" }
+p.slash_commands = {
+  { name = "help", description = "shadow help",
+    execute = function(args, ctx) return "shadowed" end },
+}
+return p
+            "#,
+        )
+        .unwrap();
+        let mut out = LoadedPlugins::default();
+        load_dir(dir.path(), empty_registry(), None, &mut out).await;
+
+        assert!(out.slash_commands.is_empty());
+        assert!(out.manifest.is_empty());
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! TOML config — `~/.config/oli/config.toml` global, optionally
 //! layered with a project-local `.oli/config.toml`. The same
-//! `Config` is shared across the agent, providers, policy gate,
-//! tool registry, plugin loader, and MCP client.
+//! `Config` is shared across the agent, providers, tool registry,
+//! plugin loader, and MCP client.
 //!
 //! Sections (all optional except where noted):
 //! - `default_provider` (required) — picks which `[providers.<name>]`
@@ -9,7 +9,6 @@
 //! - `[providers.<name>]` — per-provider config; `kind` selects
 //!   the implementation (`anthropic`, `openai-compat`, …).
 //! - `[agent]` — per-run knobs: `max_turns`, compaction target.
-//! - `[policy]` — allow/deny rules and approval defaults.
 //! - `[[caps]]` — model-capability overrides (context window,
 //!   native-tools toggle, …) ahead of the hardcoded defaults.
 //! - `[[mcp.servers]]` — external MCP servers to dial at startup.
@@ -27,9 +26,8 @@ use std::path::{Path, PathBuf};
 
 use crate::error::{AgentError, Result};
 use crate::mcp::McpConfig;
-use crate::policy::PolicyConfig;
 
-/// Top-level harness config: providers, policy, plugins and subprocess
+/// Top-level harness config: providers, plugins and subprocess
 /// tools, with per-project overrides layered on top.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Config {
@@ -40,11 +38,6 @@ pub struct Config {
 
     #[serde(default)]
     pub providers: HashMap<String, ProviderConfig>,
-
-    /// Tool execution policy. A missing section runs tools automatically;
-    /// `mode = "ask"` enables the granular approval rules.
-    #[serde(default)]
-    pub policy: PolicyConfig,
 
     /// External tools registered as subprocesses (MCP-lite). Empty by
     /// default. Each `[[tools.subprocess]]` entry is wrapped in the
@@ -203,7 +196,12 @@ pub const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
 
 impl Config {
     pub fn from_str(s: &str) -> Result<Self> {
-        toml::from_str(s).map_err(|e| AgentError::Config(e.to_string()))
+        let value: toml::Value =
+            toml::from_str(s).map_err(|e| AgentError::Config(e.to_string()))?;
+        reject_approval_policy(&value)?;
+        value
+            .try_into()
+            .map_err(|e| AgentError::Config(e.to_string()))
     }
 
     /// Read + parse a single TOML file. The binary uses
@@ -254,11 +252,13 @@ impl Config {
         if let Some(global) = global {
             let value: toml::Value = toml::from_str(global)
                 .map_err(|e| AgentError::Config(format!("global config: {e}")))?;
+            reject_approval_policy(&value)?;
             merged = merge_config_layer(merged, value, &mut configured_providers);
         }
         if let Some(project) = project {
             let value: toml::Value = toml::from_str(project)
                 .map_err(|e| AgentError::Config(format!("project config: {e}")))?;
+            reject_approval_policy(&value)?;
             merged = merge_config_layer(merged, value, &mut configured_providers);
         }
         merged
@@ -285,7 +285,6 @@ impl Config {
             default_provider: "openrouter".to_string(),
             default_model: None,
             providers,
-            policy: PolicyConfig::default(),
             tools: ToolsConfig::default(),
             caps: Vec::new(),
             pricing: Vec::new(),
@@ -334,6 +333,17 @@ impl Config {
             ))
         })
     }
+}
+
+fn reject_approval_policy(value: &toml::Value) -> Result<()> {
+    if value.get("policy").is_some() {
+        return Err(AgentError::Config(
+            "the `[policy]` approval configuration has been removed; \
+             Oli now runs tools automatically, so remove that section"
+                .into(),
+        ));
+    }
+    Ok(())
 }
 
 fn env_default_value() -> toml::Value {
@@ -467,23 +477,12 @@ mod tests {
     }
 
     #[test]
-    fn missing_policy_mode_defaults_to_auto() {
-        let cfg = Config::from_str(SAMPLE).unwrap();
-        assert_eq!(cfg.policy.mode, crate::policy::PolicyMode::Auto);
-    }
-
-    #[test]
-    fn policy_mode_can_enable_approvals() {
-        let cfg = Config::from_str(&format!("{SAMPLE}\n[policy]\nmode = \"ask\"\n")).unwrap();
-        assert_eq!(cfg.policy.mode, crate::policy::PolicyMode::Ask);
-    }
-
-    #[test]
-    fn invalid_policy_mode_is_rejected() {
-        let err = Config::from_str(&format!("{SAMPLE}\n[policy]\nmode = \"sometimes\"\n"))
+    fn removed_approval_policy_is_rejected_instead_of_silently_ignored() {
+        let error = Config::from_str(&format!("{SAMPLE}\n[policy]\nmode = \"ask\"\n"))
             .unwrap_err()
             .to_string();
-        assert!(err.contains("unknown variant"), "{err}");
+        assert!(error.contains("approval configuration has been removed"));
+        assert!(error.contains("runs tools automatically"));
     }
 
     #[test]

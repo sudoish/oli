@@ -22,12 +22,13 @@ This doc covers everything after.
   calls.
 
 ### A2. Strict-mode flag
-- `--strict` flag flips `-p` from `AlwaysApprove` to `AlwaysDeny`.
-  Document in `--help`. `Decision::Ask` outcomes surface as
-  `user declined` tool results; the model can recover.
-- Files: `src/main.rs`.
-- Done when: `oli --strict -p "edit something"` returns the model's
-  recovery path with `user declined …` and exits 0.
+- Historical implementation: `--strict` originally replaced the interactive
+  approver with `AlwaysDeny`.
+- Current behavior: `oli run --strict` installs a deterministic deny-all policy;
+  normal runs execute tools automatically without approval decisions.
+- Current files: `src/bin/oli.rs`, `src/cli/run.rs`, `src/policy/mod.rs`.
+- Done when: `oli run --strict -p "edit something"` returns the model's
+  recovery path with a policy-denied tool result and exits 0.
 
 ### A3. Persist Edit read-set across `--resume`
 - Mirror `ToolContext::mark_read` writes to the session JSONL with a

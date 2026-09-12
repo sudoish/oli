@@ -1,13 +1,13 @@
 //! The agent loop — `Agent` ties together a `Provider`, a `Memory`,
-//! a `tools::Registry`, and the `Policy`/`Approver` gate into the
+//! a `tools::Registry`, and an optional hard-deny `Policy` into the
 //! think → call → observe loop the model drives.
 //!
 //! Two entry points:
 //! - [`Agent::run`] — one-shot prompt; returns a typed terminal outcome.
-//!   Used by the headless CLI and nested agents.
+//!   Used by nested agents and low-level embedders.
 //! - [`Agent::run_streaming`] — same loop but emits incremental
-//!   events (content chunks, tool starts/ends, usage updates) to a
-//!   user-supplied callback. Drives headless runs and the line REPL.
+//!   content and tool-call argument chunks to a
+//!   user-supplied callback. The frontend-neutral runtime wraps this API.
 //!
 //! `Agent::with_*` builder methods layer on optional pieces
 //! (memory strategy, hook registry, MCP handles, plugin manifest,
@@ -15,54 +15,41 @@
 //! which seals in the system prompt before the first turn.
 //!
 //! Submodules:
+//! - `run_loop` — think → call → observe sequencing.
+//! - `streaming` — provider stream forwarding and response assembly.
+//! - `compaction` — request preflight budgeting and compaction transactions.
+//! - `tool_exec` — policy, hook, and registry dispatch for one tool call.
 //! - [`memory`] — `Memory` trait and bundled implementations.
 //! - [`context`] — system-prompt builder (env, git, AGENTS.md, CLAUDE.md).
 //! - [`caps`] — model-capability table (context window, native
 //!   tools yes/no, streaming, etc.).
 
-use std::sync::Arc;
-use std::time::Instant;
-
 use serde_json::{Value, json};
+use std::sync::Arc;
 
 use crate::config::Config;
 use crate::error::Result;
-use crate::hooks::{HookRegistry, PreToolDecision};
-use crate::ledger::{CompactionMetrics, Latency, Ledger, as_ms, estimate_context, now_ms};
-use crate::policy::{AlwaysApprove, Approver, ConfigPolicy, Decision, Policy};
-use crate::providers::{ChatRequest, Provider, StreamEvent, StreamSink, Usage, UsageTotals};
+use crate::hooks::HookRegistry;
+use crate::ledger::Ledger;
+use crate::policy::{AllowAll, Policy};
+use crate::providers::{Provider, StreamEvent, Usage, UsageTotals};
 use crate::tools::{Registry, ToolContext};
 
-const MAX_COMPACTION_PASSES: usize = 8;
-
-/// Typed terminal state for one agent invocation. Callers that need to
-/// distinguish a model completion from a safety-boundary stop can inspect
-/// this enum returned by [`Agent::run`] and [`Agent::run_streaming`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunOutcome {
-    Completed(String),
-    MaxTurnsExhausted { limit: usize, message: String },
-}
-
-impl RunOutcome {
-    /// Require a completed response at a non-interactive composition boundary.
-    pub fn into_completed(self) -> Result<String> {
-        match self {
-            Self::Completed(text) => Ok(text),
-            Self::MaxTurnsExhausted { limit, .. } => {
-                Err(crate::error::AgentError::MaxTurnsExhausted(limit))
-            }
-        }
-    }
-}
-
 pub mod caps;
+mod compaction;
 pub mod context;
 pub mod memory;
+pub mod outcome;
+mod run_loop;
+mod streaming;
+mod tool_exec;
 pub mod tool_parse;
 
 pub use caps::{ModelCaps, RequestBudget, caps_for, caps_for_with_overrides};
 pub use memory::{CompactContext, CompactionReport, LinearWithCompact, Memory};
+pub use outcome::RunOutcome;
+
+pub(crate) type ToolStartedObserver = Arc<dyn Fn(&str, &Value) + Send + Sync>;
 
 pub struct Agent {
     pub provider: Box<dyn Provider>,
@@ -95,14 +82,8 @@ pub struct Agent {
     /// (in memory, and on disk when a session sink is attached); only
     /// `Ledger::summary` is shaped for export.
     pub ledger: Ledger,
-    /// Gate every tool call. Default is `ConfigPolicy::defaults()` (Read /
-    /// Glob / Grep auto-allow, Edit / Write / Bash ask, common dev shell
-    /// commands on the bash allowlist).
+    /// Deterministic gate for tool calls. The default allows every call.
     pub policy: Box<dyn Policy>,
-    /// Resolves `Decision::Ask` outcomes. Default is `AlwaysApprove` so
-    /// non-interactive scripted invocations don't deadlock; the REPL
-    /// swaps in `ReadlineApprover` at startup.
-    pub approver: Box<dyn Approver>,
     /// Optional handle on the parsed configuration. The `/provider` and
     /// `/model` slash commands need it to enumerate alternatives and
     /// build new providers. Tests construct agents without a config.
@@ -126,6 +107,7 @@ pub struct Agent {
     /// model turn. Empty by default; the binary populates this at
     /// startup.
     pub mcp_handles: Arc<Vec<crate::mcp::McpHandle>>,
+    pub(crate) tool_started_observer: Option<ToolStartedObserver>,
     ctx: ToolContext,
 }
 
@@ -142,13 +124,13 @@ impl Agent {
             last_usage: None,
             session_usage: UsageTotals::default(),
             ledger: Ledger::default(),
-            policy: Box::new(ConfigPolicy::defaults()),
-            approver: Box::new(AlwaysApprove),
+            policy: Box::new(AllowAll),
             cfg: None,
             hooks: HookRegistry::new(),
             max_turns: None,
             plugin_manifest: Vec::new(),
             mcp_handles: Arc::new(Vec::new()),
+            tool_started_observer: None,
             ctx: ToolContext::new(),
         }
     }
@@ -244,17 +226,9 @@ impl Agent {
         );
     }
 
-    /// Override the default policy. Pairs with `with_approver` for
-    /// REPL-vs-script approval ergonomics.
+    /// Override the default automatic tool policy.
     pub fn with_policy(mut self, policy: Box<dyn Policy>) -> Self {
         self.policy = policy;
-        self
-    }
-
-    /// Override the default approver. The REPL swaps in `ReadlineApprover`;
-    /// scripted `-p` mode keeps `AlwaysApprove`.
-    pub fn with_approver(mut self, approver: Box<dyn Approver>) -> Self {
-        self.approver = approver;
         self
     }
 
@@ -343,85 +317,7 @@ impl Agent {
     /// returns — strategies that decide there's nothing to compact (too
     /// few messages) report success without changing state.
     pub async fn force_compact(&mut self) -> Result<()> {
-        let parts = self.memory.snapshot_parts().await;
-        let tool_schemas = self.tools.openai_schemas();
-        let before = estimate_context(&parts, &tool_schemas);
-        let budget = self.request_budget();
-        let compaction_hard_limit = budget
-            .hard_limit_is_authoritative
-            .then_some(budget.hard_limit_tokens)
-            .unwrap_or(usize::MAX);
-        let report = self
-            .memory
-            .maybe_compact(CompactContext {
-                provider: self.provider.as_ref(),
-                model: &self.model,
-                target_tokens: 0,
-                hard_limit_tokens: compaction_hard_limit,
-                next_request_tokens: usize::try_from(before.total).unwrap_or(usize::MAX),
-            })
-            .await?;
-        if let Some(report) = report {
-            let after = estimate_context(&self.memory.snapshot_parts().await, &tool_schemas);
-            let metrics = CompactionMetrics::new(
-                before,
-                after,
-                0,
-                budget.hard_limit_tokens,
-                report.estimated,
-                report.usage,
-            );
-            let turn = self.ledger.summary().turns.saturating_add(1);
-            self.record_compaction(turn, report, metrics).await;
-        }
-        Ok(())
-    }
-
-    async fn record_compaction(
-        &mut self,
-        turn: u32,
-        report: CompactionReport,
-        metrics: CompactionMetrics,
-    ) {
-        self.session_usage.add(report.usage);
-        if let Some(usage) = report.usage {
-            self.last_usage = Some(usage);
-        }
-        self.ledger
-            .record_compaction_started(
-                report.started_at_ms,
-                turn,
-                metrics,
-                report.estimated,
-                report.usage,
-                report.latency,
-            )
-            .await;
-    }
-
-    /// Run a single tool call through the policy gate, then through the
-    /// tool registry. The returned string is what the model sees as the
-    /// tool result — including policy denials and user declines, which
-    /// are not errors at the agent level.
-    async fn dispatch_with_policy(&self, name: &str, args: Value) -> String {
-        let decision = self.policy.check(name, &args);
-        match decision {
-            Decision::Allow => match self.tools.dispatch(name, args, &self.ctx).await {
-                Ok(s) => s,
-                Err(e) => format!("Error: {}", e),
-            },
-            Decision::Deny(reason) => format!("policy denied {}: {}", name, reason),
-            Decision::Ask(reason) => {
-                if self.approver.approve(name, &args, &reason).await {
-                    match self.tools.dispatch(name, args, &self.ctx).await {
-                        Ok(s) => s,
-                        Err(e) => format!("Error: {}", e),
-                    }
-                } else {
-                    format!("user declined {}: {}", name, reason)
-                }
-            }
-        }
+        compaction::force(self).await
     }
 
     /// Append `prompt` as a user turn, run the loop until the assistant
@@ -444,233 +340,19 @@ impl Agent {
     where
         F: FnMut(StreamEvent<'_>) + Send,
     {
-        self.memory
-            .record(json!({ "role": "user", "content": prompt }))
-            .await?;
-
-        let first_turn = self.ledger.next_turn();
-        let mut invocation_turn = 0usize;
-        loop {
-            if let Some(cap) = self.max_turns {
-                if invocation_turn >= cap {
-                    let msg = format!("(max_turns reached: {})", cap);
-                    let msg = self.hooks.dispatch_stop(msg).await;
-                    return Ok(RunOutcome::MaxTurnsExhausted {
-                        limit: cap,
-                        message: msg,
-                    });
-                }
-            }
-            let turn = first_turn.saturating_add(invocation_turn as u32);
-            invocation_turn += 1;
-
-            let build_started = Instant::now();
-            // Sync MCP tools that have notified `tools/list_changed`
-            // since the last turn. Cost on a quiet turn is one atomic
-            // load per server; on a turn where a server pushed an
-            // update, we refetch its `tools/list` and swap registry
-            // entries so the model can see the deltas on this turn.
-            if !self.mcp_handles.is_empty() {
-                let deltas = crate::mcp::refresh_changed_tools(self.mcp_handles.as_ref()).await;
-                for d in deltas {
-                    for name in d.removed {
-                        self.tools.remove(&name);
-                    }
-                    for tool in d.added {
-                        self.tools.register_box(tool);
-                    }
-                }
-            }
-            // Materialize and estimate the request that is about to be
-            // sent. Provider usage describes an earlier request and may
-            // be absent, so it must never control this decision.
-            let tool_schemas = self.tools.openai_schemas();
-            let mut parts = self.memory.snapshot_parts().await;
-            let mut estimated = estimate_context(&parts, &tool_schemas);
-            let budget = self.request_budget();
-            let compaction_hard_limit = budget
-                .hard_limit_is_authoritative
-                .then_some(budget.hard_limit_tokens)
-                .unwrap_or(usize::MAX);
-            let compact_started = Instant::now();
-            for _ in 0..MAX_COMPACTION_PASSES {
-                let compaction = match self
-                    .memory
-                    .maybe_compact(CompactContext {
-                        provider: self.provider.as_ref(),
-                        model: &self.model,
-                        target_tokens: budget.target_tokens,
-                        hard_limit_tokens: compaction_hard_limit,
-                        next_request_tokens: usize::try_from(estimated.total).unwrap_or(usize::MAX),
-                    })
-                    .await
-                {
-                    Ok(report) => report,
-                    Err(error) => {
-                        crate::log_warn!(
-                            "compaction failed; retaining the unchanged request context: {error}"
-                        );
-                        break;
-                    }
-                };
-                let Some(report) = compaction else {
-                    break;
-                };
-                parts = self.memory.snapshot_parts().await;
-                let after = estimate_context(&parts, &tool_schemas);
-                let metrics = CompactionMetrics::new(
-                    estimated,
-                    after,
-                    budget.target_tokens,
-                    budget.hard_limit_tokens,
-                    report.estimated,
-                    report.usage,
-                );
-                self.record_compaction(turn, report, metrics).await;
-                if after.total >= estimated.total || after.total <= budget.target_tokens as u64 {
-                    estimated = after;
-                    break;
-                }
-                estimated = after;
-            }
-            let compaction_ms = as_ms(compact_started.elapsed());
-            if budget.hard_limit_is_authoritative
-                && estimated.total > budget.hard_limit_tokens as u64
-            {
-                return Err(crate::error::AgentError::Config(format!(
-                    "materialized request estimate {} exceeds hard context limit {} after compaction",
-                    estimated.total, budget.hard_limit_tokens
-                )));
-            }
-
-            let req = ChatRequest {
-                model: self.model.clone(),
-                messages: parts.flatten(),
-                tools: tool_schemas,
-            };
-            let mut latency = Latency {
-                context_build_ms: as_ms(build_started.elapsed()),
-                compaction_ms,
-                ..Latency::default()
-            };
-
-            let request_started_at_ms = now_ms();
-            let model_started = Instant::now();
-            // Time to first token is only observable from the stream,
-            // and only when the turn produces text at all — a pure
-            // tool-call round exposes nothing to time.
-            let mut ttft = None;
-            let resp = {
-                let mut timed = |ev: StreamEvent<'_>| {
-                    if ttft.is_none() && matches!(ev, StreamEvent::Content(_)) {
-                        ttft = Some(as_ms(model_started.elapsed()));
-                    }
-                    sink(ev);
-                };
-                let sink_dyn: StreamSink<'_> = &mut timed;
-                self.provider.chat_stream(req, sink_dyn).await?
-            };
-            latency.model_ms = as_ms(model_started.elapsed());
-            latency.ttft_ms = ttft;
-            self.session_usage.add(resp.usage);
-            if let Some(u) = resp.usage {
-                self.last_usage = Some(u);
-            }
-
-            // Models without native tool-call support sometimes emit calls
-            // as raw JSON in `content`. Splice the parsed calls into the
-            // assistant message *before* recording so the model's next
-            // turn sees a coherent (assistant with tool_calls) → (tool
-            // result) sequence.
-            let mut message = resp.message.clone();
-            let mut tool_calls = message
-                .get("tool_calls")
-                .and_then(|v| v.as_array())
-                .cloned()
-                .unwrap_or_default();
-
-            if tool_calls.is_empty() && !self.caps.supports_native_tool_calls {
-                if let Some(content) = message.get("content").and_then(|v| v.as_str()) {
-                    if let Some(parsed) = tool_parse::parse_text_tool_calls(content) {
-                        tool_calls = parsed.clone();
-                        message["tool_calls"] = Value::Array(parsed);
-                    }
-                }
-            }
-
-            self.memory.record(message).await?;
-
-            if tool_calls.is_empty() {
-                self.ledger
-                    .record_started(request_started_at_ms, turn, estimated, resp.usage, latency)
-                    .await;
-                let content = resp
-                    .message
-                    .get("content")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let content = self.hooks.dispatch_stop(content).await;
-                return Ok(RunOutcome::Completed(content));
-            }
-
-            let tools_started = Instant::now();
-            for call in &tool_calls {
-                let id = call.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let name = call
-                    .get("function")
-                    .and_then(|f| f.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
-                let args_str = call
-                    .get("function")
-                    .and_then(|f| f.get("arguments"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}");
-                let args: Value = serde_json::from_str(args_str).unwrap_or_else(|_| json!({}));
-
-                // Pre-hooks compose: `Replace` mutates the args the
-                // policy + tool will see; the first `Skip` short-circuits
-                // dispatch with a synthetic result. Post-hooks still
-                // fire afterwards so observers and redactors run on
-                // whatever the model is about to see.
-                let decision = self.hooks.dispatch_pre_tool_use(name, args).await;
-                let (final_args, raw_result) = match decision {
-                    PreToolDecision::Continue { args } => {
-                        let r = self.dispatch_with_policy(name, args.clone()).await;
-                        (args, r)
-                    }
-                    PreToolDecision::Skip { args, result } => (args, result),
-                };
-                let result = self
-                    .hooks
-                    .dispatch_post_tool_use(name, &final_args, raw_result)
-                    .await;
-
-                self.memory
-                    .record(json!({
-                        "role": "tool",
-                        "tool_call_id": id,
-                        "content": result,
-                    }))
-                    .await?;
-            }
-            latency.tool_ms = as_ms(tools_started.elapsed());
-            self.ledger
-                .record_started(request_started_at_ms, turn, estimated, resp.usage, latency)
-                .await;
-        }
+        run_loop::run(self, prompt, sink).await
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::providers::ChatResponse;
+    use crate::policy::Decision;
     use crate::providers::fake::{FakeProvider, NeverCalled};
+    use crate::providers::{ChatRequest, ChatResponse, StreamSink};
     use crate::tools::Tool;
     use async_trait::async_trait;
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     fn assistant_text(content: &str) -> Value {
         json!({ "role": "assistant", "content": content })
@@ -1140,54 +822,6 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("policy denied")
-        );
-    }
-
-    #[tokio::test]
-    async fn ask_decision_resolved_by_approver_returning_false_is_user_declined() {
-        struct AskAll;
-        impl Policy for AskAll {
-            fn check(&self, _: &str, _: &Value) -> Decision {
-                Decision::Ask("you sure?".into())
-            }
-        }
-        struct No;
-        #[async_trait]
-        impl crate::policy::Approver for No {
-            async fn approve(&self, _: &str, _: &Value, _: &str) -> bool {
-                false
-            }
-        }
-
-        let provider = FakeProvider::new(vec![
-            assistant_with_tool_calls(vec![tool_call("c1", "Echo", json!({}))]),
-            assistant_text("got it"),
-        ]);
-        let raw = std::sync::Arc::new(provider);
-        let provider_ref = raw.clone();
-
-        let mut tools = Registry::new();
-        tools.register(StaticTool {
-            name: "Echo",
-            out: "tool-output",
-        });
-
-        let mut agent = Agent::new(
-            Box::new(ScriptedProviderHandle(provider_ref.clone())),
-            tools,
-            "m".into(),
-        )
-        .with_policy(Box::new(AskAll))
-        .with_approver(Box::new(No));
-
-        agent.run("hi").await.unwrap();
-        let seen = provider_ref.requests();
-        let tool_msg = &seen[1].messages[2];
-        assert!(
-            tool_msg["content"]
-                .as_str()
-                .unwrap()
-                .contains("user declined")
         );
     }
 

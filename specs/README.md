@@ -12,10 +12,15 @@ will land alongside it as `specs/<topic>.md`.
 | Doc                                 | What's there                                                                                                                |
 | ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | **[`specs/README.md`](README.md)** (you are here) | High-level mission, principles, in/out of scope, architecture sketch, configuration shape, plugin contract, roadmap, success criteria. |
+| [`docs/current-architecture.md`](../docs/current-architecture.md) | Current runtime lifecycle, module ownership, persistence, extension surfaces, and frontend boundary.                              |
+| [`docs/manual-verification.md`](../docs/manual-verification.md) | Release and structural-change checks involving real providers, terminals, credentials, and persistence.                         |
 | [`specs/progress.md`](progress.md)  | Phase ledger with commit SHAs, and dated smoke-test results. History, not current state.                                   |
 | [`specs/roadmap.md`](roadmap.md)    | Post-MCP follow-ups (phases A–E): daily-driver safety, hooks, plugin reload, caching/parity, plugin caps, RAG, MCP refresh. All DONE. |
-| [`specs/review-2.md`](review-2.md)  | Deep review #2 (rated 9/10). Strengths + persistent weaknesses that drove the polish plan.                                  |
-| [`specs/polish.md`](polish.md)      | The 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, packaging.                              |
+| [`specs/archive/review-2.md`](archive/review-2.md) | Historical deep review #2 (rated 9/10). Strengths and weaknesses that drove the earlier polish plan.                    |
+| [`specs/archive/polish.md`](archive/polish.md) | Historical 9/10 → 10/10 polish plan: cleanup, library split, diagnostics, persistent state, and packaging.                |
+| [`specs/architecture-polish-plan.md`](architecture-polish-plan.md) | Current plan to make the codebase easier to navigate and its runtime reusable by line, headless, TUI, or desktop frontends.    |
+| [`specs/current-architecture-doc-outline.md`](current-architecture-doc-outline.md) | Implementation outline retained alongside the completed current-state architecture doc.                                      |
+| [`specs/manual-verification-plan.md`](manual-verification-plan.md) | Planning source retained alongside the completed manual verification guide.                                                  |
 | [`specs/private-agent-roadmap.md`](private-agent-roadmap.md) | Product and content roadmap for private remote workstations, model and MCP service planes, and privacy-preserving operations. |
 | [`specs/memory.md`](memory.md)      | `Memory` trait design — pluggable strategies (linear+compact default, RAG, graph, hierarchical).                            |
 | [`specs/mcp.md`](mcp.md)            | MCP client design. stdio + streamable-http transports, tools/list_changed refresh, `/mcp` slash command.                    |
@@ -23,8 +28,9 @@ will land alongside it as `specs/<topic>.md`.
 | [`AGENTS.md`](../AGENTS.md)         | Module map and working discipline. The closest thing to a current-state doc.                                                |
 
 If you want to **use** oli, start with [`docs/cheatsheet.md`](../docs/cheatsheet.md) and `oli init`.
-If you want to **understand** oli, read this README → `progress.md` → whichever
-phase doc matches what you're poking at.
+If you want to **understand** oli, start with
+[`docs/current-architecture.md`](../docs/current-architecture.md), then use the
+feature specs for the subsystem you are changing.
 If you want to **extend** oli, the public API surface is in [`src/lib.rs`](../src/lib.rs);
 `cargo doc --no-deps --open` renders the per-module overviews.
 
@@ -50,8 +56,9 @@ Build a coding agent that:
    appears.
 4. **Config over code.** New tool, new model, new external integration → edit
    TOML, don't recompile.
-5. **Focused autonomy, controls on demand.** Tools execute automatically by
-   default; users can opt into approval prompts with policy config.
+5. **Focused autonomy.** Tools execute automatically without per-call prompts.
+   Embedders can install a deterministic policy for hard denials; review
+   checkpoints are a separate run-control concept.
 6. **Local-first.** Every decision considers a 7B-parameter model on consumer
    hardware: small context, flaky tool-call format, slow first token.
 
@@ -62,7 +69,7 @@ Build a coding agent that:
 - Native Anthropic provider — only when prompt caching is the goal.
 - Tool surface: `Read`, `Write`, `Edit`, `Bash`, `Grep`, `Glob`, `Task`
   (subagent).
-- Permission/policy system, config-driven.
+- Optional deterministic policy extension for hard denials.
 - Slash commands.
 - Two-tier extensibility:
   - **Subprocess tools (MCP-lite)** — language-agnostic external binaries.
@@ -104,8 +111,7 @@ src/
 │   ├── task.rs          # Phase 3: subagent
 │   └── subprocess.rs    # Phase 2: external tools
 ├── policy/
-│   ├── mod.rs           # Policy trait + default
-│   └── config.rs
+│   └── mod.rs           # Policy trait, allow-all default, deny-all strict mode
 ├── plugins/
 │   ├── mod.rs           # Plugin loader, lifecycle, registration
 │   ├── host.rs          # Host API exposed to plugin scripts
@@ -137,12 +143,6 @@ kind          = "openai-compat"
 base_url      = "https://openrouter.ai/api/v1"
 api_key_env   = "OPENROUTER_API_KEY"
 default_model = "anthropic/claude-haiku-4.5"
-
-[policy]
-mode            = "ask"
-auto_allow      = ["Read", "Glob", "Grep"]
-ask             = ["Write", "Edit"]
-bash_allowlist  = ["git status", "git diff", "cargo *", "ls *"]
 
 [[tools.subprocess]]
 name        = "MyCustomTool"
@@ -177,9 +177,8 @@ capabilities, subprocess tools are for wrapping existing binaries.
   manifest beyond what the file itself declares.
 - **Compose harness capabilities.** Plugins can run prompts, call other
   tools, ask the user — without re-implementing agent plumbing.
-- **Sandboxed enough.** A misbehaving plugin can't trash the user's machine.
-  Shell, file, and tool access flow through the same policy engine as
-  built-in tools.
+- **Sandboxed enough.** A plugin cannot access raw shell or filesystem APIs.
+  Shell, file, and tool access flow through registered harness tools and hooks.
 - **Distributable as a single file.** No `node_modules`-style trees. Copy a
   `.lua` file into the plugins dir and it works.
 
@@ -247,8 +246,8 @@ hook handler):
 ctx:prompt(text)              -> string    -- one-shot LLM call, current model
 ctx:prompt_with(opts)         -> string    -- prompt + tools + max_turns + system
 ctx:tool(name, args)          -> value     -- invoke a registered tool
-ctx:run_tool(name, args)      -> value     -- alias for tool(); subject to policy
-ctx:shell(cmd)                -> string    -- runs through Bash + policy
+ctx:run_tool(name, args)      -> value     -- alias for tool()
+ctx:shell(cmd)                -> string    -- runs through the Bash tool
 ctx:read_file(path)           -> string
 ctx:write_file(path, content)
 ctx:log(level, msg)
@@ -258,7 +257,7 @@ ctx:set_state(key, value)
 ```
 
 `ctx:prompt(...)` is the lever. It runs a fresh agent loop with the same
-provider/model/policy the user is on, returns the assistant's final message,
+provider/model the user is on, returns the assistant's final message,
 and lets plugins compose prompts with code without re-doing the agent
 plumbing. Effectively the same machinery as the `Task` subagent tool, exposed
 as an API.
@@ -292,11 +291,9 @@ and isolated — it does not crash the session.
 - Plugin Lua sandbox removes `os.execute`, `os.exit`, `io.popen`, raw `io`
   filesystem access, and `package.loadlib`. Equivalents are exposed via
   `ctx:shell` / `ctx:read_file` / `ctx:write_file`, which all flow through
-  the harness policy engine.
-- Plugin shell calls go through the same `Policy::check` as built-in tool
-  calls. There is no privileged plugin path.
-- Plugins do not bypass user-facing approval prompts; a plugin that wants to
-  run an unfamiliar shell command will be asked the same way a model would.
+  registered harness tools.
+- Plugins are user-installed code. Their explicit host calls execute
+  automatically rather than re-entering the model tool-dispatch pipeline.
 
 ### Design constraints flowing earlier
 
@@ -362,8 +359,8 @@ Ollama, navigate this repo, and make a non-trivial code change without
 babysitting.
 
 ### Phase 2 — Flexibility surface (~2d)
-- Policy engine: `Policy::check(tool, args, cwd) -> Allow | Ask | Deny`. Default
-  policy reads from config.
+- Policy extension: `Policy::check(tool, args, cwd) -> Allow | Deny`. The
+  bundled runtime defaults to allow-all; `--strict` installs deny-all.
 - Slash commands: `/clear`, `/help`, `/model`, `/provider`, `/cost`, `/compact`,
   `/system`, `/tools`. `/model` lists Ollama tags via `/api/tags`.
 - Subprocess tool registration (MCP-lite). External binary speaks JSON over
@@ -383,7 +380,7 @@ add three config lines.
   `~/.config/oli/plugins/` and `<project>/.oli/plugins/`, expose host
   API (`ctx:prompt`, `ctx:tool`, `ctx:shell`, ...), wire plugin-registered
   tools / slash commands / hooks into the corresponding registries. Sandbox
-  removes raw `os`/`io` access; everything flows through the policy engine.
+  removes raw `os`/`io` access; capabilities flow through explicit host APIs.
 - `/plugins` and `/plugins reload` slash commands.
 - Native Ollama provider — only if grammar-constrained / `format: "json"`
   output is needed to fix tool-call reliability on stubborn models.

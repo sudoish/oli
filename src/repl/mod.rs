@@ -6,19 +6,16 @@
 //! Slash commands live in [`slash`], so `/help`, `/cost`, `/clear`,
 //! `/sessions` and plugin- or MCP-registered slashes stay available.
 //!
-//! [`ProgressHook`] surfaces tool calls inline (`→ Read(file=…)`)
-//! so the user sees what's happening; the binary registers it
-//! only in interactive mode so scripted `-p` runs stay quiet.
+//! Runtime tool events are rendered inline (`→ Read(file=…)`) so the
+//! user sees progress while scripted runs remain quiet.
 
-use async_trait::async_trait;
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 use serde_json::Value;
 use std::io::Write;
 
-use crate::agent::{Agent, RunOutcome};
 use crate::error::{AgentError, Result};
-use crate::hooks::{Hook, HookOutcome, HookPayload};
+use crate::runtime::{CancellationToken, RuntimeCommand, RuntimeEvent, SessionRuntime};
 
 pub mod slash;
 
@@ -32,7 +29,7 @@ const PROMPT: &str = "> ";
 /// `reloader`, when supplied, wires `/plugins reload` to a re-scan of
 /// the plugin directories.
 pub async fn run(
-    mut agent: Agent,
+    mut runtime: SessionRuntime,
     plugin_slashes: Vec<Box<dyn slash::SlashCommand>>,
     reloader: Option<std::sync::Arc<crate::plugins::PluginReloader>>,
 ) -> Result<()> {
@@ -81,7 +78,7 @@ pub async fn run(
                 println!("{}", slash::render_help(&registry));
                 continue;
             }
-            match registry.dispatch(rest, &mut agent).await {
+            match registry.dispatch(rest, runtime.agent_mut()).await {
                 Some(SlashOutcome::Continue(Some(msg))) => println!("{msg}"),
                 Some(SlashOutcome::Continue(None)) => {}
                 Some(SlashOutcome::Exit) => break Ok(()),
@@ -106,10 +103,10 @@ pub async fn run(
             continue;
         }
 
-        run_turn(&mut agent, trimmed).await;
+        run_turn(&mut runtime, trimmed).await;
     };
 
-    agent.ledger.finish().await;
+    runtime.finish().await;
     result
 }
 
@@ -117,75 +114,46 @@ pub async fn run(
 /// On cancellation, conversation history is truncated back to its
 /// pre-turn length so the next turn doesn't carry a half-completed
 /// state into the prompt.
-async fn run_turn(agent: &mut Agent, prompt: &str) {
-    let saved_len = agent.memory.len();
-    let mut sink = |ev: crate::providers::StreamEvent<'_>| {
-        if let crate::providers::StreamEvent::Content(s) = ev {
-            print!("{s}");
-            let _ = std::io::stdout().flush();
+async fn run_turn(runtime: &mut SessionRuntime, prompt: &str) {
+    let cancellation = CancellationToken::new();
+    let signal = cancellation.clone();
+    let signal_task = tokio::spawn(async move {
+        if tokio::signal::ctrl_c().await.is_ok() {
+            signal.cancel();
         }
-        // ToolArgsChunk events are ignored in line-mode REPL — the
-        // line REPL deliberately omits streaming-diff previews.
-    };
-
-    let cancelled;
-    {
-        let fut = agent.run_streaming(prompt, &mut sink);
-        tokio::pin!(fut);
-
-        tokio::select! {
-            biased;
-            _ = tokio::signal::ctrl_c() => {
-                cancelled = true;
-            }
-            r = &mut fut => {
-                cancelled = false;
-                match r {
-                    Ok(RunOutcome::Completed(_)) => println!(),
-                    Ok(RunOutcome::MaxTurnsExhausted { message, .. }) => {
-                        println!("\n{message}")
-                    }
-                    Err(e) => crate::log_error!("\nerror: {e}"),
+    });
+    let result = runtime
+        .execute(
+            RuntimeCommand::Prompt(prompt.to_string()),
+            &cancellation,
+            |event| match event {
+                RuntimeEvent::Content { text } => {
+                    print!("{text}");
+                    let _ = std::io::stdout().flush();
                 }
-            }
-        }
-    }
-
-    if cancelled {
-        if let Err(e) = agent.memory.truncate(saved_len).await {
-            crate::log_error!("failed to truncate memory on cancel: {e}");
-        }
-        println!("\n(cancelled)");
-    }
-}
-
-/// Live progress indicator for tool rounds. Prints a one-line
-/// `→ Tool(args)` to stderr on `PreToolUse` so the user sees what
-/// the model is reaching for *before* it runs. Stays on stderr so
-/// it doesn't interleave with the streamed assistant content on
-/// stdout. Args are clipped to fit a single line.
-pub struct ProgressHook;
-
-#[async_trait]
-impl Hook for ProgressHook {
-    fn name(&self) -> &str {
-        "progress"
-    }
-
-    async fn handle(&self, payload: &HookPayload<'_>) -> HookOutcome {
-        if let HookPayload::PreToolUse { tool, args } = payload {
-            let preview = preview_args(args, 60);
-            let line = if preview.is_empty() {
-                format!("→ {}\n", tool)
-            } else {
-                format!("→ {}({})\n", tool, preview)
-            };
-            let mut err = std::io::stderr();
-            let _ = err.write_all(line.as_bytes());
-            let _ = err.flush();
-        }
-        HookOutcome::Continue
-    }
+                RuntimeEvent::ToolStarted { name, args } => {
+                    let preview = preview_args(&args, 60);
+                    let line = if preview.is_empty() {
+                        format!("→ {name}\n")
+                    } else {
+                        format!("→ {name}({preview})\n")
+                    };
+                    let mut err = std::io::stderr();
+                    let _ = err.write_all(line.as_bytes());
+                    let _ = err.flush();
+                }
+                RuntimeEvent::Completed { .. } => println!(),
+                RuntimeEvent::MaxTurnsExhausted { message, .. } => {
+                    println!("\n{message}")
+                }
+                RuntimeEvent::Cancelled => println!("\n(cancelled)"),
+                RuntimeEvent::Error { message } => crate::log_error!("\nerror: {message}"),
+                RuntimeEvent::ToolCallDelta { .. } => {}
+            },
+        )
+        .await;
+    signal_task.abort();
+    let _ = result;
 }
 
 /// Single-line, char-bounded preview of tool args. Picks a couple of

@@ -202,7 +202,7 @@ spawn; missing variables fail the server's startup with a clear error.
 
 Project config (`<project>/.oli/config.toml`) can add servers, override
 fields on global servers, or disable them via `enabled = false`. The
-overlay rules already used for providers/policy apply unchanged.
+overlay rules already used for providers apply unchanged.
 
 ## Lifecycle
 
@@ -222,18 +222,10 @@ overlay rules already used for providers/policy apply unchanged.
 
 ## Policy & hooks
 
-MCP tools route through the existing gate — no new policy axis.
-Suggested defaults (config-tunable):
-
-```toml
-[policy.mcp]
-default = "ask"             # any MCP tool requires approval first time per session
-auto_allow_pure_reads = true # "get_*", "list_*", "search_*" name-prefix heuristic
-```
-
-The "approve once per session" pattern fits MCP well because users
-typically don't want to micromanage every Linear `get_issue` after the
-first. The Approver UX gains a "Always for this server / tool" choice.
+MCP tools execute automatically through the same dispatch path as built-in
+tools. There is no MCP-specific permission mode or per-call prompt. An
+embedder-supplied `Policy` can deterministically hard-deny a namespaced tool,
+and `--strict` denies all tools.
 
 `PreToolUse` and `PostToolUse` hooks fire for MCP calls just like
 built-in tools. A hook can inspect the namespaced name and gate or
@@ -286,7 +278,7 @@ per cache window, not per turn.
 | Phase | What lands |
 | --- | --- |
 | 5a | `McpTransport` trait, `StdioTransport`, `McpServer` lifecycle, `tools/list` + `tools/call`, `Tool` impl, `Registry` registration, `[[mcp.servers]]` config, `/mcp` slash. Linear or Playwright as the first integration we exercise end-to-end. |
-| 5b | `HttpTransport` (streamable-http), per-server `allow`/`deny` filtering, `/mcp restart`, policy `default = "ask"` + `auto_allow_pure_reads`. |
+| 5b | `HttpTransport` (streamable-http), per-server `allow`/`deny` filtering, and `/mcp restart`. |
 | 5c | `resources/list` + `resources/read` exposed as a built-in `McpResource` tool (one tool, server+uri arg) so we don't multiply tool count by N resources. `prompts/list` as discoverable slash commands. |
 | 5d | OAuth flow (browser-spawn, callback listener) for hosted servers that need it. SSE transport if any target server demands it. |
 
@@ -349,7 +341,8 @@ Surprisingly little.
   before constructing `Agent`.
 - `Agent::new` is unchanged. MCP servers attach by registering tools
   into the same `Registry`.
-- `policy/mod.rs` gains an MCP-aware default branch (~30 LOC).
+- MCP tools reuse the existing tool dispatch path without an MCP-specific
+  policy branch.
 - `repl/slash.rs` adds `/mcp` (~80 LOC).
 - `tools/subprocess.rs` is untouched.
 

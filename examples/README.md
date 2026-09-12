@@ -81,7 +81,7 @@ Every tool/hook/slash callback receives a `ctx` table:
 | `ctx:tool(name, args)` | Dispatch any host tool by name. Returns the tool's string result. Async — Lua suspends until it resolves. |
 | `ctx:read_file(path)` | Sugar for `ctx:tool("Read", {file_path = path})`. |
 | `ctx:write_file(path, content)` | Sugar for `ctx:tool("Write", ...)`. |
-| `ctx:shell(cmd)` | Sugar for `ctx:tool("Bash", {command = cmd})`. Policy-gated. |
+| `ctx:shell(cmd)` | Sugar for `ctx:tool("Bash", {command = cmd})`. |
 | `ctx:prompt(text)` | Spawn a fresh subagent and return its final message. Capped at 10 turns. |
 | `ctx:get_state(key)` / `ctx:set_state(key, value)` | Per-plugin, per-session key/value bag. Persists across calls in one session; resets at process exit. |
 | `ctx:ask_user(question)` | Blocking stdin read. Freezes the loop until the user answers — use sparingly. |
@@ -96,7 +96,7 @@ Every tool/hook/slash callback receives a `ctx` table:
 | `{ replace = value }` from `post_tool_use` | Substitute the tool result with `value`. `value` may be a string or a JSON-encodable table. |
 
 Hooks fire **before** the policy gate, so a plugin can short-circuit a
-Bash call before the bash_allowlist even sees it. Dispatch order, from
+Bash call before it executes. Dispatch order, from
 `src/agent/mod.rs`: `pre_tool_use → policy → tool → post_tool_use`.
 
 ### Sandbox
@@ -104,8 +104,8 @@ Bash call before the bash_allowlist even sees it. Dispatch order, from
 Plugins run in a sandboxed Lua state. Removed globals: `os`, `io`,
 `require`, `dofile`, `loadfile`, `debug`, and `package.loadlib`. The
 intent is that filesystem and shell access flows through `ctx:read_file`
-/ `ctx:write_file` / `ctx:shell` — which go through the same policy gate
-as the model's own tool calls — rather than bypassing it.
+/ `ctx:write_file` / `ctx:shell` rather than raw Lua APIs. Plugins are
+user-installed code, and these explicit host calls execute automatically.
 
 ### Naming gotcha
 

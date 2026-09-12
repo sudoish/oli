@@ -11,18 +11,17 @@ The compact reference for Oli's headless CLI and optional line REPL.
 | `oli run --conversation <id> -p "continue"` | Append a turn to a saved conversation. |
 | `oli run --continue -p "continue"` | Append to the most recently modified conversation. |
 | `oli run --output json -p "..."` | Print one JSON object containing conversation id, response, provider, model, and usage. |
-| `oli run --strict -p "..."` | Force ask-mode policy and deny every unresolved approval non-interactively. |
+| `oli run --strict -p "..."` | Deny every tool call for a model-only run. |
 | `oli run --max-turns N -p "..."` | Override `[agent].max_turns` for this run. |
 
 Text mode writes only the final response to stdout and writes
 `conversation: <id>` to stderr. Diagnostics and failures also use stderr.
-Headless runs never wait for an approval answer.
+Headless runs execute tools automatically unless `--strict` disables them.
 
 ## Interactive REPL
 
 Invoke `oli` without a subcommand. The REPL prints its session id, streams
-progress in the terminal, and supports interactive approval when policy mode is
-`ask`.
+progress in the terminal, and executes tools without permission prompts.
 
 | Input | Action |
 | --- | --- |
@@ -46,29 +45,18 @@ progress in the terminal, and supports interactive approval when policy mode is
 | `/plugins` / `/plugins reload` | Inspect or reload Lua plugins. |
 | `/mcp` | Show MCP server health and restart failed servers. |
 | `/config reload` | Reload global and project configuration. |
-| `/paths` | Print resolved config, session, note, plugin, and policy paths. |
+| `/paths` | Print resolved config, session, note, plugin, and MCP credential paths. |
 | `/diagnostics` | Show local operational warnings. |
 | `/exit` | Exit the REPL. |
-
-## Approval answers in the REPL
-
-| Answer | Effect |
-| --- | --- |
-| `y` | Allow this invocation. |
-| `n` | Deny this invocation. |
-| `a` | Allow this fingerprint for the current process. |
-| `A` | Persist the fingerprint in `~/.config/oli/policy-allow.json`. |
-| `d` | Deny this fingerprint for the current process. |
 
 ## Files
 
 | Path | Contents |
 | --- | --- |
-| `~/.config/oli/config.toml` | Global provider, model, policy, MCP, and tool configuration. |
+| `~/.config/oli/config.toml` | Global provider, model, MCP, and tool configuration. |
 | `$XDG_CONFIG_HOME/oli/mcp-auth/` (default `~/.config/oli/mcp-auth/`) | Owner-only OAuth credentials for hosted MCP servers. |
 | `<project>/.oli/config.toml` | Project-scoped overlay found by walking upward from cwd. |
 | `~/.config/oli/sessions/<id>.jsonl` | Persisted conversation transcript and read-set events. |
-| `~/.config/oli/policy-allow.json` | Persisted approval fingerprints. |
 | `~/.config/oli/plugins/` | Global Lua plugins. |
 | `<project>/.oli/notes/` | Long-term notes used by the notes tools. |
 

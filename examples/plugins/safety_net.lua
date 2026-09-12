@@ -4,7 +4,7 @@
 -- result and can recover by trying a different approach.
 --
 -- This is illustrative, not exhaustive — real safety belongs in the
--- policy engine (auto_allow / bash_allowlist in config.toml). Use the
+-- policy extension. Use the
 -- pattern here for project-specific guards that policy doesn't cover
 -- ("don't touch /etc in this repo", "block git push --force", etc.).
 

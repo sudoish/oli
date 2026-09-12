@@ -480,7 +480,7 @@ fn a_run_explains_its_tokens_cost_and_latency_by_context_category() {
 }
 
 #[test]
-fn strict_mode_denies_approval_requests_without_blocking_or_stdout_noise() {
+fn strict_mode_denies_tool_calls_without_blocking_or_stdout_noise() {
     let server = TestServer::start();
     server.push_tool_call(
         "Bash",
@@ -515,7 +515,7 @@ fn strict_mode_denies_approval_requests_without_blocking_or_stdout_noise() {
         .as_str()
         .unwrap()
         .to_string();
-    assert!(tool_result.contains("user declined Bash"), "{tool_result}");
+    assert!(tool_result.contains("policy denied Bash"), "{tool_result}");
     assert!(
         !sandbox
             .cwd

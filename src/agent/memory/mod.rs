@@ -6,6 +6,7 @@
 //! trait; `[memory] kind` selects one.
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Result;
@@ -64,9 +65,22 @@ pub trait Memory: Send + Sync {
         Vec::new()
     }
 
+    /// Capture all conversation state that a command may mutate. The
+    /// returned value is opaque to callers and can be handed back to
+    /// `restore` if the command does not commit.
+    async fn checkpoint(&self) -> MemoryCheckpoint {
+        MemoryCheckpoint::from_parts(self.snapshot_parts().await, self.len())
+    }
+
+    /// Restore a prior command checkpoint. The default is correct for
+    /// strategies whose command-time mutations only append records.
+    async fn restore(&mut self, checkpoint: MemoryCheckpoint) -> Result<()> {
+        self.truncate(checkpoint.len).await
+    }
+
     /// Number of raw records since the last `clear()`. Counts entries the
     /// caller passed to `record`, not pinned messages and not internally
-    /// managed summary state. Used by the REPL for Ctrl-C rollback.
+    /// managed summary state.
     fn len(&self) -> usize;
 
     /// Roll back to a prior `len()`. For `LinearWithCompact` this is a
@@ -86,6 +100,27 @@ pub trait Memory: Send + Sync {
         _ctx: CompactContext<'_>,
     ) -> Result<Option<CompactionReport>> {
         Ok(None)
+    }
+}
+
+/// Opaque, serializable state used to roll a command's memory transaction
+/// back without making callers understand a memory strategy's internals.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct MemoryCheckpoint {
+    pinned: Vec<Value>,
+    summary: Vec<Value>,
+    recent: Vec<Value>,
+    len: usize,
+}
+
+impl MemoryCheckpoint {
+    fn from_parts(parts: ContextParts, len: usize) -> Self {
+        Self {
+            pinned: parts.pinned,
+            summary: parts.summary,
+            recent: parts.recent,
+            len,
+        }
     }
 }
 

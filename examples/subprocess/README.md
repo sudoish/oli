@@ -94,10 +94,9 @@ Verification trick: pass an input whose sort order is obviously not
 the input order (e.g. `{"zeta":1,"alpha":2}`). If the reply doesn't
 flip the keys, the model didn't actually call the tool.
 
-Headless mode denies unresolved `Ask` policy decisions; the REPL prompts
-`[approve] FormatJson [y/N]` on first use of an unfamiliar tool. To
-silence that in the REPL, approve once with session-allow, or add an
-`auto_allow` entry for `FormatJson` in your config.
+Oli executes subprocess tools automatically in normal runs. `--strict` denies
+all tool calls, and an embedder-supplied `Policy` can deterministically deny
+selected calls.
 
 ## When tier 1 isn't enough
 

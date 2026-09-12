@@ -410,6 +410,7 @@ mod tests {
 
     #[test]
     fn default_options_target_the_real_issuer() {
+        let _guard = crate::auth::CLIENT_ID_ENV_LOCK.lock().unwrap();
         let opts = LoginOptions::default();
         assert_eq!(opts.issuer, "https://auth.openai.com");
         assert!(!opts.client_id.is_empty());

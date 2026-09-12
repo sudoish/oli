@@ -5,7 +5,7 @@
 //! - `PreToolUse` — before the policy check, so a hook sees the model's
 //!   intent regardless of whether it ends up running.
 //! - `PostToolUse` — after dispatch, with the result string the model
-//!   will see (including "policy denied" / "user declined" outcomes).
+//!   will see (including policy-denied outcomes).
 //! - `Stop` — once the loop returns a final assistant message with no
 //!   further tool calls.
 //!
