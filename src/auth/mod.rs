@@ -73,6 +73,9 @@ pub const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 /// Env var that overrides [`CLIENT_ID`].
 pub const CLIENT_ID_ENV: &str = "OLI_CHATGPT_CLIENT_ID";
 
+#[cfg(test)]
+pub(crate) static CLIENT_ID_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Scopes requested at authorize time. `offline_access` is what earns
 /// the refresh token; without it every session would need a browser.
 pub const SCOPES: &str =
@@ -186,6 +189,7 @@ mod tests {
 
     #[test]
     fn client_id_honors_nonblank_environment_overrides() {
+        let _guard = CLIENT_ID_ENV_LOCK.lock().unwrap();
         let previous = std::env::var_os(CLIENT_ID_ENV);
 
         // SAFETY: all mutations of this process-wide variable are kept in this

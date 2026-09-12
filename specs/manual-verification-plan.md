@@ -8,7 +8,9 @@ before releases or after large architectural moves.
 Run these first:
 
 ```sh
-export XDG_CONFIG_HOME="$(mktemp -d)"
+OLI_VERIFICATION_CONFIG="$(mktemp -d)"
+export XDG_CONFIG_HOME="$OLI_VERIFICATION_CONFIG"
+trap 'rm -rf -- "$OLI_VERIFICATION_CONFIG"' EXIT
 cargo test
 cargo build --release
 cargo doc --no-deps --lib

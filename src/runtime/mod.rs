@@ -205,9 +205,11 @@ impl SessionRuntime {
 
         let Some(result) = result else {
             if let Err(error) = self.agent.memory.restore(checkpoint).await {
+                self.run_state = RunState::Failed;
                 sink(RuntimeEvent::Error {
                     message: format!("failed to restore memory on cancel: {error}"),
                 });
+                return Err(error);
             }
             self.run_state = RunState::Cancelled;
             sink(RuntimeEvent::Cancelled);
@@ -546,6 +548,46 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct RestoreFailsMemory {
+        records: Vec<serde_json::Value>,
+    }
+
+    #[async_trait]
+    impl crate::agent::Memory for RestoreFailsMemory {
+        async fn record(&mut self, message: serde_json::Value) -> Result<()> {
+            self.records.push(message);
+            Ok(())
+        }
+
+        async fn snapshot(&self) -> Vec<serde_json::Value> {
+            self.records.clone()
+        }
+
+        async fn pin(&mut self, message: serde_json::Value) -> Result<()> {
+            self.records.push(message);
+            Ok(())
+        }
+
+        async fn restore(&mut self, _: crate::agent::memory::MemoryCheckpoint) -> Result<()> {
+            Err(crate::error::AgentError::Config("restore failed".into()))
+        }
+
+        fn len(&self) -> usize {
+            self.records.len()
+        }
+
+        async fn truncate(&mut self, n: usize) -> Result<()> {
+            self.records.truncate(n);
+            Ok(())
+        }
+
+        async fn clear(&mut self) -> Result<()> {
+            self.records.clear();
+            Ok(())
+        }
+    }
+
     struct SummarizeThenCancelProvider {
         cancellation: CancellationToken,
     }
@@ -589,6 +631,40 @@ mod tests {
         assert_eq!(events, vec![RuntimeEvent::Cancelled]);
         assert_eq!(runtime.agent.memory.len(), 0);
         assert_eq!(runtime.snapshot().await.run_state, RunState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn failed_cancellation_restore_fails_the_command() {
+        let agent = Agent::new(
+            Box::new(PendingProvider),
+            Registry::new(),
+            "test-model".into(),
+        )
+        .with_memory(Box::new(RestoreFailsMemory::default()));
+        let mut runtime = SessionRuntime::new(agent, "s1");
+        let cancellation = CancellationToken::new();
+        let trigger = cancellation.clone();
+        tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            trigger.cancel();
+        });
+        let mut events = Vec::new();
+
+        let error = runtime
+            .execute(
+                RuntimeCommand::Prompt("discard me".into()),
+                &cancellation,
+                |event| events.push(event),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("restore failed"));
+        assert!(matches!(
+            events.as_slice(),
+            [RuntimeEvent::Error { message }] if message.contains("restore failed")
+        ));
+        assert_eq!(runtime.snapshot().await.run_state, RunState::Failed);
     }
 
     #[tokio::test]

@@ -11,7 +11,9 @@ Run the entire checklist with an isolated configuration so destructive setup
 commands and test credentials cannot affect the user's real configuration:
 
 ```sh
-export XDG_CONFIG_HOME="$(mktemp -d)"
+OLI_VERIFICATION_CONFIG="$(mktemp -d)"
+export XDG_CONFIG_HOME="$OLI_VERIFICATION_CONFIG"
+trap 'rm -rf -- "$OLI_VERIFICATION_CONFIG"' EXIT
 ```
 
 ## Baseline
